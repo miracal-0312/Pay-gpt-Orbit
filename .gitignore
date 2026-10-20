@@ -18,6 +18,9 @@ product_files/
 data/hcaptcha-config.json
 data/browser-pool/
 data/logs/
+data/*
+!data/.gitkeep
+data-*/
 scratch/
 mail.txt
 

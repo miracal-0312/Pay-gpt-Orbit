@@ -10,7 +10,7 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
             if (!code || !code.is_active || code.used_at || code.type !== '自助') return null;
             if (String(code.plan_type || 'plus') !== String(planType)) return null;
             const unfinished = await runQuery(`SELECT job_key FROM task_logs WHERE cdk_code = ?
-                AND orbitcard_state IN ('prepared','submitting','pending','manual','success') LIMIT 1`, [cdk], options);
+                AND (status IN ('running','manual') OR orbitcard_state IN ('prepared','submitting','pending','manual','success')) LIMIT 1`, [cdk], options);
             if (unfinished.length) return null;
             const task = await createTaskLog({ tokenPreview: email || 'Orbitcard', cdkCode: cdk, status: 'running', progress: 3 }, options);
             const identity = require('./orbitcard-cdk').clientOrderNo(cdk, task.jobKey);

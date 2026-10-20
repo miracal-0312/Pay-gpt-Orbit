@@ -45,7 +45,7 @@ test('third-party client always uses the signed Orbitcard routes, ignoring obsol
 });
 
 async function migrate(saved) {
-    const source = fs.readFileSync(path.resolve(__dirname, '../mysql-store.js'), 'utf8');
+    const source = fs.readFileSync(path.resolve(__dirname, '../mysql-core.js'), 'utf8');
     const code = source.slice(source.indexOf('async function ensureGptApiConfigDefaults()'), source.indexOf('async function getGptApiConfig()'));
     const connection = {};
     const keys = ['gpt_api_enabled','gpt_api_base_url','gpt_api_key','gpt_api_protocol_version','orbitcard_card_id','orbitcard_region','orbitcard_max_fee'];
@@ -114,29 +114,25 @@ test('saving an unchanged key and clearing optional fields works without protoco
 });
 
 test('enabling third-party mode dispatches Orbitcard for a CDK without any provider selector', async () => {
-    const source = fs.readFileSync(path.resolve(__dirname, '../server.js'), 'utf8');
-    const code = source.slice(source.indexOf('async function handleActivationRequest'), source.indexOf("app.post('/api/run-process'"));
     const session = { accessToken: 'synthetic-token', user: { email: 'target@example.test' }, account: {} };
     let claims = 0, submissions = 0;
     const deps = {
-        parseSessionJson: () => session, normalizeSessionToken: () => session.accessToken, getClientIp: () => '',
-        validateAccessToken: () => ({ valid: true }), ensureStoreReady: async () => {}, activeForegroundJobs: new Set(),
-        getRemainingCooldownMinutes: () => 0, buildStoredSessionPayload: () => JSON.stringify(session),
-        logTask: () => {}, reserveForegroundSlot: () => {},
-        runGptApiWorker: async input => { submissions++; assert.equal(input.task.orbitcardClientOrderNo, 'cdk-current-attempt'); },
+        ensureStoreReady: async () => {}, activeJobs: new Set(), log() {},
+        runWorker: async input => { submissions++; assert.equal(input.task.orbitcardClientOrderNo, 'cdk-current-attempt'); },
         store: {
             getMaintenanceModeState: async () => ({}), getMaxConcurrentActivations: async () => 5,
             verifyCdkDetails: async () => ({ type: '自助', plan_type: 'plus' }), getRunningTaskByCdk: async () => null,
             getGptApiConfig: async () => ({ enabled: true, api_key: 'test-key', base_url: 'https://orbitcard.test', orbitcard_card_id: '42' }),
-            createOrbitcardTask: async input => { claims++; assert.equal(input.cdk, 'CDK-TEST'); return { jobKey: 'job1', orbitcardClientOrderNo: 'cdk-current-attempt' }; },
-            markCdkUsed: async () => { throw new Error('Unexpected local flow'); },
-            hasAvailableCard: async () => { throw new Error('Unexpected local card pool'); }
+            createOrbitcardTask: async input => { claims++; assert.equal(input.cdk, 'CDK-TEST'); return { jobKey: 'job1', orbitcardClientOrderNo: 'cdk-current-attempt' }; }
         }
     };
-    const handler = new Function(...Object.keys(deps), `return (${code});`)(...Object.values(deps));
+    const handler = require('../activation-service')(deps);
     let payload;
     const res = { status() { return this; }, json(data) { payload = data; return data; } };
-    await handler({ body: { cdk: 'CDK-TEST', session: JSON.stringify(session) }, path: '/api/run-process' }, res);
+    const old = process.env.ORBITCARD_API_SECRET;
+    process.env.ORBITCARD_API_SECRET = 'test-secret';
+    try { await handler({ body: { cdk: 'CDK-TEST', session: JSON.stringify(session) } }, res); }
+    finally { if (old === undefined) delete process.env.ORBITCARD_API_SECRET; else process.env.ORBITCARD_API_SECRET = old; }
     assert.equal(payload.success, true);
     assert.equal(payload.provider, 'orbitcard');
     assert.equal(claims, 1);

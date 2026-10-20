@@ -225,17 +225,14 @@ test('query ownership mismatch preserves the CDK and does not persist credential
 });
 
 test('activation errors before acquiring a CDK cannot roll back somebody else’s lock', async () => {
-    const source = fs.readFileSync(path.resolve(__dirname, '../server.js'), 'utf8');
-    const code = source.slice(source.indexOf('async function handleActivationRequest'), source.indexOf("app.post('/api/run-process'"));
     let rollbacks = 0;
-    const deps = { parseSessionJson: () => ({}), normalizeSessionToken: () => 'token', getClientIp: () => '',
-        validateAccessToken: () => ({ valid: true }), ensureStoreReady: async () => {}, activeForegroundJobs: new Set(),
+    const deps = { ensureStoreReady: async () => {}, activeJobs: new Set(),
         store: { getMaintenanceModeState: async () => ({}), getMaxConcurrentActivations: async () => 5,
-            verifyCdkDetails: async () => { throw new Error('temporary database error'); }, markCdkUnused: async () => { rollbacks++; } } };
-    const handler = new Function(...Object.keys(deps), `return (${code});`)(...Object.values(deps));
+            verifyCdkDetails: async () => { throw new Error('temporary database error'); }, settleOrbitcardTask: async () => { rollbacks++; } } };
+    const handler = require('../activation-service')(deps);
     let status;
     const res = { status(n) { status = n; return this; }, json(data) { return data; } };
-    await handler({ body: { cdk: 'CDK-TEST', session: 'session' }, path: '/api/run-process' }, res);
-    assert.equal(status, 500);
+    await handler({ body: { cdk: 'CDK-TEST', session: JSON.stringify({ accessToken: 'token', user: { email: 'user@example.test' }, account: {} }) } }, res);
+    assert.equal(status, 503);
     assert.equal(rollbacks, 0);
 });

@@ -5,7 +5,7 @@ const axios = require('axios');
 const EVENT_LABELS = {
     success: '✅ 开通成功',
     failure: '❌ 开通失败',
-    card_pool_empty: '⚠️ 卡池已耗尽',
+    pending: '⏳ 订阅结果待确认',
     admin_login_success: '🔐 后台登录成功',
     admin_login_failed: '⛔ 后台登录失败',
     admin_2fa_failed: '⛔ 后台二次验证失败',
@@ -89,11 +89,8 @@ function shouldNotifyEvent(settings, event) {
     if (event === 'success') {
         return Boolean(settings.on_success);
     }
-    if (event === 'failure') {
+    if (event === 'failure' || event === 'pending') {
         return Boolean(settings.on_failure);
-    }
-    if (event === 'card_pool_empty') {
-        return Boolean(settings.on_card_pool_empty);
     }
     return false;
 }
@@ -202,14 +199,6 @@ async function sendTelegramTest(store, payload = {}) {
     return { success: true, message: `测试消息已发送到 ${results.length} 个目标` };
 }
 
-function isCardPoolExhaustedIssue(rawOutput, analysis) {
-    const text = String(rawOutput || '');
-    const message = String(analysis?.message || '');
-    return text.includes('card_pool_exhausted')
-        || text.includes('卡池资产枯竭')
-        || message.includes('卡池');
-}
-
 module.exports = {
     formatTelegramMessage,
     sendTelegramMessage,
@@ -217,6 +206,5 @@ module.exports = {
     notifyTelegramEvent,
     notifyAdminSecurityEvent,
     sendTelegramLoginCode,
-    sendTelegramTest,
-    isCardPoolExhaustedIssue
+    sendTelegramTest
 };

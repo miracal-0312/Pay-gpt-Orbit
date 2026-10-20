@@ -18,10 +18,9 @@ const loginAttempts = new Map();
 const tgLoginCodes = new Map();
 
 function resolveAdminTokenSecret() {
-    return process.env.ADMIN_TOKEN_SECRET || crypto
-        .createHash('sha256')
-        .update(`web_redeem:${process.cwd()}:admin-token-secret`)
-        .digest('hex');
+    const secret = process.env.ADMIN_TOKEN_SECRET || '';
+    if (Buffer.byteLength(secret) < 32) throw new Error('请配置至少 32 字节的随机 ADMIN_TOKEN_SECRET');
+    return secret;
 }
 
 function encodeBase64Url(input) {
@@ -373,10 +372,18 @@ function pickDefaultLogin2faMethod(methods = [], preferred = '') {
 }
 
 function createRequireSecondaryAuth(store, ensureStoreReady) {
-    // 已取消后台二级密码：直接放行，仅保留管理员登录鉴权（authenticateAdmin）
     return async function requireSecondaryAuth(req, res, next) {
-        req.secondaryAuth = { bypassed: true };
-        return next();
+        try {
+            const payload = verifySecondaryToken(String(req.headers['x-admin-secondary-token'] || '').trim());
+            if (!payload) return res.status(403).json({ success: false, secondaryRequired: true, message: '请先验证二级密码' });
+            await ensureStoreReady();
+            const config = await store.getAdminAuthConfig();
+            if (Number(payload.sv) !== config.secondaryPasswordVersion || payload.ip !== getClientMeta(req).ip) {
+                return res.status(403).json({ success: false, secondaryRequired: true, message: '二级验证已失效，请重新验证' });
+            }
+            req.secondaryAuth = payload;
+            return next();
+        } catch (_) { return res.status(503).json({ success: false, message: '二级验证暂不可用' }); }
     };
 }
 

@@ -5,16 +5,16 @@ const inFlight = new Map();
 const recent = new Map();
 
 async function refresh({ cfg, task, persist }) {
+    if (!task.orbitcard_client_order_no) throw new Error('该任务未绑定 Orbitcard 订单');
+    if (String(cfg.base_url || '').replace(/\/+$/, '') !== String(task.orbitcard_base_url || '').replace(/\/+$/, '')) {
+        throw new Error('当前 API 地址与原订单平台不同，请恢复原平台配置后查单');
+    }
     if (inFlight.has(task.job_key)) return inFlight.get(task.job_key);
     const now = Date.now();
     const cached = recent.get(task.job_key);
     if (cached?.until > now) return { ...cached.result, retryAfterMs: cached.until - now };
     for (const [key, value] of recent) if (value.until <= now) recent.delete(key);
     const pending = (async () => {
-        if (!task.orbitcard_client_order_no) throw new Error('该任务未绑定 Orbitcard 订单');
-        if (String(cfg.base_url || '').replace(/\/+$/, '') !== String(task.orbitcard_base_url || '').replace(/\/+$/, '')) {
-            throw new Error('当前 API 地址与原订单平台不同，请恢复原平台配置后查单');
-        }
         const result = await api.request({ ...cfg, auditJobKey: task.job_key }, 'getSubscription', task.gpt_api_order_id
             ? { task_no: task.gpt_api_order_id } : { client_order_no: task.orbitcard_client_order_no });
         if (!result.success) return { success: false, error: result.error, retryAfterMs: result.retryAfterMs || 5000,

@@ -1,44 +1,45 @@
-# Orbitcard 代充接入说明
+# Orbitcard 接入说明
 
-第三方代充统一使用 **Orbitcard HMAC V1**。完整接口、签名字段及响应语义以 [orbitcard-subscription-api-v1.md](orbitcard-subscription-api-v1.md) 为准。环境与部署步骤见 [DEPLOY.md](DEPLOY.md)，CDK 套餐映射见 [README.md](README.md#启用-orbitcard)。
+本项目仅支持 Orbitcard HMAC V1。平台完整协议保留在 [orbitcard-subscription-api-v1.md](orbitcard-subscription-api-v1.md)，充值状态、异常恢复和审计规则见 [RECHARGE-AUDIT.md](RECHARGE-AUDIT.md)。
 
-## 配置位置
+## 服务端配置
 
-| 参数 | 设置位置 |
-|------|----------|
-| HMAC Secret | 服务端环境变量 `ORBITCARD_API_SECRET`，或项目根目录 `.env` |
-| API 根域名 | 后台第三方代充配置，默认 `https://orbitcard.cc` |
-| API Key | 同上，必须与服务端 Secret 配对 |
-| 平台卡 ID | 同上，填写本人的正整数卡 ID |
-| 支付地区、最高 USDT 服务费 | 同上，可选 |
-| 是否接收第三方代充 | 同上，配置完整后启用 |
+在 `.env` 设置平台签发的 `ORBITCARD_API_SECRET`，后台设置配对 API Key、HTTPS 根域名和本人平台卡 ID，再启用新订单。平台卡 ID 为正整数，不是银行卡号。
 
-不在 `.env` 中配置 API Key、平台卡 ID 或开关。后台无需选择协议。更新 Secret 后裸机重启应用，Docker 执行 `docker compose up -d --force-recreate app`。
+订阅调用需要 `subscriptions:read`、`subscriptions:create` 权限，余额查询另需 `account:read`。连接测试只查询套餐和余额，不创建订阅。
 
-## 调用与权限
+项目向平台发送 `POST /api/open/v1/<operation>`，使用 HMAC-SHA256-V1 对精确请求字节、主机、路径、时间戳、随机数及幂等键签名，不使用旧充值 Bearer 协议。
 
-| 接口（均为 POST） | 用途 | 权限 |
-|------------------|------|------|
-| `/api/open/v1/getSubscriptionPlans` | 查询开放套餐 | `subscriptions:read` |
-| `/api/open/v1/getSubscriptionPaymentRegions` | 查询当前套餐地区 | `subscriptions:read` |
-| `/api/open/v1/createSubscription` | CDK 兑换时创建订阅 | `subscriptions:create` |
-| `/api/open/v1/getSubscription` | 查询原订阅订单 | `subscriptions:read` |
-| `/api/open/v1/getAccountBalance` | 后台余额展示 | `account:read` |
+## 用户入口
 
-通过平台 `/api/open/v1/getCardList` 查找卡 ID 需要 `cards:read`，本项目后台需手工填写取得的 ID。
+| 请求 | 用途 |
+| --- | --- |
+| `POST /api/verify-cdk`，`{cdk}` | 验证卡密、套餐和已有任务 |
+| `POST /api/run-process`，`{cdk,session}` | 以完整 Session JSON 兑换 CDK |
+| `POST /api/cdk/orbitcard/status`，`{cdk}` | 查询原订单，不创建新订阅 |
+| `GET /api/cdk/query?cdk=...` | 只读查询卡密状态；客户端优先使用 POST 验证入口 |
+| `GET /api/public/runtime` | 当前任务数量和并发容量 |
+| `GET /api/health` | 应用和数据库可用状态 |
 
-请求通过 `X-API-Key`、`X-Timestamp`、`X-Nonce` 和 `X-Signature` 鉴权，签名覆盖真实 JSON 请求体和下单幂等键。仅使用 HTTPS 根域名，不向旧代充服务发送请求。
+提交示例：
 
-## CDK 关联
+```json
+{
+  "cdk": "YOUR-CDK",
+  "session": "{\"user\":{\"email\":\"customer@example.com\"},\"account\":{},\"accessToken\":\"完整真实令牌\"}"
+}
+```
 
-开启开关或测试连接不会下单。用户提交有效 CDK 与完整 Session JSON 后，系统事务占用 CDK 并持久化本次客户订单身份，再向 Orbitcard 创建订阅。
+示例只说明外层格式，实际提交应复制目标账号的完整真实 Session，不要只构造示例字段。Session 不保存到新任务数据库，客户端也不应保存它。
 
-成功核销；明确失败或明确拒绝释放；超时、断网及未知结果保留占用。刷新、重启和手动查询均查询原订单，不会创建替代订单。服务费状态独立于订阅结果。
+任务受理返回 `provider=orbitcard` 和 `jobKey`。已有历史未结算任务可能返回 `provider=history`，必须人工核对，不会恢复本地支付。接单停用或配置缺失返回 503；容量已满返回 429；已存在任务优先恢复原任务。
 
-结果查询入口为 `POST /api/cdk/orbitcard/status`，提交当前 CDK，由服务端查找对应订单。验证码入口按上游响应即时展示，不保存验证链接或 Orbitcard Session 到代充任务日志。
+查单返回 `data.status`、`order_id`、`client_order_no`、`cdk_state` 和安全订单摘要。未知结果保留 CDK。存在验证任务时，`captcha` 只包含短时 HTTPS 链接及到期时间；不要持久化。
 
-## 协议迁移
+## 管理入口
 
-已有 Orbitcard 配置保留。尚未迁移的旧 Bearer 代充配置将停用并清空旧 Key，填写新参数后重新开启。旧 `/pay`、`/pay/inspect`、`/tasks` 客户端已移除；`gpt-api-client.js` 仅为 Orbitcard 客户端的兼容导出。
+后台继续使用 `/api/admin/gpt-api` 配置路径以兼容现有 Orbitcard 配置，`/test` 测试连接，`/status` 查询套餐、余额与最近订单。
 
-管理后台使用的 Bearer 登录令牌属于本项目自身认证，与第三方代充协议无关。
+`POST /api/admin/orders/:jobKey/refresh` 查询已有订单；`GET /api/admin/task-logs/:jobKey/audit` 下载任务日志。均需管理员认证。管理员自身的 Bearer 登录令牌与供应商 HMAC 协议用途不同。
+
+卡池、代理、账单地址、验证码求解、浏览器池、Session 导出、支付链接生成、本地账单及开卡 Webhook 接口均已移除，不提供充值回退路径。

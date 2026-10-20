@@ -23,6 +23,7 @@ function migrationValues(saved) {
 }
 
 function prepareConfig(input, existing = {}, secretAvailable = false) {
+    if (input.enabled != null && typeof input.enabled !== 'boolean') throw new Error('启用开关必须为布尔值');
     if (input.provider && input.provider !== 'orbitcard') throw new Error('第三方代充仅支持 Orbitcard HMAC V1');
     const cfg = {
         enabled: input.enabled == null ? Boolean(existing.enabled) : Boolean(input.enabled),

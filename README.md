@@ -1,156 +1,73 @@
 # Pay-gpt-Orbit
 
-CDK 订阅兑换与管理平台。用户提交 CDK 和完整 Session JSON 后，系统通过 **Orbitcard HMAC V1** 创建订阅、追踪原订单并更新 CDK 状态。后台提供套餐、余额、服务费和订单查询，以及卡池、账单、任务和安全设置。
+仅通过 **Orbitcard HMAC V1** 完成 ChatGPT 订阅兑换。提供 CDK 管理、订单追踪、重启恢复、持久化审计、管理员认证及 Telegram 通知。
 
-本项目基于 [KC-CatK/KC-PAY-GPT](https://github.com/KC-CatK/KC-PAY-GPT) 定制，保留本地 Stripe / Playwright 自动化能力。第三方代充已统一为 Orbitcard，不再提供旧 Bearer 代充协议选项。
+本地支付、卡池、代理池、账单地址、浏览器自动化、验证码求解、支付链接调试和直接订阅管理均已移除。容器只运行 Node.js；生产依赖为 `axios`、`express`、`mysql2`、`ws`，不安装浏览器、Python 或 AI 模型。
 
-[项目仓库](https://github.com/miracal-0312/Pay-gpt-Orbit) · [部署指南](DEPLOY.md) · [接入说明](对接api.md) · [Orbitcard 协议](orbitcard-subscription-api-v1.md) · [MIT License](LICENSE)
+[部署与升级](DEPLOY.md) · [完整链路](RECHARGE-AUDIT.md) · [接口接入](对接api.md) · [Orbitcard 原始协议](orbitcard-subscription-api-v1.md)
 
-## 运行环境
+## 快速开始
 
-| 组件 | 要求 |
-|------|------|
-| Node.js | >= 24；部署推荐 24 LTS，`.nvmrc` 和 Docker 镜像均使用 24 |
-| MySQL | 8.0；应用数据库账号需要建表、ALTER 和读写权限 |
-| Docker | 使用 Docker 部署时需要 Docker Engine / Desktop 和 Compose V2 |
-| 网络 | 服务端可以通过 HTTPS 访问配置的 Orbitcard 根域名，系统时间准确 |
-| 本地自动化 | 使用本地 Stripe 流程时另外安装 Chromium；Python 验证码组件按需安装 |
-
-Orbitcard 代充不依赖本地卡池、代理、Chromium 或 Python。新环境模板默认 `BROWSER_POOL=0`；已在数据库中保存的浏览器池开关优先，请在后台同步关闭。Docker 镜像仍包含完整浏览器和 Python 组件，供本地流程使用。
-
-Node.js 版本选择依据：[官方发布与支持周期](https://nodejs.org/en/about/previous-releases)。
-
-## 快速部署
-
-### Docker
-
-先通过有权访问该私有仓库的 GitHub 账号获取代码：
+需要 Node.js 24+ 和 MySQL 8；或 Docker Engine 与 Compose V2。
 
 ```bash
-git clone https://github.com/miracal-0312/Pay-gpt-Orbit.git
-cd Pay-gpt-Orbit
 cp .env.example .env
-```
-
-Windows PowerShell 使用 `Copy-Item .env.example .env`。已有部署请合并环境配置，不要覆盖原 `.env`。
-
-编辑 `.env`，填写数据库密码、管理员登录密码、二级密码、随机管理员签名密钥，以及配对的 `ORBITCARD_API_SECRET`。配置项说明见下表，然后启动：
-
-```bash
+# 填写数据库密码、管理员密码、随机签名密钥、Orbitcard HMAC Secret
 docker compose up -d --build
 docker compose logs -f app
 ```
 
-默认用户入口为 `http://localhost:3000/`，后台登录为 `http://localhost:3000/admin-login`。端口取 `.env` 中的 `PORT`，已有后台自定义路径以数据库保存值为准。
+默认用户入口 `http://localhost:3000/`，管理员入口 `http://localhost:3000/admin-login`。首次创建管理员需要至少 8 位的登录密码、二级密码；`ADMIN_TOKEN_SECRET` 每次启动都必须为至少 32 字节的随机值。
 
-Compose 项目名和数据卷命名保持原来的 `kc-gpt-pay2`，便于已有部署继续使用原数据库。升级时保持原 Compose 项目名与 `DB_NAME`。不要用 `docker compose down -v` 更新服务，它会删除数据库卷。
+后台配置配对的 Orbitcard API Key、HTTPS 根域名和平台卡 ID，测试连接后开放接单。关闭开关会拒绝新兑换，已有订单继续查询。不会切换到其他充值流程。
 
-### 裸机
-
-安装 Node.js 24 LTS 和 MySQL 8 后，在项目目录执行：
+裸机部署：
 
 ```bash
 npm ci --omit=dev --ignore-scripts
-cp .env.example .env
-# 编辑 .env，填写连接信息、管理员信息和 Orbitcard Secret
+# 编辑 .env，并准备有建表和 ALTER 权限的 MySQL 数据库
 npm start
 ```
 
-PowerShell 对应使用 `npm.cmd` 和 `Copy-Item`。`npm start`、`node server.js` 和 PM2 启动都会先读取项目根目录 `.env`，再初始化数据库及应用模块；已存在的进程环境变量优先。
+安装脚本 `sh scripts/install.sh` 或 `powershell -File scripts/install-windows.ps1` 只安装 Node 生产依赖，缺少 `.env` 时复制模板；不覆盖现有配置。Windows 可使用 `npm.cmd`。
 
-也可使用 `bash scripts/install.sh` 或 `powershell -ExecutionPolicy Bypass -File scripts/install-windows.ps1`。安装脚本默认只安装 Node 依赖，不安装浏览器。使用本地自动化时分别加 `--with-browser` / `-WithBrowser`。完整步骤见 [DEPLOY.md](DEPLOY.md)。
+## 充值链路
 
-## 环境变量与后台配置
+1. 用户验证 CDK，提交目标账号完整 Session JSON。
+2. 检查接单开关、维护状态、配置和并发容量。
+3. 在一个事务中锁定 CDK、创建任务、保存本次唯一 `client_order_no` 并占用 CDK。
+4. 查询当前套餐和支付地区，按同一订单身份提交一次 `createSubscription`。
+5. 查询原订单；需要人机验证时，用户通过有时效的上游链接完成验证。
+6. 上游明确订阅成功则核销 CDK；明确失败或拒绝提交则释放；未知结果继续占用。
+7. 重启后自动恢复原单查询，用户也可用原 CDK 手动查询。不会自动再次创建订阅。
 
-| 配置 | 设置位置 | 用途 |
-|------|----------|------|
-| `DB_HOST`、`DB_PORT`、`DB_USER`、`DB_PASSWORD`、`DB_NAME` | `.env` | 裸机数据库连接；Compose 内部固定连接 `mysql:3306`，用户为 `root` |
-| `ADMIN_EMAIL`、`ADMIN_PASSWORD`、`ADMIN_SECONDARY_PASSWORD` | `.env` | 仅初始化新数据库的管理员；已有账号在后台修改 |
-| `ADMIN_TOKEN_SECRET` | `.env` | 管理员令牌签名密钥，生产部署填写随机值 |
-| `ORBITCARD_API_SECRET` | 服务端 `.env` / 进程环境 | Orbitcard HMAC Secret，与后台 API Key 配对 |
-| API 根域名、API Key、平台卡 ID | 后台「系统配置 → 第三方代充 API」 | 根域名默认 `https://orbitcard.cc`，卡 ID 是平台正整数 ID |
-| 支付地区、最高服务费 | 同上 | 可选；地区根据当前套餐实时验证，服务费单位 USDT |
-| 第三方代充开关 | 同上 | 控制新 CDK 兑换是否使用 Orbitcard |
-| `BROWSER_POOL` | `.env` / 后台「浏览器池」 | 仅 Orbitcard 代充时关闭；后台保存值优先 |
+自动前台跟踪最多 15 分钟，后台继续有间隔地恢复未确认订单。平台服务费和订阅状态分别记录；`charge_pending` / `charge_failed` 不会把订阅成功改成失败。
 
-API Key、平台卡 ID 和开关不从 `.env` 导入。Secret 不进入后台表单或数据库，也不会由管理接口返回。不要混用卡片供应商的 `CARD_SUPPLIER_WEBHOOK_SECRET`。
+## 套餐
 
-修改 `.env` 后，裸机重启进程；Docker 执行 `docker compose up -d --force-recreate app`。`docker compose restart app` 不会重新注入修改后的环境变量。
+| CDK 类型 | Orbitcard 套餐 |
+| --- | --- |
+| `plus` | `gpt-plus` |
+| `pro100` | `gpt-pro-5x` |
+| `pro200` | `gpt-pro-20x` |
+| `pro500` | `gpt-pro-25x` |
 
-## 启用 Orbitcard
+历史 `pro_5x`、`pro_20x` 仍可读取；新 CDK 使用上述四种类型。是否开放某套餐以平台实时目录为准。
 
-1. 在服务端设置 `ORBITCARD_API_SECRET`，重启或重建应用。
-2. 后台填写 HTTPS 根域名、配对 API Key 和本人平台卡 ID。根域名不包含 `/api/open/v1` 子路径。
-3. Key 需要 `subscriptions:read` 和 `subscriptions:create`；余额查询另需 `account:read`。如通过平台 `getCardList` 查卡 ID，还需要 `cards:read`。
-4. 设置可选地区与服务费上限，测试连接，保存并开启第三方代充。
-5. 创建对应套餐的自助 CDK，用户提交该 CDK 和完整 Session JSON 后才会创建订阅。
+## 状态与数据
 
-“测试连接”只查询套餐和余额；打开代充开关本身不会充值。订阅订单由 CDK 兑换触发，会产生真实业务请求。
+任务、CDK 和订单绑定保存在 MySQL；按日及按任务 JSONL 保存在 `data/logs`，后台可下载。完整 Session、签名和验证码凭据不写入任务数据库或普通日志。验证码链接仅保留在响应和短时内存中。
 
-| CDK 套餐 | Orbitcard 套餐 |
-|----------|---------------|
-| Plus (`plus`) | `gpt-plus` |
-| Pro 100 (`pro100`，兼容 `pro_5x`) | `gpt-pro-5x` |
-| Pro 200 (`pro200`，兼容 `pro_20x`) | `gpt-pro-20x` |
-| Pro 500 (`pro500`) | `gpt-pro-25x` |
+升级不会删除旧数据库表、历史账单、Session 数据或宿主机文件。历史非 Orbitcard 运行任务转为人工核对并保留 CDK；这些数据不会被重新执行，也不再提供原有支付入口。
 
-是否开放套餐、可用地区及默认地区由 Orbitcard 实时返回。上游支持的其他套餐不会自动成为本项目的 CDK 类型。
-
-## CDK 与订单状态
-
-CDK 占用和订单关联在同一数据库事务中创建。每次兑换尝试使用固定客户订单号和幂等键，提交前保存关联信息。
-
-| 订单结果 | CDK 行为 |
-|----------|----------|
-| 处理中、需要人机验证 | 保持占用，查询原订单 |
-| 上游确认订阅成功 | 核销 CDK，成功状态不会被后续查询降级 |
-| 明确拒绝提交或上游确认失败 | 释放 CDK；修正资料后再次兑换会创建新的尝试 |
-| 超时、断网、结果未知 | 保留 CDK，不自动换订单重下 |
-
-刷新或服务重启后，验证同一 CDK 可以恢复订单。前台「查询代充结果」只查询原订单；自动追踪最多 15 分钟，之后可继续手动查询。关闭第三方代充接单后，已有订单仍可查询，但需要保留原域名及有效凭据。
-
-出现人机验证时打开上游 HTTPS 链接，完成后继续查询。验证链接只在当前响应和内存中使用；Orbitcard 提交/返回的 Session 不保存到代充任务日志。服务费 `charge_failed` 独立于订阅结果，不会将已成功订阅改成失败。
-
-关闭第三方代充后，新兑换会进入项目原有本地流程。仅部署 API 环境时，请配置完成并启用 Orbitcard 后再接收用户兑换。
-
-## 升级
-
-充值状态和日志修复的变更、待确认订单处理方式、日志字段及验证范围见 [RECHARGE-AUDIT.md](RECHARGE-AUDIT.md)。本地任务与 Orbitcard 请求现在写入 `data/logs`，后台任务列表可下载完整 JSONL 日志；清空运行日志仅清空显示缓存。
-
-- 合并 `.env.example` 中新增配置，保留已有数据库连接、管理员信息和业务凭据。
-- 更新到 Node.js 24；Docker 使用 `docker compose up -d --build app` 更新镜像和环境。
-- 启动自动补齐 Orbitcard 订单关联字段、本地支付阶段 `local_payment_state` 并迁移协议配置，数据库账号需要 `ALTER TABLE` 权限。
-- 已有 Orbitcard 配置保留；尚未迁移的旧代充配置会停用、清空旧 Key、恢复 Orbitcard 默认地址。重新填写参数后再启用。
-- 历史任务和卡池数据保留；原供应商未完成订单需在原供应商侧核实，不会由 Orbitcard 代为查询。
-
-## 开发与验证
+## 验证
 
 ```bash
-# 无第三方依赖、无真实网络请求：环境加载、协议迁移、CDK 事务与查询回归
-npm run test:orbitcard
-
-# 安装开发依赖后运行完整 Vitest 测试
-npm ci --ignore-scripts
 npm test
 ```
 
-本地测试使用模拟接口和事务存储，不会创建付费订阅，也不能替代实际部署后的数据库及连接检查。
+测试包括 HMAC 签名、CDK 事务与竞争、暂停接单、配置缺失、原单恢复、服务费独立状态、日志脱敏与重载，以及 HTTP 路由移除。使用模拟数据库和上游接口，不会发起真实充值。
 
-| 文件 | 职责 |
-|------|------|
-| `server.js` / `load-env.js` | HTTP、WebSocket、任务调度及启动环境加载 |
-| `orbitcard-client.js` / `orbitcard-config.js` | HMAC 请求、响应摘要、配置校验与迁移 |
-| `orbitcard-worker.js` / `orbitcard-query.js` | 下单及轮询、重启后的原单查询 |
-| `orbitcard-cdk.js` / `orbitcard-cdk-store.js` | 订单身份、CDK 事务占用与结算 |
-| `mysql-store.js` / `mysql-schema.sql` | 数据库操作与结构 |
-| `public/index.html` / `public/admin.html` | 用户兑换与管理界面 |
-| `index.js` / `stripe-payment.js` / `browser-pool.js` | 原有本地自动化流程 |
-| `.env.example` / `docker-compose.yml` / `scripts/` | 环境模板、容器部署和安装脚本 |
+容器体积需在实际构建后测量；不再下载安装 Chromium、PyTorch 等组件。更换轻量镜像不会自动删除服务器上的旧镜像或构建缓存。
 
-`gpt-api-client.js` 仅保留为 Orbitcard 客户端的兼容导出；第三方代充不再调用旧 `/pay`、`/pay/inspect` 或 `/tasks` 接口。管理后台自身的 Bearer 登录令牌与此供应商协议无关。
-
-## 原有功能与来源
-
-保留本地支付成功后尝试取消自动续费、单卡订阅额度、明确拒付报废与换卡、供应商开卡 Webhook 入池、管理员二级验证、动态后台路径，以及 Docker noVNC 调试。
-
-原始开发者：KC（TG：KcCatk）。定制基线来自上游提交 `fb4da763f5cdcd6995b5b8ad3b7f758ae0684963`。代码按 [MIT License](LICENSE) 提供，保留原始版权及许可。
+本项目基于 KC（TG：KcCatk）的 [KC-CatK/KC-PAY-GPT](https://github.com/KC-CatK/KC-PAY-GPT) 定制，保留 [MIT License](LICENSE) 及原始版权。
