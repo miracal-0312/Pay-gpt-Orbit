@@ -1,560 +1,154 @@
-# KC GPT 自动充值系统
+# Pay-gpt-Orbit
 
-> **KC ChatGPT PLUS 訂閱開通平台**  
-> 使用者貼上 Session 與兌換 CDK 後，可使用本地 Stripe 自動化流程，或啟用第三方代充 API 建立並輪詢代充訂單。  
-> 配套管理後台：卡池管理、CDK 管理、任務監控、帳單稽核、第三方代充積分與套餐狀態、並發控制。
+CDK 订阅兑换与管理平台。用户提交 CDK 和完整 Session JSON 后，系统通过 **Orbitcard HMAC V1** 创建订阅、追踪原订单并更新 CDK 状态。后台提供套餐、余额、服务费和订单查询，以及卡池、账单、任务和安全设置。
 
-| 开发者 | TG | 
-|--------|-----|
-| **KC** | KcCatk |
+本项目基于 [KC-CatK/KC-PAY-GPT](https://github.com/KC-CatK/KC-PAY-GPT) 定制，保留本地 Stripe / Playwright 自动化能力。第三方代充已统一为 Orbitcard，不再提供旧 Bearer 代充协议选项。
 
-[License: MIT](LICENSE) · Node.js 20+ · MySQL 8 · Playwright · Docker · [GitHub](https://github.com/KC-CatK/KC-PAY-GPT)
+[项目仓库](https://github.com/miracal-0312/Pay-gpt-Orbit) · [部署指南](DEPLOY.md) · [接入说明](对接api.md) · [Orbitcard 协议](orbitcard-subscription-api-v1.md) · [MIT License](LICENSE)
 
----
-
-## 定制版本说明
-
-本仓库当前版本基于上游项目 [KC-CatK/KC-PAY-GPT](https://github.com/KC-CatK/KC-PAY-GPT) 的 `main` 分支维护，代码基线为提交 `fb4da763f5cdcd6995b5b8ad3b7f758ae0684963`（`merge: preserve remote repository history`）。除非另有说明，下列能力均以该上游项目为基础。
-
-### 本版本的定制内容
-
-| 模块 | 改动 | 行为说明 |
-|------|------|----------|
-| 订阅管理 | 支付成功后尝试取消自动续费 | 本地 Stripe 自动化支付确认成功后，调用订阅接口取消自动续费；取消失败只记录警告，不会将已成功的支付任务改为失败。 |
-| 卡池策略 | 单卡成功订阅上限 | 后台可配置单张卡最多成功绑定的订阅数，默认 `2`。达到上限后卡片保留在卡池中，状态变为“订阅额度用尽”，后续不会再被选用。 |
-| 卡池策略 | 明确拒付计数与报废 | 后台可配置单卡最多明确拒付次数，默认 `3`。仅 `card declined` 等明确支付拒绝会累计；达到上限后状态变为“已报废”。成功支付会清空该卡的拒付计数。 |
-| 本地 Stripe 流程 | 同任务换卡 | 当前卡明确拒付但尚未达到报废阈值时，会在同一任务内跳过已尝试的卡并选择另一张可用卡继续；不会重复使用同一张已拒付卡。 |
-| 第三方代充流程 | 保持终态失败行为 | 第三方返回明确拒付时，系统只记录拒付计数和卡片状态，任务仍按原有逻辑直接失败，不自动创建新的代充订单或重试扣款。 |
-| 管理后台 | 卡池配置和状态可视化 | “系统配置 → 并发与维护”新增两个阈值配置；卡池列表新增“成功订阅”“拒付”列，并展示“额度用尽”“已报废”等状态。 |
-| 管理后台安全 | 修改管理员登录邮箱 | “安全设置”支持修改管理员登录邮箱。保存时必须验证当前登录密码，操作会写入安全审计日志并使所有现有后台登录会话失效；之后须使用新邮箱和原密码重新登录。 |
-| 卡片供应商卡池补货 | 开卡事件自动入池 | 接收供应商 `CARD_ISSUE.SUCCESS` Webhook，完成 HMAC 验签与 AES-256-GCM 三要素解密后自动导入卡池；按事件 ID 幂等，重复投递不会重复入卡。 |
-| 卡片供应商后台配置 | 页面管理 Webhook Secret | “系统配置”新增供应商配置区，可复制接收地址并保存/轮换 Webhook Secret。管理接口仅返回掩码状态，保存后新 Secret 立即用于验签和解密，无需重启服务。 |
-| 数据库兼容 | 启动时自动迁移 | 新数据库包含 `card_assets.decline_count` 与 `webhook_event_receipts`；已有数据库启动时自动补齐卡片字段、创建 Webhook 幂等记录表，并初始化相关配置。数据库账户需要具备 `ALTER TABLE` 和建表权限。 |
-| 会话认证代码 | Cookie 收集逻辑注释 | 为 Session Cookie 的清洗、去重、分块注入和 CSRF/设备 Cookie 补齐逻辑补充中文注释，便于排查会话注入问题。 |
-| 支付链接调试 | API 优先、UI 回退且付款前停止 | 后台支付链接调试与正式流程一致：优先创建 Checkout API，失败后才回退 UI 定价页；到 Checkout 最终“订阅/支付”按钮出现即停止，不会填卡、提交或扣款。 |
-| UI 套餐选择 | 稳定标识与 Pro 档位二次确认 | 定价页仅使用套餐按钮的稳定 `data-testid`；Pro 先选择 5x/20x，再在 Checkout 按 `chatgptprolite`/`chatgptpro` 确认实际档位。找不到唯一目标时直接失败，不会误选其他套餐。 |
-| UI 定价页就绪 | 等待套餐卡片后再切换地区 | 打开 `#pricing` 后固定等待 5 秒；确认套餐按钮已出现，并在切换地区前确认本次请求套餐对应按钮已就绪。未就绪时停止，不会把首页误当定价页反复切换地区。 |
-| Docker 调试 | 有头 Chromium 与本机 noVNC | `HEADFUL=1` 时容器启动 Xvfb、VNC 与 noVNC，可从本机查看浏览器；noVNC 默认仅监听 `127.0.0.1`，且必须设置 VNC 密码。 |
-
-### 升级与回滚边界
-
-- 升级到本版本后，重启应用会自动执行上述数据库兼容迁移；不会删除已有卡片或历史账单。
-- 下调“单卡最多绑定订阅数”并保存配置时，已达到新上限的卡片会立即停止选用；上调上限时，未被其他原因禁用的“订阅额度用尽”卡可恢复选用。
-- “已报废”表示达到明确拒付阈值，不会因上调订阅上限自动恢复；如需重新启用，应在确认卡片状态后由管理员人工处理。
-- 供应商 Webhook Secret 保存在 MySQL 的应用配置中，后台不提供明文读取或清空操作；需要轮换时直接填写新值并保存。旧版 `.env` 中已有的 `CARD_SUPPLIER_WEBHOOK_SECRET` 只会在首次升级启动时迁入数据库，不会覆盖后台保存的新值。
-- Docker 部署更新源码后，应重新构建应用镜像：`docker compose up -d --build app`。仅执行 `docker compose restart app` 不会更新未挂载到容器的前端静态文件。
-
-> ## 加入 Telegram 社群
-> **[點此加入 AI科研組 Telegram 群組](https://t.me/+xPBORDjtky9mM2Mx)**
-
----
-
-## 这是什么
-
-`KC-GPT-PAY`（KC GPT 自动充值系统）是一套 **Node.js + Playwright + MySQL** 服务端方案，包含：
-
-- **用户前台**（`/public/index.html`）：卡密兑换、Session 提交、订阅自动开通、状态查询
-- **管理后台**（`/admin`）：卡池 / CDK / 任务 / 账单 / 系统配置 / 运行日志
-- **本地自動化引擎**：Stripe Checkout 填表、信用卡輪換、hCaptcha 求解、反指紋瀏覽器與失敗重試
-- **第三方代充 API**：支援套餐／積分查詢、Session 預檢、代充建單、訂單輪詢，以及失敗訂單的供應商卡密前綴顯示
-
-啟用第三方代充 API 後，前台兌換會完全改走供應商代充流程，不再使用本地開通。
-
-> ⚠️ **仅供学习与研究**。使用前请确保符合目标平台 ToS 与所在地法律法规。**开发者不对任何滥用导致的封号、扣款、法律纠纷负责。**
-
----
-
-## 系统要求
+## 运行环境
 
 | 组件 | 要求 |
 |------|------|
-| **Node.js** | ≥ 20.x |
-| **MySQL** | ≥ 8.0 |
-| **記憶體** | ≥ 2 GB（本地瀏覽器自動化建議 4 GB+） |
-| **磁盘** | ≥ 5 GB（含 Chromium + Python hCaptcha 依赖） |
-| **操作系统** | Linux / macOS / Windows |
+| Node.js | >= 24；部署推荐 24 LTS，`.nvmrc` 和 Docker 镜像均使用 24 |
+| MySQL | 8.0；应用数据库账号需要建表、ALTER 和读写权限 |
+| Docker | 使用 Docker 部署时需要 Docker Engine / Desktop 和 Compose V2 |
+| 网络 | 服务端可以通过 HTTPS 访问配置的 Orbitcard 根域名，系统时间准确 |
+| 本地自动化 | 使用本地 Stripe 流程时另外安装 Chromium；Python 验证码组件按需安装 |
 
-Linux 无图形界面跑 headless 时，需安装 Playwright 系统依赖（见下方各平台说明）。
+Orbitcard 代充不依赖本地卡池、代理、Chromium 或 Python。新环境模板默认 `BROWSER_POOL=0`；已在数据库中保存的浏览器池开关优先，请在后台同步关闭。Docker 镜像仍包含完整浏览器和 Python 组件，供本地流程使用。
 
----
+Node.js 版本选择依据：[官方发布与支持周期](https://nodejs.org/en/about/previous-releases)。
 
-## 部署教程
+## 快速部署
 
-### 方式一：Docker 一键部署（推荐）
+### Docker
 
-适合 Linux 云服务器、macOS、Windows（Docker Desktop），**自带 MySQL 8**，无需单独装数据库。
-
-#### 1. 安装 Docker
+先通过有权访问该私有仓库的 GitHub 账号获取代码：
 
 ```bash
-# Ubuntu / Debian（一键脚本）
-curl -fsSL https://get.docker.com | sh
-sudo systemctl enable docker && sudo systemctl start docker
-
-# macOS / Windows — 安装 Docker Desktop
-# https://www.docker.com/products/docker-desktop/
-```
-
-#### 2. 拉取代码并配置
-
-```bash
-git clone https://github.com/KC-CatK/KC-PAY-GPT.git KC-GPT-PAY
-cd KC-GPT-PAY
+git clone https://github.com/miracal-0312/Pay-gpt-Orbit.git
+cd Pay-gpt-Orbit
 cp .env.example .env
 ```
 
-编辑 `.env`，至少填写：
+Windows PowerShell 使用 `Copy-Item .env.example .env`。已有部署请合并环境配置，不要覆盖原 `.env`。
 
-```env
-DB_PASSWORD=your_strong_mysql_password   # MySQL root 密码
-ADMIN_PASSWORD=your_admin_password         # 后台登录密码
-PROXY=http://user:pass@proxy-host:port     # 本地自動化或第三方訂單代理（選填）
-BROWSER_POOL=0                              # 預設關閉瀏覽器池
-```
-
-#### 3. 一键启动
+编辑 `.env`，填写数据库密码、管理员登录密码、二级密码、随机管理员签名密钥，以及配对的 `ORBITCARD_API_SECRET`。配置项说明见下表，然后启动：
 
 ```bash
-docker compose up -d
-```
-
-首次构建镜像需数分钟（含 Playwright Chromium + hCaptcha Python 依赖）。启动成功后：
-
-| 地址 | 说明 |
-|------|------|
-| `http://服务器IP:3000/` | 用户前台（卡密兑换） |
-| `http://服务器IP:3000/admin-login` | 后台登录（默认路径可在后台修改） |
-
-#### 4. Docker 常用命令
-
-```bash
-# 查看应用日志
-docker compose logs -f app
-
-# 重启应用
-docker compose restart app
-
-# 停止并移除容器（数据卷保留，MySQL 数据不丢）
-docker compose down
-
-# 更新代码后重新构建
 docker compose up -d --build
-
-# 进入容器调试
-docker compose exec app bash
-```
-
-#### Docker 有头调试（noVNC）
-
-在 `.env` 配置以下值后重建应用：
-
-```env
-HEADFUL=1
-VNC_PASSWORD=设置一个本地调试密码
-NOVNC_PORT=6080
-```
-
-```bash
-docker compose up -d --build app
-```
-
-打开 `http://localhost:6080/vnc.html`，输入 `VNC_PASSWORD` 后即可查看容器内 Chromium。noVNC 仅绑定 `127.0.0.1`；远程服务器请通过 SSH 隧道访问，勿直接暴露该端口。
-
-有头调试建议将 `BROWSER_POOL_SIZE=1`，避免多个 Chromium 窗口在同一桌面重叠。若 noVNC 页面不可用，先检查应用日志：
-
-```bash
 docker compose logs -f app
 ```
 
-> **注意**：请勿使用 `docker compose down -v`，否则会删除 MySQL 数据卷。配置写入 MySQL 后，重启容器不会丢失。
+默认用户入口为 `http://localhost:3000/`，后台登录为 `http://localhost:3000/admin-login`。端口取 `.env` 中的 `PORT`，已有后台自定义路径以数据库保存值为准。
 
----
+Compose 项目名和数据卷命名保持原来的 `kc-gpt-pay2`，便于已有部署继续使用原数据库。升级时保持原 Compose 项目名与 `DB_NAME`。不要用 `docker compose down -v` 更新服务，它会删除数据库卷。
 
-## 第三方代充 API
+### 裸机
 
-在後台「系統配置 → 第三方代充 API」填寫 API Key 後啟用。預設 Base URL 為：
-
-```text
-https://kc.vpss.eu.cc/
-```
-
-啟用後，系統會：
-
-1. 使用供應商 `/plans` 取得 GPT 與積分套餐資訊。
-2. 以 `/balance` 顯示可用積分與 USD 餘額。
-3. 以 `/pay/inspect` 檢查 Session 格式與 JWT 有效期，再以 `/pay` 建立代充訂單。
-4. 輪詢供應商訂單結果；後台僅顯示失敗代充訂單及上游公開的 `topup_code` 前綴，不會保存或展示完整卡密。
-
-API Key 至少需要 `plans:read`、`balance:read`、`pay:write` Scope；如需使用任務查詢，另需 `tasks:read`。完整供應商協議見 [對接 API 文件](对接api.md)。
-
-> 瀏覽器池預設關閉（`BROWSER_POOL=0`）。第三方代充模式不使用本地瀏覽器開通流程。
-
----
-
-## 支付链接调试与 UI 回退
-
-后台“支付链接调试”只用于核验 Session、套餐与 Checkout 页面是否能正常打开。它与正式充值使用相同的 Checkout 策略：`CHECKOUT_MODE=api` 时先调用 Checkout API；API 创建或验证失败时自动转入 UI 定价页流程。
-
-UI 回退流程会按以下顺序执行：
-
-1. 打开 ChatGPT 定价页，固定等待 5 秒，并确认套餐按钮实际出现。
-2. 切换到 Personal 视图和目标账单地区。
-3. 按稳定 `data-testid` 点击目标套餐：Plus 使用 `select-plan-button-plus-upgrade`；两个 Pro 套餐使用 `select-plan-button-pro-upgrade`。
-4. Pro 5x/20x 在定价页和 Checkout 分别确认对应档位，避免外层共用 Pro 按钮导致档位错误。
-5. 调试任务检测到 Checkout 最终“订阅/支付”按钮后立即停止；不会填写支付信息、点击订阅或产生扣款。
-
-如果定价页未展示本次请求套餐的唯一按钮，任务会报“定价页未展示套餐选择按钮”并停止；不会继续执行地区切换。该错误通常表示尚未进入定价弹窗、Session 状态失效或页面结构已变化。
-
----
-
-## 卡片供应商开卡 Webhook
-
-系统提供独立的开卡接收端点，不与通用外部卡池 Webhook 共用：
-
-```text
-POST https://你的域名/api/webhooks/card-issue
-```
-
-配置步骤：
-
-1. 登录后台，在「系统配置 → 卡片供应商开卡 Webhook」填写并保存 Webhook Secret。页面只显示掩码状态，保存后立即生效；不要将供应商 API Key 或 API Secret 写入本项目。
-2. 在供应商后台配置页面显示的 HTTPS 地址，并订阅 `CARD_ISSUE` 事件。
-3. 收到 `CARD_ISSUE.SUCCESS` 后，系统验证 `X-VCC-WEBHOOK-*` 签名头，使用原始请求体计算签名，并解密卡号、有效期和 CVV 后导入卡池。
-
-已在 `.env` 配置 `CARD_SUPPLIER_WEBHOOK_SECRET` 的旧部署，会在升级后的首次启动时自动迁入 MySQL；数据库已有值时，`.env` 不会覆盖后台保存的新值。
-
-供应商采用至少一次投递。系统使用 `eventId` 去重：同一事件重试时会直接返回纯文本 `ok`，不会重复导入卡片。签名、解密或卡片格式校验失败时返回非 `2xx`，由供应商按其重试策略再次投递。
-
-> Webhook Secret、完整卡号和 CVV 都不会写入应用日志或 Webhook 事件记录。请仅通过 HTTPS 对外暴露此端点，并在供应商凭据泄露后立即轮换。
-
----
-
-### 方式二：多端裸机部署
-
-适合不想用 Docker、或需要在本地调试的场景。
-
-#### macOS / Linux 一键安装
+安装 Node.js 24 LTS 和 MySQL 8 后，在项目目录执行：
 
 ```bash
-git clone https://github.com/KC-CatK/KC-PAY-GPT.git KC-GPT-PAY
-cd KC-GPT-PAY
-chmod +x scripts/install.sh
-./scripts/install.sh
-```
-
-脚本会自动检测系统（macOS / Ubuntu / Debian / CentOS 等），安装 Node.js 20+、npm 依赖、Playwright Chromium 及 Linux 系统库。
-
-#### Windows 一键安装
-
-以**管理员权限**打开 PowerShell：
-
-```powershell
-git clone https://github.com/KC-CatK/KC-PAY-GPT.git KC-GPT-PAY
-cd KC-GPT-PAY
-powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1
-```
-
-#### 手动安装（各平台通用）
-
-**① 安装 Node.js 20+**
-
-```bash
-# macOS (Homebrew)
-brew install node@20
-
-# Ubuntu / Debian
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt-get install -y nodejs
-
-# CentOS / RHEL
-curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
-sudo yum install -y nodejs
-
-# Windows — 下载 LTS 安装包
-# https://nodejs.org/
-```
-
-**② 安装 Playwright 系统依赖（仅 Linux 服务器）**
-
-```bash
-# Ubuntu / Debian 推荐
-npx playwright install --with-deps chromium
-
-# 或手动安装常见依赖
-sudo apt-get install -y wget curl fonts-liberation fonts-noto-cjk \
-    libatk-bridge2.0-0 libatk1.0-0 libcups2 libdbus-1-3 libdrm2 libgbm1 \
-    libgtk-3-0 libnspr4 libnss3 libx11-xcb1 libxcomposite1 libxdamage1 \
-    libxrandr2 libxss1 libasound2 libpangocairo-1.0-0 libxshmfence1
-```
-
-macOS / Windows 无需额外系统依赖。
-
-**③ 安装项目依赖**
-
-```bash
-npm install --production
-npx playwright install chromium
-```
-
-**④ 安装并初始化 MySQL 8**
-
-```bash
-# Ubuntu
-sudo apt-get install -y mysql-server && sudo systemctl start mysql
-
-# macOS
-brew install mysql && brew services start mysql
-
-# 创建数据库
-mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS plus_papay CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-```
-
-**⑤ 配置环境变量**
-
-```bash
+npm ci --omit=dev --ignore-scripts
 cp .env.example .env
-# 编辑 .env
-```
-
-裸机部署关键项：
-
-```env
-DB_HOST=127.0.0.1
-DB_PORT=3306
-DB_USER=root
-DB_PASSWORD=你的MySQL密码
-DB_NAME=plus_papay
-ADMIN_PASSWORD=你的后台密码
-PROXY=http://user:pass@proxy-host:port
-HEADFUL=0          # 调试时可设为 1 开启有头浏览器
-```
-
-**⑥ 启动服务**
-
-```bash
+# 编辑 .env，填写连接信息、管理员信息和 Orbitcard Secret
 npm start
-# 或调试模式（有头浏览器）
-npm run start:headful
 ```
 
-启动成功示例：
+PowerShell 对应使用 `npm.cmd` 和 `Copy-Item`。`npm start`、`node server.js` 和 PM2 启动都会先读取项目根目录 `.env`，再初始化数据库及应用模块；已存在的进程环境变量优先。
 
-```
-🔓 [资产锁] 启动时已重置所有 in_use 标记
-数据库表检查完成
-http://localhost:3000
-MySQL => root@127.0.0.1:3306/plus_papay
-```
+也可使用 `bash scripts/install.sh` 或 `powershell -ExecutionPolicy Bypass -File scripts/install-windows.ps1`。安装脚本默认只安装 Node 依赖，不安装浏览器。使用本地自动化时分别加 `--with-browser` / `-WithBrowser`。完整步骤见 [DEPLOY.md](DEPLOY.md)。
 
----
+## 环境变量与后台配置
 
-### 方式三：PM2 生产守护（裸机推荐）
+| 配置 | 设置位置 | 用途 |
+|------|----------|------|
+| `DB_HOST`、`DB_PORT`、`DB_USER`、`DB_PASSWORD`、`DB_NAME` | `.env` | 裸机数据库连接；Compose 内部固定连接 `mysql:3306`，用户为 `root` |
+| `ADMIN_EMAIL`、`ADMIN_PASSWORD`、`ADMIN_SECONDARY_PASSWORD` | `.env` | 仅初始化新数据库的管理员；已有账号在后台修改 |
+| `ADMIN_TOKEN_SECRET` | `.env` | 管理员令牌签名密钥，生产部署填写随机值 |
+| `ORBITCARD_API_SECRET` | 服务端 `.env` / 进程环境 | Orbitcard HMAC Secret，与后台 API Key 配对 |
+| API 根域名、API Key、平台卡 ID | 后台「系统配置 → 第三方代充 API」 | 根域名默认 `https://orbitcard.cc`，卡 ID 是平台正整数 ID |
+| 支付地区、最高服务费 | 同上 | 可选；地区根据当前套餐实时验证，服务费单位 USDT |
+| 第三方代充开关 | 同上 | 控制新 CDK 兑换是否使用 Orbitcard |
+| `BROWSER_POOL` | `.env` / 后台「浏览器池」 | 仅 Orbitcard 代充时关闭；后台保存值优先 |
+
+API Key、平台卡 ID 和开关不从 `.env` 导入。Secret 不进入后台表单或数据库，也不会由管理接口返回。不要混用卡片供应商的 `CARD_SUPPLIER_WEBHOOK_SECRET`。
+
+修改 `.env` 后，裸机重启进程；Docker 执行 `docker compose up -d --force-recreate app`。`docker compose restart app` 不会重新注入修改后的环境变量。
+
+## 启用 Orbitcard
+
+1. 在服务端设置 `ORBITCARD_API_SECRET`，重启或重建应用。
+2. 后台填写 HTTPS 根域名、配对 API Key 和本人平台卡 ID。根域名不包含 `/api/open/v1` 子路径。
+3. Key 需要 `subscriptions:read` 和 `subscriptions:create`；余额查询另需 `account:read`。如通过平台 `getCardList` 查卡 ID，还需要 `cards:read`。
+4. 设置可选地区与服务费上限，测试连接，保存并开启第三方代充。
+5. 创建对应套餐的自助 CDK，用户提交该 CDK 和完整 Session JSON 后才会创建订阅。
+
+“测试连接”只查询套餐和余额；打开代充开关本身不会充值。订阅订单由 CDK 兑换触发，会产生真实业务请求。
+
+| CDK 套餐 | Orbitcard 套餐 |
+|----------|---------------|
+| Plus (`plus`) | `gpt-plus` |
+| Pro 100 (`pro100`，兼容 `pro_5x`) | `gpt-pro-5x` |
+| Pro 200 (`pro200`，兼容 `pro_20x`) | `gpt-pro-20x` |
+| Pro 500 (`pro500`) | `gpt-pro-25x` |
+
+是否开放套餐、可用地区及默认地区由 Orbitcard 实时返回。上游支持的其他套餐不会自动成为本项目的 CDK 类型。
+
+## CDK 与订单状态
+
+CDK 占用和订单关联在同一数据库事务中创建。每次兑换尝试使用固定客户订单号和幂等键，提交前保存关联信息。
+
+| 订单结果 | CDK 行为 |
+|----------|----------|
+| 处理中、需要人机验证 | 保持占用，查询原订单 |
+| 上游确认订阅成功 | 核销 CDK，成功状态不会被后续查询降级 |
+| 明确拒绝提交或上游确认失败 | 释放 CDK；修正资料后再次兑换会创建新的尝试 |
+| 超时、断网、结果未知 | 保留 CDK，不自动换订单重下 |
+
+刷新或服务重启后，验证同一 CDK 可以恢复订单。前台「查询代充结果」只查询原订单；自动追踪最多 15 分钟，之后可继续手动查询。关闭第三方代充接单后，已有订单仍可查询，但需要保留原域名及有效凭据。
+
+出现人机验证时打开上游 HTTPS 链接，完成后继续查询。验证链接只在当前响应和内存中使用；Orbitcard 提交/返回的 Session 不保存到代充任务日志。服务费 `charge_failed` 独立于订阅结果，不会将已成功订阅改成失败。
+
+关闭第三方代充后，新兑换会进入项目原有本地流程。仅部署 API 环境时，请配置完成并启用 Orbitcard 后再接收用户兑换。
+
+## 升级
+
+- 合并 `.env.example` 中新增配置，保留已有数据库连接、管理员信息和业务凭据。
+- 更新到 Node.js 24；Docker 使用 `docker compose up -d --build app` 更新镜像和环境。
+- 启动自动补齐 Orbitcard 订单关联字段并迁移协议配置，数据库账号需要 `ALTER TABLE` 权限。
+- 已有 Orbitcard 配置保留；尚未迁移的旧代充配置会停用、清空旧 Key、恢复 Orbitcard 默认地址。重新填写参数后再启用。
+- 历史任务和卡池数据保留；原供应商未完成订单需在原供应商侧核实，不会由 Orbitcard 代为查询。
+
+## 开发与验证
 
 ```bash
-npm install -g pm2
-pm2 start server.js --name kc-gpt-pay
-pm2 startup          # 配置开机自启
-pm2 save
-pm2 logs kc-gpt-pay  # 查看日志
-pm2 restart kc-gpt-pay
+# 无第三方依赖、无真实网络请求：环境加载、协议迁移、CDK 事务与查询回归
+npm run test:orbitcard
+
+# 安装开发依赖后运行完整 Vitest 测试
+npm ci --ignore-scripts
+npm test
 ```
 
----
+本地测试使用模拟接口和事务存储，不会创建付费订阅，也不能替代实际部署后的数据库及连接检查。
 
-### 方式四：Nginx 反向代理 + HTTPS
-
-通过域名访问或启用 HTTPS 时，在 Nginx 中反代到 `127.0.0.1:3000`：
-
-```nginx
-server {
-    listen 80;
-    server_name your-domain.com;
-
-    location / {
-        proxy_pass http://127.0.0.1:3000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_read_timeout 86400;
-    }
-}
-```
-
-免费 HTTPS（Let's Encrypt）：
-
-```bash
-sudo apt install certbot python3-certbot-nginx
-sudo certbot --nginx -d your-domain.com
-```
-
----
-
-## 首次使用
-
-1. 打开后台 → **系统配置**：填写代理、支付地区（默认菲律宾 PHP）、邮箱通道、hCaptcha 等
-2. **卡池管理** → 批量导入信用卡（格式：`卡号|有效期|CVC|持卡人姓名`）
-3. **免税地址** → 确认当前地区有足够地址模板（默认已预置）
-4. **CDK 管理** → 生成 Plus / Pro 5x / Pro 20x 激活码
-5. 用户访问前台 → 输入 CDK → 粘贴 Session JSON → 提交，约 3–5 分钟自动开通
-6. 在 **任务管理** / **运行日志** 查看进度与结果
-
----
-
-## 主要功能
-
-| 模块 | 说明 |
+| 文件 | 职责 |
 |------|------|
-| **CDK 兑换** | Plus / Pro 5x / Pro 20x 三档套餐，一卡一充 |
-| **信用卡卡池** | 批量导入、智能选卡、冷却机制、Stripe 拒卡自动报废、失败换卡重试 |
-| **支付地区** | PH / US / SG / MY 可切换，配套免税地址池 |
-| **账单审计** | 自动记录每笔支付，支持筛选与 CSV 导出 |
-| **瀏覽器池** | 本地自動化的可選多槽位模式；目前預設關閉（`BROWSER_POOL=0`） |
-| **hCaptcha** | VLM / 打码平台 / Python solver 多通道 |
-| **反指纹** | Stealth + 30+ 指纹点修正，支持真 Chrome / Edge |
-| **Telegram 通知** | 任务成功 / 失败推送（后台配置） |
-| **并发 & 维护模式** | 前台并发上限、维护开关，保存即生效 |
+| `server.js` / `load-env.js` | HTTP、WebSocket、任务调度及启动环境加载 |
+| `orbitcard-client.js` / `orbitcard-config.js` | HMAC 请求、响应摘要、配置校验与迁移 |
+| `orbitcard-worker.js` / `orbitcard-query.js` | 下单及轮询、重启后的原单查询 |
+| `orbitcard-cdk.js` / `orbitcard-cdk-store.js` | 订单身份、CDK 事务占用与结算 |
+| `mysql-store.js` / `mysql-schema.sql` | 数据库操作与结构 |
+| `public/index.html` / `public/admin.html` | 用户兑换与管理界面 |
+| `index.js` / `stripe-payment.js` / `browser-pool.js` | 原有本地自动化流程 |
+| `.env.example` / `docker-compose.yml` / `scripts/` | 环境模板、容器部署和安装脚本 |
 
----
+`gpt-api-client.js` 仅保留为 Orbitcard 客户端的兼容导出；第三方代充不再调用旧 `/pay`、`/pay/inspect` 或 `/tasks` 接口。管理后台自身的 Bearer 登录令牌与此供应商协议无关。
 
-## 架构概览
+## 原有功能与来源
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     server.js (Express)                      │
-│   /api/redeem/*   /api/cdk/*   /api/admin/*   /api/public/* │
-└─────────────────────────────────────────────────────────────┘
-         │                                    │
-         ▼                                    ▼
-┌─────────────────────┐            ┌─────────────────────┐
-│  product_activator  │            │  public/admin.html  │
-│  任务调度 / 重试     │            │  KC GPT 管理后台     │
-└─────────────────────┘            └─────────────────────┘
-         │
-         ▼
-┌─────────────────────────────────────────────────────────────┐
-│  index.js / stripe-payment.js / session-auth.js / browser-pool │
-│  Stripe Checkout 自动化 · Session 鉴权 · 卡池支付 · 重试      │
-└─────────────────────────────────────────────────────────────┘
-         │
-         ▼
-┌─────────────────────────────────────────────────────────────┐
-│  MySQL — 卡池 / CDK / 任务 / 账单 / 配置 / Session 记录       │
-└─────────────────────────────────────────────────────────────┘
-```
+保留本地支付成功后尝试取消自动续费、单卡订阅额度、明确拒付报废与换卡、供应商开卡 Webhook 入池、管理员二级验证、动态后台路径，以及 Docker noVNC 调试。
 
----
-
-## 目录结构
-
-```
-.
-├── server.js              # Express 入口、REST API
-├── product_activator.js   # 任务调度核心
-├── index.js               # Stripe 支付主流程（子进程）
-├── stripe-payment.js      # Checkout 表单自动化
-├── session-auth.js        # Session 解析与鉴权
-├── browser-pool.js        # 浏览器池管理
-├── mysql-store.js         # MySQL 全部 CRUD
-├── payment-retry.js       # 支付重试与换卡逻辑
-├── region-config.js       # 支付地区配置
-├── hcaptcha/              # Python hCaptcha solver
-├── public/
-│   ├── index.html         # 用户前台
-│   ├── admin.html         # 管理后台
-│   └── admin-login.html   # 后台登录
-├── scripts/
-│   ├── install.sh         # macOS / Linux 一键安装
-│   └── install-windows.ps1
-├── docker-compose.yml     # Docker 一键部署
-├── Dockerfile
-├── mysql-schema.sql
-├── .env.example
-└── 对接api.md             # 第三方代充 API 對接文件
-```
-
----
-
-## 接口文档
-
-本系統 REST API 請依 `server.js` 路由使用；第三方代充接口見 [對接 API 文件](对接api.md)。常用接口：
-
-| 用途 | Method + Path | 鉴权 |
-|------|---------------|------|
-| 用户兑换开通 | `POST /api/redeem-product` | 无 |
-| 查询 CDK 状态 | `GET /api/cdk/query?cdk=...` | 无 |
-| 后台登录 | `POST /api/admin/login` | 密码 |
-| 卡池批量导入 | `POST /api/admin/cards/import` | Bearer |
-| 卡片供应商 Webhook 配置 | `POST /api/admin/card-supplier` | Bearer |
-| 外部卡池推送 | `POST /api/external/cards/push` | X-API-Key |
-| 卡片供应商开卡推送 | `POST /api/webhooks/card-issue` | 供应商 HMAC 签名 |
-| 账单 CSV 导出 | `GET /api/admin/billing/export` | Bearer |
-| 实时运行日志 | `GET /api/admin/runtime-logs` | Bearer |
-
----
-
-## 常见问题
-
-**Q: Docker 里浏览器崩溃？**  
-A: `docker-compose.yml` 已配置 `shm_size: 2gb`。仍崩溃可改为 `4gb`，并确保宿主机内存 ≥ 4 GB。
-
-**Q: Linux 上 Chromium 启动失败？**  
-A: 执行 `npx playwright install-deps chromium`，确认 `HEADFUL=0`（无头模式）。
-
-**Q: MySQL 连接被拒绝？**  
-A: Docker 模式下 `DB_HOST=mysql`（compose 服务名）；裸机模式下 `DB_HOST=127.0.0.1`。确认 MySQL 服务已启动。
-
-**Q: Stripe 一直 `redirect_status=failed`？**  
-A: 多为卡 BIN 被风控、余额不足或代理 IP 不干净。换卡、换代理、确认支付地区设置。
-
-**Q: 卡池枯竭怎么办？**  
-A: 后台批量导入，或配置 Webhook `POST /api/external/cards/push` 自动补货。
-
-**Q: 修改哪些文件需要重启？**  
-A: `server.js`、`mysql-store.js`、`product_activator.js` 等主进程文件需重启；`index.js`、`stripe-payment.js` 等子进程文件下次任务自动加载。
-
-**Q: Windows 上 Playwright 安装失败？**  
-A: 管理员 PowerShell 执行：`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`，再 `npx playwright install chromium`。
-
----
-
-## 端口说明
-
-| 端口 | 用途 |
-|------|------|
-| 3000 | Web 服务 + WebSocket（可通过 `PORT` 环境变量修改） |
-| 3306 | MySQL（Docker 模式下映射到宿主机） |
-| 19222+ | 瀏覽器池 CDP 連接埠（僅啟用 `BROWSER_POOL=1` 時使用） |
-
----
-
-## 开发者 & 联系方式
-
-| 项目 | 信息 |
-|------|------|
-| 开发者 | **KC** |
-| TG | **KcCatk** |
-
-
-
-
----
-
-## 免责声明
-
-本项目所有代码以 **「AS IS」** 形式发布，开发者**不对以下情形负责**：
-
-- 因使用本项目导致的 OpenAI 账号封禁、银行卡风控
-- 违反目标平台 ToS 或所在地法律法规所引起的任何后果
-- 因使用本项目导致的资金损失、数据泄露、第三方权益受损
-
-**使用即表示你已阅读、理解并接受以上条款。**
-
----
-
-## 许可
-
-[MIT License](LICENSE) © KC
+原始开发者：KC（TG：KcCatk）。定制基线来自上游提交 `fb4da763f5cdcd6995b5b8ad3b7f758ae0684963`。代码按 [MIT License](LICENSE) 提供，保留原始版权及许可。

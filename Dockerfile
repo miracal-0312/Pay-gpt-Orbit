@@ -1,8 +1,8 @@
 # ============================================================
-# ChatGPT Plus 自动化开通工具 — Docker 镜像
-# Node.js 20 + Playwright Chromium + hCaptcha Python solver
+# Pay-gpt-Orbit — Docker 镜像
+# Node.js 24 LTS + Playwright Chromium + hCaptcha Python solver
 # ============================================================
-FROM node:20-slim
+FROM node:24-bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_BREAK_SYSTEM_PACKAGES=1 \
@@ -29,8 +29,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Node 依赖
-COPY package.json package-lock.json* ./
-RUN npm install --production --ignore-scripts
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts
 
 # Playwright Chromium（Node 自动化 + Python solver 共用同一路径）
 RUN npx playwright install chromium

@@ -1,3 +1,5 @@
+require('./load-env')();
+
 const express = require('express');
 const { spawn, execFileSync } = require('child_process');
 const path = require('path');
@@ -21,8 +23,7 @@ const { testCaptchaPlatformConnectivity, normalizeCaptchaPlatformApiUrl, resolve
 const browserPool = require('./browser-pool');
 const { buildWorkerRuntimeEnv } = require('./browser-runtime');
 const { querySubscriptionBySession, validateSessionTokenForQuery, cancelAutoRenew, resumeAutoRenew } = require('./subscription-check');
-const gptApi = require('./gpt-api-client');
-const { isPaymentDeclined } = require('./payment-retry');
+const gptApi = require('./orbitcard-client');
 const {
     CARD_SUPPLIER_CARD_ISSUE_SUCCESS_EVENT,
     verifyCardSupplierWebhook,
@@ -2467,10 +2468,7 @@ app.get('/api/admin/gpt-api', async (req, res) => {
                 enabled: cfg.enabled,
                 base_url: cfg.base_url,
                 api_key_saved: Boolean(cfg.api_key),
-                api_key_preview: masked,
-                plan_key: cfg.plan_key,
-                country: cfg.country,
-                currency: cfg.currency
+                api_key_preview: masked
             }
         });
     } catch (error) {
@@ -2481,36 +2479,10 @@ app.get('/api/admin/gpt-api', async (req, res) => {
 app.post('/api/admin/gpt-api', async (req, res) => {
     try {
         await ensureStoreReady();
-        const body = req.body || {};
-        if (body.provider && !['legacy', 'orbitcard'].includes(body.provider)) {
-            return res.status(400).json({ success: false, message: '不支持的代充服务协议' });
-        }
-        if (body.provider === 'orbitcard') {
-            if (body.orbitcard_card_id && (!Number.isSafeInteger(Number(body.orbitcard_card_id)) || Number(body.orbitcard_card_id) <= 0)) {
-                return res.status(400).json({ success: false, message: '平台卡 ID 必须为正整数' });
-            }
-            if (body.orbitcard_region && !/^[A-Z]{2}$/.test(body.orbitcard_region)) {
-                return res.status(400).json({ success: false, message: '支付地区必须为两位大写代码' });
-            }
-            if (body.orbitcard_max_fee && !/^\d+(?:\.\d+)?$/.test(body.orbitcard_max_fee)) {
-                return res.status(400).json({ success: false, message: '最高服务费必须为非负十进制金额' });
-            }
-        }
-        await store.saveGptApiConfig({
-            provider: body.provider,
-            orbitcard_card_id: body.orbitcard_card_id,
-            orbitcard_region: body.orbitcard_region,
-            orbitcard_max_fee: body.orbitcard_max_fee,
-            enabled: Boolean(body.enabled),
-            base_url: body.base_url,
-            api_key: body.api_key,
-            plan_key: body.plan_key,
-            country: body.country,
-            currency: body.currency
-        });
-        res.json({ success: true, message: '第三方代充 API 配置已保存' });
+        await store.saveGptApiConfig(req.body || {});
+        res.json({ success: true, message: 'Orbitcard HMAC 代充配置已保存' });
     } catch (error) {
-        res.status(500).json({ success: false, message: error.message });
+        res.status(400).json({ success: false, message: error.message });
     }
 });
 
@@ -2521,7 +2493,6 @@ app.post('/api/admin/gpt-api/test', async (req, res) => {
         const saved = await store.getGptApiConfig();
         const merged = {
             ...saved,
-            provider: body.provider || saved.provider,
             base_url: String(body.base_url || '').trim() || saved.base_url,
             api_key: String(body.api_key || '').trim() || saved.api_key
         };
@@ -2558,7 +2529,10 @@ app.get('/api/admin/gpt-api/status', async (req, res) => {
             updated_at: order.updated_at,
             order_id: order.gpt_api_order_id,
             task_id: order.gpt_api_task_id,
-            topup_code: order.gpt_api_topup_code || null
+            topup_code: order.gpt_api_topup_code || null,
+            orbitcard_order: (() => {
+                try { return require('./orbitcard-client').summary(JSON.parse(order.gpt_api_raw || '{}')); } catch (_) { return {}; }
+            })()
         }));
         res.json({
             success: true,
@@ -3318,283 +3292,53 @@ function spawnCheckoutDebugWorker({ task, token, sessionRaw, planType, region, p
     })();
 }
 
-/**
- * 第三方 GPT 代充 API 任务 Worker（协议见 协议api.md）
- *
- * 流程：
- * 1. 读取后台配置（base_url / api_key / plan_key / country / currency / enabled）
- * 2. 从银行卡池预留一张卡作为 new_card（可选，失败则跳过）
- * 3. POST /pay 提交代充（带 Idempotency-Key = `cdk-${cdk}`）
- * 4. 轮询订单/任务状态，直到终态（success / failed）
- * 5. 将结果写回 task_logs（含 gpt_api_order_id / gpt_api_task_id / gpt_api_raw）
- */
-const GPT_API_PLAN_MAP = Object.freeze({ plus: 'plus', pro_5x: 'pro5x', pro_20x: 'pro20x' });
-
-function mapGptApiPlanKey(planType) {
-    const key = GPT_API_PLAN_MAP[String(planType || '').trim()];
-    if (!key) throw new Error(`第三方代充接口尚未配置套餐代码: ${planType}；请使用本地 Checkout 流程`);
-    return key;
-}
-
-function parseCardExpiry(value) {
-    const match = String(value || '').trim().match(/^(0?[1-9]|1[0-2])\s*\/?\s*(\d{2}|\d{4})$/);
-    if (!match) throw new Error('银行卡有效期格式错误，应为 MMYY、MM/YY 或 MM/YYYY');
-    const year = Number(match[2].length === 2 ? `20${match[2]}` : match[2]);
-    return { month: Number(match[1]), year };
-}
-
-async function runGptApiWorker({ task, token, session, cdk, planType }) {
+// All third-party redemptions use Orbitcard HMAC with a persisted CDK/order binding.
+async function runGptApiWorker({ task, session, cdk, planType }) {
     const { jobKey } = task;
-    const sessionPayload = session && typeof session === 'object'
-        ? session
-        : { access_token: token };
-    const accountEmail = task.tokenPreview || '';
-    let shouldRollbackCdk = true;
-    let reservedCard = null;
-    let orbitcardSubmitted = false;
-
+    let submitted = false;
     const setProgress = async (status, progress, message, extra = {}) => {
-        await store.updateTaskLog(jobKey, { status, progress, message, ...extra });
-        broadcastToTask(jobKey, {
-            type: status === 'running' ? 'progress' : 'status',
-            jobKey,
-            status,
-            progress,
-            message,
-            cdkCode: cdk
+        const saved = await store.settleOrbitcardTask(jobKey, {
+            status, progress, message, ...extra,
+            orbitcardState: extra.orbitcardState || (status === 'failed' ? 'rejected' : 'prepared')
         });
+        if (!saved.applied) throw new Error('兑换尝试已结束或已被替换，停止提交');
+        broadcastToTask(jobKey, { type: status === 'running' ? 'progress' : 'status', jobKey, status, progress, message, cdkCode: cdk });
     };
-
     try {
-        const cfg = await store.getGptApiConfig();
-        if (!cfg.enabled) {
-            throw new Error('第三方代充 API 未启用，请在后台「系统配置」中开启并填写 API 地址与 Key');
-        }
-        if (!cfg.api_key) {
-            throw new Error('第三方代充 API Key 未配置');
-        }
-
-        if (cfg.provider === 'orbitcard') {
-            shouldRollbackCdk = await require('./orbitcard-worker').run({
-                cfg, planType, session: sessionPayload, cdk, setProgress, sleep,
-                onSubmission: () => { shouldRollbackCdk = false; orbitcardSubmitted = true; },
-                onOutcome: (status) => notifyTaskOutcome({ event: status === 'success' ? 'success' : 'failure', email: accountEmail, cdk, jobKey, message: status === 'success' ? 'Orbitcard 订阅成功' : 'Orbitcard 已确认订阅失败' }),
-                broadcast: (captcha) => broadcastToTask(jobKey, { type: 'orbitcard-captcha', jobKey, captcha })
-            });
-            if (!shouldRollbackCdk) await store.resetCdkFailure(cdk);
-            return;
-        }
-
-        const apiPlanKey = mapGptApiPlanKey(planType);
-        await setProgress('running', 10, '正在检查 Session 格式...');
-        const inspect = await gptApi.inspectPay(cfg, {
-            planKey: apiPlanKey,
-            session: sessionPayload
+        if (!task.orbitcardClientOrderNo) throw new Error('任务缺少 Orbitcard 订单绑定，请重新验证 CDK');
+        const cfg = task.apiConfig || await store.getGptApiConfig();
+        if (!cfg.enabled || !cfg.api_key) throw new Error('Orbitcard 代充未启用或 API Key 未配置');
+        await require('./orbitcard-worker').run({
+            cfg, planType, session, cdk, setProgress, sleep,
+            clientOrderNo: task.orbitcardClientOrderNo, attemptKey: jobKey,
+            onSubmission: () => { submitted = true; },
+            onOutcome: status => {
+                if (status === 'success') store.resetCdkFailure(cdk).catch(() => {});
+                notifyTaskOutcome({ event: status === 'success' ? 'success' : 'failure',
+                    email: session?.user?.email || '', cdk, jobKey,
+                    message: status === 'success' ? 'Orbitcard 订阅成功' : 'Orbitcard 已确认订阅失败' });
+            },
+            broadcast: captcha => broadcastToTask(jobKey, { type: 'orbitcard-captcha', jobKey, captcha })
         });
-        if (!inspect.success) {
-            const statusText = inspect.status ? ` (HTTP ${inspect.status})` : '';
-            const detail = [inspect.error, inspect.reason, inspect.upstreamStatus ? `upstream ${inspect.upstreamStatus}` : ''].filter(Boolean).join(' / ');
-            throw new Error(`Session 格式或有效期检查失败${statusText}: ${detail || 'session_invalid'}`);
-        }
-        logTask(jobKey, 'Session 本機格式／有效期檢查通過；上游將於代充任務中驗證登入狀態');
-
-        const proxy = await store.getActiveProxy(cfg.country || 'PH');
-        logTask(jobKey, proxy
-            ? `第三方 API 协议代理 ${maskProxyForLog(proxy)}`
-            : '第三方 API 使用平台启用代理池');
-
-        // 本機检查通过后才从卡池预留一张卡，避免无效 Session 占用资产。
-        let newCard = null;
-        reservedCard = await store.reserveCard(`gptapi_${jobKey}`);
-        if (!reservedCard) {
-            throw new Error('银行卡池暂无可用卡片，请在后台「银行卡池」导入银行卡后再试');
-        }
-        const expiry = parseCardExpiry(reservedCard.card_expiry);
-        newCard = {
-            number: reservedCard.card_number,
-            exp_month: expiry.month,
-            exp_year: expiry.year,
-            cvc: reservedCard.card_cvc,
-            name: reservedCard.card_holder || 'API User',
-            country: cfg.country || 'PH'
-        };
-        logTask(jobKey, `第三方 API 使用卡池预留卡 ...${String(reservedCard.card_number || '').slice(-4)}`);
-
-        // 套餐从 CDK 的 plan_type 同步；国家币种使用协议默认值（PH / PHP）
-        await setProgress('running', 20, '正在提交代充订单...');
-        const idempotencyKey = `cdk-${cdk}`;
-        const submit = await gptApi.submitPay(cfg, {
-            planKey: apiPlanKey,
-            session: sessionPayload,
-            country: cfg.country,
-            currency: cfg.currency,
-            newCard,
-            proxy,
-            clientRef: `kc-cdk-${cdk}-${jobKey}`,
-            idempotencyKey
-        });
-
-        if (!submit.success) {
-            const statusText = submit.status ? ` (HTTP ${submit.status})` : '';
-            const detail = submit.error
-                || (submit.data && typeof submit.data === 'object' ? JSON.stringify(submit.data).slice(0, 300) : '');
-            throw new Error(`代充提交失败${statusText}: ${detail || '未知错误'}`);
-        }
-
-        const orderId = submit.orderId || submit.taskId || submit.id;
-        const taskId = submit.taskId || null;
-        if (!orderId) {
-            throw new Error(`代充提交成功但未返回订单号: ${JSON.stringify(submit.data).slice(0, 300)}`);
-        }
-
-        await setProgress('running', 35, `代充订单已创建 ${orderId}，正在等待上游处理...`, {
-            gptApiOrderId: orderId,
-            gptApiTaskId: taskId,
-            gptApiRaw: JSON.stringify(submit.data),
-            gptApiTopupCode: submit.topupCode
-        });
-
-        // 轮询状态
-        let finalStatus = 'running';
-        let finalMessage = '第三方代充进行中';
-        let cardDeclined = false;
-        let lastRaw = submit.data;
-        const maxPolls = Number(process.env.GPT_API_MAX_POLLS || 120);
-        const pollIntervalMs = Number(process.env.GPT_API_POLL_INTERVAL_MS || 5000);
-
-        for (let poll = 1; poll <= maxPolls; poll += 1) {
-            await sleep(pollIntervalMs);
-
-            let queryRes = null;
-            if (taskId) {
-                queryRes = await gptApi.queryTask(cfg, taskId);
-            }
-            if (!queryRes || !queryRes.success || !queryRes.rawStatus) {
-                queryRes = await gptApi.queryOrder(cfg, orderId);
-            }
-
-            if (!queryRes || !queryRes.success) {
-                logTask(jobKey, `状态轮询第 ${poll} 次失败: ${queryRes?.error || '未知错误'}`, 'warn');
-                continue;
-            }
-
-            lastRaw = queryRes.data;
-            const rawStatus = String(queryRes.rawStatus || '').toLowerCase();
-            const progress = Math.min(95, 40 + poll);
-
-            if (isTerminalGptApiStatus(rawStatus)) {
-                const businessResult = lastRaw && typeof lastRaw.result === 'object' ? lastRaw.result : {};
-                const succeeded = businessResult.ok === false ? false : isSuccessGptApiStatus(rawStatus);
-                const failureDetail = businessResult.error || lastRaw?.error || businessResult.status || rawStatus || 'unknown';
-                cardDeclined = !succeeded && isPaymentDeclined(String(failureDetail));
-                finalStatus = succeeded ? 'success' : 'failed';
-                finalMessage = succeeded ? '第三方代充开通成功' : `第三方代充失败: ${failureDetail}`;
-                await setProgress(
-                    finalStatus,
-                    succeeded ? 100 : 99,
-                    finalMessage,
-                    {
-                        gptApiRaw: JSON.stringify(lastRaw),
-                        gptApiTopupCode: gptApi.extractTopupCode(lastRaw)
-                    }
-                );
-                break;
-            }
-
-            await setProgress('running', progress, `上游处理中 (${rawStatus || 'pending'})...`);
-        }
-
-        if (finalStatus === 'running') {
-            finalStatus = 'failed';
-            finalMessage = '第三方代充超时未完成，请稍后在第三方平台查询订单状态';
-            await setProgress(finalStatus, 99, finalMessage, {
-                gptApiRaw: JSON.stringify(lastRaw),
-                gptApiTopupCode: gptApi.extractTopupCode(lastRaw)
-            });
-        }
-
-        if (finalStatus === 'success') {
-            shouldRollbackCdk = false;
-            await store.resetCdkFailure(cdk);
-            const usageResult = await store.recordCardUsage(reservedCard?.id);
-            await store.releaseCard(reservedCard?.id).catch(() => { });
-            if (usageResult.exhausted) {
-                logTask(jobKey, `卡 ...${String(reservedCard?.card_number || '').slice(-4)} 已达到订阅绑定上限，已标记为订阅额度用尽`);
-            }
-            notifyTaskOutcome({ event: 'success', email: accountEmail, cdk, jobKey, message: finalMessage });
-        } else {
-            if (cardDeclined) {
-                const declineResult = await store.recordCardDecline(reservedCard?.id);
-                logTask(
-                    jobKey,
-                    declineResult.exhausted
-                        ? `第三方代充明确拒付，卡 ...${String(reservedCard?.card_number || '').slice(-4)} 已达到拒付上限并标记为已报废`
-                        : `第三方代充明确拒付，卡 ...${String(reservedCard?.card_number || '').slice(-4)} 拒付计数 ${declineResult.declineCount}`,
-                    'warn'
-                );
-            }
-            await store.releaseCard(reservedCard?.id).catch(() => { });
-            notifyTaskOutcome({ event: 'failure', email: accountEmail, cdk, jobKey, message: finalMessage });
-        }
     } catch (error) {
-        console.error(`[GPT API Task Error] ${jobKey}:`, error);
-        logTask(jobKey, `第三方代充任务异常: ${error.message}`, 'error');
-        await store.releaseCard(reservedCard?.id).catch(() => { });
-        const errorStatus = orbitcardSubmitted ? 'manual' : 'failed';
-        const errorMessage = orbitcardSubmitted ? 'Orbitcard 提交后处理异常，结果待确认，请联系管理员查询原订单，勿重复支付' : error.message;
-        await store.updateTaskLog(jobKey, {
-            status: errorStatus,
-            message: errorMessage,
-            progress: 0,
-            cdkCode: cdk
-        });
-        broadcastToTask(jobKey, {
-            type: 'status',
-            jobKey,
-            status: errorStatus,
-            message: errorMessage,
-            cdkCode: cdk,
-            progress: 0
-        });
-        notifyTaskOutcome({ event: 'failure', email: accountEmail, cdk, jobKey, message: error.message });
+        const status = submitted ? 'manual' : 'failed';
+        const message = submitted ? 'Orbitcard 提交后处理异常，结果待确认，请继续查询原订单，勿重复支付' : error.message;
+        logTask(jobKey, message, 'error');
+        if (task.orbitcardClientOrderNo) {
+            const saved = await store.settleOrbitcardTask(jobKey, { status, message, progress: 0,
+                orbitcardState: submitted ? 'manual' : 'rejected' });
+            if (!saved.applied) return;
+        } else {
+            await store.updateTaskLog(jobKey, { status: 'manual', message, progress: 0 });
+        }
+        broadcastToTask(jobKey, { type: 'status', jobKey, status, progress: 0, message, cdkCode: cdk });
     } finally {
         releaseForegroundSlot(jobKey);
-        if (shouldRollbackCdk) {
-            await store.markCdkUnused(cdk).catch(() => { });
-            logTask(jobKey, `CDK ${cdk} 已回滚为未使用`);
-        }
         if (getTotalActiveJobs() === 0) {
-            const maintenanceModeState = await store.getMaintenanceModeState();
-            if (maintenanceModeState.enabled && maintenanceModeState.drain) {
-                await store.setMaintenanceModeState(true, false);
-            }
+            const state = await store.getMaintenanceModeState();
+            if (state.enabled && state.drain) await store.setMaintenanceModeState(true, false);
         }
     }
-}
-
-function maskProxyForLog(proxyUrl) {
-    const raw = String(proxyUrl || '');
-    try {
-        const masked = raw.replace(/\/\/([^@/]+)@/, '//***:***@');
-        return masked || '(空)';
-    } catch (_) {
-        return '(已配置)';
-    }
-}
-
-const GPT_API_TERMINAL_SUCCESS = new Set(['success', 'succeeded', 'completed', 'paid', 'active', '开通成功', '成功']);
-const GPT_API_TERMINAL_FAILED = new Set(['failed', 'declined', 'canceled', 'cancelled', 'error', 'expired', 'rejected', '失败', '取消']);
-
-function isSuccessGptApiStatus(rawStatus) {
-    const s = String(rawStatus || '').toLowerCase().trim();
-    return [...GPT_API_TERMINAL_SUCCESS].some((kw) => s.includes(kw.toLowerCase()));
-}
-
-function isTerminalGptApiStatus(rawStatus) {
-    const s = String(rawStatus || '').toLowerCase().trim();
-    if (!s) return false;
-    if (isSuccessGptApiStatus(s)) return true;
-    return [...GPT_API_TERMINAL_FAILED].some((kw) => s.includes(kw.toLowerCase()));
 }
 
 function spawnActivationWorker({ task, token, sessionRaw, cdk, cdkDetails, clientIp }) {
@@ -3874,6 +3618,9 @@ async function handleActivationRequest(req, res) {
         return res.status(400).json({ success: false, message: tokenCheck.message });
     }
 
+    let claimedTask = null;
+    let ownsCdkLock = false;
+    let dispatched = false;
     try {
         await ensureStoreReady();
         const maintenanceModeState = await store.getMaintenanceModeState();
@@ -3937,25 +3684,30 @@ async function handleActivationRequest(req, res) {
             }
         }
 
-        const lockSuccess = await store.markCdkUsed(cdk);
-        if (!lockSuccess) {
-            return res.status(403).json({ success: false, message: 'CDK 不可用或正在被他人使用' });
-        }
-
         const storedSession = buildStoredSessionPayload(rawSession, sessionJson, token);
-        const task = await store.createTaskLog({
-            tokenPreview: extractSessionPreview(storedSession),
-            sessionPayload: storedSession,
-            cdkCode: cdk,
-            phone: null,
-            cardLast4: null,
-            status: 'running',
-            progress: 3
-        });
+        let task;
+        if (useGptApi) {
+            if (!sessionJson?.user || !sessionJson?.account || !(sessionJson.accessToken || sessionJson.access_token)) {
+                return res.status(400).json({ success: false, message: 'Orbitcard 代充需要目标账号完整 Session JSON（含 user、account、accessToken）' });
+            }
+            task = await store.createOrbitcardTask({ cdk, planType: cdkDetails.plan_type || 'plus',
+                email: String(sessionJson.user.email || ''), baseUrl: gptApiConfig.base_url });
+            if (!task) return res.status(409).json({ success: false, message: 'CDK 已使用或正在处理，请重新验证 CDK 查询原订单' });
+            ownsCdkLock = true;
+        } else {
+            const lockSuccess = await store.markCdkUsed(cdk);
+            if (!lockSuccess) return res.status(403).json({ success: false, message: 'CDK 不可用或正在被他人使用' });
+            ownsCdkLock = true;
+            task = await store.createTaskLog({ tokenPreview: extractSessionPreview(storedSession), sessionPayload: storedSession,
+                cdkCode: cdk, phone: null, cardLast4: null, status: 'running', progress: 3 });
+        }
+        claimedTask = task;
+        task.apiConfig = gptApiConfig;
 
         logTask(task.jobKey, `任务已创建，CDK=${cdk} mode=${useGptApi ? 'gpt-api' : 'local'}`);
         reserveForegroundSlot(task.jobKey);
 
+        dispatched = true;
         if (useGptApi) {
             runGptApiWorker({ task, token, session: JSON.parse(storedSession), cdk, planType: cdkDetails.plan_type || 'plus' }).catch((error) => {
                 console.error(`[GPT API Worker] ${task.jobKey}:`, error);
@@ -3967,10 +3719,18 @@ async function handleActivationRequest(req, res) {
         return res.json({
             success: true,
             jobKey: task.jobKey,
+            provider: task.orbitcardClientOrderNo ? 'orbitcard' : null,
             message: '任务已启动，正在为您开通中...'
         });
     } catch (error) {
-        try { await store.markCdkUnused(cdk); } catch (_) { }
+        if (ownsCdkLock && !dispatched) {
+            try {
+                if (claimedTask?.orbitcardClientOrderNo) {
+                    await store.settleOrbitcardTask(claimedTask.jobKey, { status: 'failed', progress: 0,
+                        message: '任务尚未提交，CDK 已释放', orbitcardState: 'rejected' });
+                } else { await store.markCdkUnused(cdk); }
+            } catch (_) { }
+        }
         return res.status(500).json({ success: false, message: error.message });
     }
 }
@@ -3978,6 +3738,48 @@ async function handleActivationRequest(req, res) {
 app.post('/api/run-process', handleActivationRequest);
 
 app.post('/api/admin/trigger-activation', handleActivationRequest);
+
+function publicOrbitcardOrder(task) {
+    let raw = {};
+    try { raw = JSON.parse(task.gpt_api_raw || '{}'); } catch (_) { }
+    return {
+        provider: 'orbitcard', jobKey: task.job_key, status: task.status,
+        message: task.message, progress: Number(task.progress || 0),
+        cdk_state: ['prepared','submitting','pending','manual'].includes(task.orbitcard_state) ? 'reserved'
+            : task.orbitcard_state === 'success' ? 'redeemed' : 'available',
+        order_id: task.gpt_api_order_id || null, client_order_no: task.orbitcard_client_order_no,
+        order: require('./orbitcard-client').summary(raw)
+    };
+}
+
+// The CDK acts as the existing redemption secret. This route only queries the linked order.
+app.post('/api/cdk/orbitcard/status', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const cdk = String(req.body?.cdk || '').trim();
+    if (!cdk) return res.status(400).json({ success: false, message: '请输入 CDK' });
+    try {
+        await ensureStoreReady();
+        const task = await store.getOrbitcardTaskByCdk(cdk);
+        if (!task) return res.status(404).json({ success: false, message: '该 CDK 尚无 Orbitcard 订单' });
+        if (!activeForegroundJobs.has(task.job_key) && task.orbitcard_state === 'prepared') {
+            await store.settleOrbitcardTask(task.job_key, { status: 'failed', progress: 0,
+                message: '兑换在提交前中断，CDK 已释放，可以重新兑换', orbitcardState: 'rejected', expectedState: 'prepared' });
+            return res.json({ success: true, data: publicOrbitcardOrder(await store.getOrbitcardTaskByCdk(cdk)), query_skipped: true });
+        }
+        if (activeForegroundJobs.has(task.job_key) || ['failed','rejected'].includes(task.orbitcard_state)) {
+            return res.json({ success: true, data: publicOrbitcardOrder(task), query_skipped: true });
+        }
+        const result = await require('./orbitcard-query').refresh({ cfg: await store.getGptApiConfig(), task,
+            persist: store.settleOrbitcardTask });
+        const latest = await store.getOrbitcardTaskByCdk(cdk);
+        if (!result.success) return res.json({ success: false, message: result.error,
+            retry_after_ms: result.retryAfterMs, stop_tracking: result.stopTracking, data: publicOrbitcardOrder(latest) });
+        const sameAttempt = latest?.job_key === task.job_key;
+        res.json({ success: true, data: publicOrbitcardOrder(latest), captcha: sameAttempt && result.applied ? result.captcha : null });
+    } catch (_) {
+        res.status(500).json({ success: false, message: '订单查询暂不可用，CDK 保持原状态，请稍后重试' });
+    }
+});
 
 app.post('/api/verify-cdk', async (req, res) => {
     const cdk = String(req.body?.cdk || '').trim();
@@ -3997,7 +3799,8 @@ app.post('/api/verify-cdk', async (req, res) => {
                     type: cdkData.type || '自助',
                     plan_type: cdkData.plan_type || 'plus',
                     plan_label: getPlanTypeLabel(cdkData.plan_type || 'plus'),
-                    status: 'processing',
+                    status: runningTask.status === 'success' ? 'success' : runningTask.status === 'manual' ? 'manual' : 'processing',
+                    provider: runningTask.orbitcard_client_order_no ? 'orbitcard' : null,
                     jobKey: runningTask.job_key,
                     message: runningTask.message || '当前 CDK 正在开通中'
                 }
@@ -4054,7 +3857,7 @@ app.get('/api/cdk/query', async (req, res) => {
 
         const runningTask = await store.getRunningTaskByCdk(cdk);
         const cdkStatus = runningTask
-            ? '开通中'
+            ? (runningTask.status === 'success' ? '已使用' : runningTask.status === 'manual' ? '结果待确认' : '开通中')
             : (cdkData.used_at ? '已使用' : '未使用');
 
         res.json({

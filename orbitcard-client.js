@@ -2,6 +2,7 @@
 
 const axios = require('axios');
 const crypto = require('node:crypto');
+const { DEFAULT_BASE_URL, normalizeBaseUrl } = require('./orbitcard-config');
 
 const PLAN_MAP = Object.freeze({ plus: 'gpt-plus', pro100: 'gpt-pro-5x', pro200: 'gpt-pro-20x', pro500: 'gpt-pro-25x', pro_5x: 'gpt-pro-5x', pro_20x: 'gpt-pro-20x' });
 
@@ -12,10 +13,7 @@ async function request(cfg, operation, body = {}, idempotencyKey = '') {
     if (!key || !secret) return { success: false, error: '请配置 API Key 和服务端 ORBITCARD_API_SECRET' };
     let url;
     try {
-        url = new URL(cfg.base_url || 'https://orbitcard.cc');
-        if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || !['', '/'].includes(url.pathname)) {
-            throw new Error();
-        }
+        url = new URL(normalizeBaseUrl(cfg.base_url));
     } catch (_) { return { success: false, error: 'Orbitcard Base URL 必须为 HTTPS 域名根地址' }; }
     const path = `/api/open/v1/${operation}`;
     const raw = JSON.stringify(body);
@@ -76,4 +74,23 @@ function captcha(data) {
     return { id: cap.id, url: cap.url, expires_at: cap.expires_at };
 }
 
-module.exports = { request, fetchPlans, outcome, summary, captcha, PLAN_MAP };
+function maskApiKey(value) {
+    const key = String(value || '').trim();
+    return !key ? '' : key.length <= 8 ? '****' : `${key.slice(0, 6)}…${key.slice(-4)}`;
+}
+
+async function queryBalance(cfg) {
+    return request(cfg, 'getAccountBalance');
+}
+
+async function testConnection(cfg) {
+    const [plans, balance] = await Promise.all([fetchPlans(cfg), queryBalance(cfg)]);
+    if (!plans.success) return { success: false, error: `套餐查询失败: ${plans.error}` };
+    return { success: true, message: `Orbitcard HMAC 连接成功，可用套餐 ${plans.plans.length} 个`,
+        plans: plans.plans, gptPlans: plans.gptPlans, creditPlans: [],
+        balance: balance.success ? balance.data : null,
+        balanceError: balance.success ? null : balance.error };
+}
+
+module.exports = { DEFAULT_BASE_URL, normalizeBaseUrl, maskApiKey, request, fetchPlans, queryBalance,
+    testConnection, outcome, summary, captcha, PLAN_MAP };

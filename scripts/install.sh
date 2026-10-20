@@ -1,9 +1,16 @@
 #!/bin/bash
 # ============================================================
-# ChatGPT Plus 自动化开通工具 — 一键安装脚本
+# Pay-gpt-Orbit — 安装脚本（默认仅安装 API 服务）
 # 支持 macOS / Ubuntu / Debian / CentOS / RHEL
 # ============================================================
 set -e
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WITH_BROWSER=0
+case "${1:-}" in
+    "") ;;
+    --with-browser) WITH_BROWSER=1 ;;
+    *) echo "Usage: bash scripts/install.sh [--with-browser]" >&2; exit 1 ;;
+esac
 
 # 颜色输出
 RED='\033[0;31m'
@@ -42,8 +49,8 @@ check_node() {
     fi
 
     NODE_VERSION=$(node -v | sed 's/v//' | cut -d. -f1)
-    if [ "$NODE_VERSION" -lt 20 ]; then
-        error "需要 Node.js >= 20，当前版本: $(node -v)。请升级后重试。"
+    if [ "$NODE_VERSION" -lt 24 ]; then
+        error "需要 Node.js >= 24，当前版本: $(node -v)。推荐安装 Node.js 24 LTS。"
     fi
     success "Node.js $(node -v) ✓"
 }
@@ -52,21 +59,22 @@ install_node() {
     case "$OS" in
         macos)
             if command -v brew &> /dev/null; then
-                brew install node@20
+                brew install node@24
+                export PATH="$(brew --prefix node@24)/bin:$PATH"
             else
-                error "请先安装 Homebrew (https://brew.sh) 或手动安装 Node.js 20+"
+                error "请先安装 Homebrew (https://brew.sh) 或手动安装 Node.js 24 LTS"
             fi
             ;;
         debian)
-            curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+            curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -
             sudo apt-get install -y nodejs
             ;;
         rhel)
-            curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
+            curl -fsSL https://rpm.nodesource.com/setup_24.x | sudo bash -
             sudo yum install -y nodejs
             ;;
         *)
-            error "请手动安装 Node.js 20+: https://nodejs.org/"
+            error "请手动安装 Node.js 24 LTS: https://nodejs.org/"
             ;;
     esac
 }
@@ -104,7 +112,7 @@ install_playwright_deps() {
 # 安装 npm 依赖
 install_deps() {
     info "安装 npm 依赖..."
-    npm install --production
+    npm ci --omit=dev --ignore-scripts
     success "npm 依赖已安装"
 }
 
@@ -115,7 +123,7 @@ install_browser() {
     success "Chromium 浏览器已安装"
 }
 
-# 安装 hCaptcha Python 求解器（可选，失败不阻断主流程）
+# 安装 hCaptcha Python 求解器（仅 --with-browser）
 install_hcaptcha_solver() {
     if ! command -v python3 &> /dev/null; then
         warn "未找到 python3，跳过 hCaptcha solver 安装（可在 Docker 部署中自动内置）"
@@ -149,7 +157,7 @@ install_hcaptcha_solver() {
 setup_env() {
     if [ ! -f .env ]; then
         cp .env.example .env
-        warn "已创建 .env 文件，请编辑填写 MySQL 密码和代理配置："
+        warn "已创建 .env，请填写数据库、管理员信息和 ORBITCARD_API_SECRET："
         warn "  nano .env"
     else
         success ".env 文件已存在"
@@ -160,17 +168,21 @@ setup_env() {
 main() {
     echo ""
     echo "============================================"
-    echo "  ChatGPT Plus 自动化开通工具 — 安装脚本"
+    echo "  Pay-gpt-Orbit — 安装脚本"
     echo "============================================"
     echo ""
 
     detect_os
     check_node
-    install_playwright_deps
     install_deps
-    install_browser
-    install_hcaptcha_solver
     setup_env
+    if [ "$WITH_BROWSER" = "1" ]; then
+        install_playwright_deps
+        install_browser
+        install_hcaptcha_solver
+    else
+        info "Orbitcard API 模式无需 Chromium / Python；本地自动化可加 --with-browser 安装。"
+    fi
 
     echo ""
     success "============================================"
@@ -181,8 +193,8 @@ main() {
     echo "  1. 编辑配置: nano .env"
     echo "  2. 确保 MySQL 已运行并填写正确的连接信息"
     echo "  3. 启动服务: npm start"
-    echo "  4. 访问后台: http://localhost:3000/admin-login.html"
-    echo "     默认密码: admin123"
+    echo "  4. 访问后台: http://localhost:3000/admin-login（或已设置的端口/路径）"
+    echo "  5. 配置 Orbitcard API Key 和平台卡 ID，测试连接后启用第三方代充"
     echo ""
 }
 

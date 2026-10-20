@@ -244,86 +244,67 @@ async function ensureHcaptchaConfigDefaults() {
 
 // ─── 第三方 GPT 代充 API 配置 ────────────────────────────────────────────────
 
+const orbitcardConfig = require('./orbitcard-config');
 const GPT_API_CONFIG_KEYS = [
-    'gpt_api_provider', 'orbitcard_card_id', 'orbitcard_region', 'orbitcard_max_fee',
-    'gpt_api_enabled',
-    'gpt_api_base_url',
-    'gpt_api_key',
-    'gpt_api_plan_key',
-    'gpt_api_country',
-    'gpt_api_currency'
+    'gpt_api_enabled', 'gpt_api_base_url', 'gpt_api_key', 'gpt_api_protocol_version',
+    'orbitcard_card_id', 'orbitcard_region', 'orbitcard_max_fee'
 ];
 
 async function ensureGptApiColumns() {
+    for (const [name, definition] of Object.entries({ orbitcard_client_order_no: 'VARCHAR(128) NULL', orbitcard_state: 'VARCHAR(32) NULL', orbitcard_plan_type: 'VARCHAR(64) NULL', orbitcard_email: 'VARCHAR(255) NULL', orbitcard_base_url: 'VARCHAR(255) NULL' })) {
+        await ensureColumn('task_logs', name, definition);
+    }
     await ensureColumn('task_logs', 'gpt_api_order_id', "VARCHAR(128) NULL DEFAULT NULL");
     await ensureColumn('task_logs', 'gpt_api_task_id', "VARCHAR(128) NULL DEFAULT NULL");
     await ensureColumn('task_logs', 'gpt_api_raw', "MEDIUMTEXT NULL");
 }
 
 async function ensureGptApiConfigDefaults() {
-    const defaults = [
-        ['gpt_api_enabled', '0'],
-        ['gpt_api_base_url', 'https://kc.vpss.eu.cc/'],
-        ['gpt_api_key', ''],
-        ['gpt_api_plan_key', 'plus'],
-        ['gpt_api_country', 'PH'],
-        ['gpt_api_currency', 'PHP']
-    ];
-    for (const [key, value] of defaults) {
-        await runExecute(
-            `INSERT INTO app_config (config_key, config_value)
-             VALUES (?, ?)
-             ON DUPLICATE KEY UPDATE config_value = config_value`,
-            [key, value]
-        );
-    }
+    await withTransaction(async connection => {
+        const options = { connection };
+        const keys = [...GPT_API_CONFIG_KEYS, ...orbitcardConfig.RETIRED_CONFIG_KEYS];
+        const rows = await runQuery(`SELECT config_key, config_value FROM app_config WHERE config_key IN (${keys.map(() => '?').join(', ')}) FOR UPDATE`, keys, options);
+        const saved = Object.fromEntries(rows.map(row => [row.config_key, row.config_value]));
+        const defaults = { gpt_api_enabled: '0', gpt_api_base_url: orbitcardConfig.DEFAULT_BASE_URL,
+            gpt_api_key: '', orbitcard_card_id: '', orbitcard_region: '', orbitcard_max_fee: '' };
+        for (const [key, value] of Object.entries(defaults)) {
+            if (saved[key] == null) await runExecute('INSERT IGNORE INTO app_config (config_key, config_value) VALUES (?, ?)', [key, value], options);
+        }
+        for (const [key, value] of Object.entries(orbitcardConfig.migrationValues(saved))) {
+            await runExecute(`INSERT INTO app_config (config_key, config_value) VALUES (?, ?)
+                ON DUPLICATE KEY UPDATE config_value = VALUES(config_value)`, [key, value], options);
+        }
+        const retired = orbitcardConfig.RETIRED_CONFIG_KEYS;
+        await runExecute(`DELETE FROM app_config WHERE config_key IN (${retired.map(() => '?').join(', ')})`, retired, options);
+    });
 }
 
 async function getGptApiConfig() {
-    const rows = await runQuery(
-        `SELECT config_key, config_value
-         FROM app_config
-         WHERE config_key IN (${GPT_API_CONFIG_KEYS.map(() => '?').join(', ')})`,
-        GPT_API_CONFIG_KEYS
-    );
-    const map = Object.fromEntries(rows.map((row) => [row.config_key, row.config_value]));
+    const rows = await runQuery(`SELECT config_key, config_value FROM app_config
+        WHERE config_key IN (${GPT_API_CONFIG_KEYS.map(() => '?').join(', ')})`, GPT_API_CONFIG_KEYS);
+    const map = Object.fromEntries(rows.map(row => [row.config_key, row.config_value]));
     return {
-        provider: map.gpt_api_provider === 'orbitcard' ? 'orbitcard' : 'legacy',
+        provider: 'orbitcard',
+        enabled: map.gpt_api_enabled === '1',
+        base_url: String(map.gpt_api_base_url || orbitcardConfig.DEFAULT_BASE_URL).trim(),
+        api_key: String(map.gpt_api_key || '').trim(),
         orbitcard_card_id: String(map.orbitcard_card_id || ''),
         orbitcard_region: String(map.orbitcard_region || ''),
-        orbitcard_max_fee: String(map.orbitcard_max_fee || ''),
-        enabled: String(map.gpt_api_enabled || '0') === '1',
-        base_url: String(map.gpt_api_base_url || 'https://kc.vpss.eu.cc/').trim()
-            || 'https://kc.vpss.eu.cc/',
-        api_key: String(map.gpt_api_key || '').trim(),
-        plan_key: String(map.gpt_api_plan_key || 'plus').trim() || 'plus',
-        country: String(map.gpt_api_country || 'PH').trim().toUpperCase() || 'PH',
-        currency: String(map.gpt_api_currency || 'PHP').trim().toUpperCase() || 'PHP'
+        orbitcard_max_fee: String(map.orbitcard_max_fee || '')
     };
 }
 
-async function saveGptApiConfig(config = {}) {
-    const existing = await getGptApiConfig();
-    const apiKey = String(config.api_key || '').trim() || existing.api_key || '';
-    for (const key of ['provider', 'orbitcard_card_id', 'orbitcard_region', 'orbitcard_max_fee']) {
-        const value = String(config[key] ?? existing[key] ?? '').trim();
-        await runExecute(`INSERT INTO app_config (config_key, config_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE config_value = VALUES(config_value)`,
-            [key === 'provider' ? 'gpt_api_provider' : key, value]);
-    }
-    await runExecute(
-        `INSERT INTO app_config (config_key, config_value)
-         VALUES (?, ?), (?, ?), (?, ?), (?, ?), (?, ?), (?, ?)
-         ON DUPLICATE KEY UPDATE config_value = VALUES(config_value)`,
-        [
-            'gpt_api_enabled', config.enabled ? '1' : '0',
-            'gpt_api_base_url', String(config.base_url || existing.base_url || 'https://kc.vpss.eu.cc/').trim()
-                .replace(/\/+$/, '') || 'https://kc.vpss.eu.cc/',
-            'gpt_api_key', apiKey,
-            'gpt_api_plan_key', String(config.plan_key || existing.plan_key || 'plus').trim() || 'plus',
-            'gpt_api_country', String(config.country || existing.country || 'PH').trim().toUpperCase() || 'PH',
-            'gpt_api_currency', String(config.currency || existing.currency || 'PHP').trim().toUpperCase() || 'PHP'
-        ]
-    );
+async function saveGptApiConfig(input = {}) {
+    const cfg = orbitcardConfig.prepareConfig(input, await getGptApiConfig(), Boolean(process.env.ORBITCARD_API_SECRET));
+    const values = { gpt_api_enabled: cfg.enabled ? '1' : '0', gpt_api_base_url: cfg.base_url,
+        gpt_api_key: cfg.api_key, gpt_api_protocol_version: orbitcardConfig.PROTOCOL_VERSION,
+        orbitcard_card_id: cfg.orbitcard_card_id, orbitcard_region: cfg.orbitcard_region, orbitcard_max_fee: cfg.orbitcard_max_fee };
+    await withTransaction(async connection => {
+        for (const [key, value] of Object.entries(values)) {
+            await runExecute(`INSERT INTO app_config (config_key, config_value) VALUES (?, ?)
+                ON DUPLICATE KEY UPDATE config_value = VALUES(config_value)`, [key, value], { connection });
+        }
+    });
 }
 
 async function hasColumn(tableName, columnName) {
@@ -1189,16 +1170,19 @@ async function listCdks() {
     );
 
     const runningRows = await runQuery(
-        `SELECT cdk_code, MAX(updated_at) AS updated_at
+        `SELECT cdk_code, MAX(updated_at) AS updated_at,
+                MAX(status = 'manual' AND orbitcard_state IN ('submitting','pending','manual')) AS orbitcard_pending_confirmation
          FROM task_logs
-         WHERE status = 'running'
+         WHERE (status = 'running' OR orbitcard_state IN ('prepared','submitting','pending','manual'))
            AND cdk_code IS NOT NULL
          GROUP BY cdk_code`
     );
     const runningSet = new Set(runningRows.map((row) => String(row.cdk_code || '').trim()).filter(Boolean));
+    const pendingSet = new Set(runningRows.filter(row => Number(row.orbitcard_pending_confirmation)).map(row => String(row.cdk_code)));
 
     return rows.map((row) => ({
         code: row.cdk_code,
+        orbitcard_pending_confirmation: pendingSet.has(String(row.cdk_code)),
         status: runningSet.has(String(row.cdk_code || '').trim())
             ? 'processing'
             : (row.used_at ? 'used' : 'unused'),
@@ -2739,7 +2723,7 @@ async function updateAdminPassword(password) {
     };
 }
 
-async function createTaskLog({ tokenPreview, sessionPayload, cdkCode, phone, cardLast4, status, progress = 0 }) {
+async function createTaskLog({ tokenPreview, sessionPayload, cdkCode, phone, cardLast4, status, progress = 0 }, options = {}) {
     const now = new Date();
     const displayTime = now.toLocaleString('zh-CN', { hour12: false });
     const jobKey = `${now.getTime()}-${Math.random().toString(36).slice(2, 10)}`;
@@ -2759,7 +2743,7 @@ async function createTaskLog({ tokenPreview, sessionPayload, cdkCode, phone, car
             message,
             Number(progress || 0),
             displayTime
-        ]
+        ], options
     );
 
     return { jobKey, displayTime };
@@ -2779,10 +2763,10 @@ async function getTaskStatus(jobKey) {
 
 async function getRunningTaskByCdk(cdk) {
     const rows = await runQuery(
-        `SELECT job_key, status, message, progress, updated_at
+        `SELECT job_key, status, message, progress, updated_at, orbitcard_state, orbitcard_client_order_no
          FROM task_logs
          WHERE cdk_code = ?
-           AND status = 'running'
+           AND (status = 'running' OR orbitcard_state IN ('prepared','submitting','pending','manual','success'))
          ORDER BY updated_at DESC, id DESC
          LIMIT 1`,
         [String(cdk)]
@@ -3814,14 +3798,17 @@ async function listRecentGptApiOrders(limit = 10) {
                 gpt_api_order_id, gpt_api_task_id, gpt_api_topup_code, gpt_api_raw
          FROM task_logs
          WHERE (gpt_api_order_id IS NOT NULL OR gpt_api_task_id IS NOT NULL)
-           AND status = 'failed'
+           AND (status = 'failed' OR orbitcard_client_order_no IS NOT NULL)
          ORDER BY updated_at DESC, id DESC
          LIMIT ?`,
         [safeLimit]
     );
 }
 
+const orbitcardCdkStore = require('./orbitcard-cdk-store')({ withTransaction, runQuery, runExecute, createTaskLog });
+
 module.exports = {
+    ...orbitcardCdkStore,
     runQuery,
     runExecute,
     ensureReady,

@@ -1,17 +1,18 @@
 {
-  "name": "kc-gpt-pay",
+  "name": "pay-gpt-orbit",
   "version": "1.0.0",
-  "description": "ChatGPT Plus 自动化开通工具（Stripe 信用卡直付）：注册 → Stripe Checkout → 信用卡卡池支付 → 协议 token 入库",
+  "description": "CDK 订阅兑换平台：Orbitcard HMAC V1 代充、订单追踪与本地 Stripe 自动化",
   "license": "MIT",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "start:headful": "cross-env HEADFUL=1 node server.js",
     "test": "vitest --run",
+    "test:orbitcard": "node --test test/env-loading.node.cjs test/orbitcard-only.node.cjs test/orbitcard-cdk.node.cjs test/plan-registry.node.cjs test/checkout-pro-option.node.cjs test/proxy-region-routing.node.cjs",
     "test:watch": "vitest"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "dependencies": {
     "axios": "^1.16.0",

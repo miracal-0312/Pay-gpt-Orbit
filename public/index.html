@@ -447,7 +447,7 @@
 
                 if (data.success) {
                     verifiedCdk = cdk;
-                    const isProcessing = data.data?.status === 'processing';
+                    const isProcessing = data.data?.status === 'processing' || Boolean(data.data?.provider === 'orbitcard' && data.data?.jobKey);
 
                     if (isProcessing && data.data?.jobKey) {
                         taskCompleted = false;
@@ -460,6 +460,7 @@
                         step1.style.display = 'none';
                         step2.style.display = 'block';
                         initWebSocket(data.data.jobKey);
+                        if (data.data.provider === 'orbitcard') startOrbitcardTracking();
                         return;
                     }
 
@@ -550,6 +551,7 @@
         }
 
         function resetRedeemFlow(options = {}) {
+            stopOrbitcardTracking();
             const preserveStatus = Boolean(options.preserveStatus);
             closeTaskSocket();
             taskCompleted = false;
@@ -583,6 +585,78 @@
         }
 
         let orbitcardCaptchaTimer = null;
+        let orbitcardQueryTimer = null;
+        let orbitcardTrackingUntil = 0;
+        let orbitcardTracking = false;
+        let orbitcardConfirmedSuccess = false;
+        let orbitcardQueryGeneration = 0;
+        function stopOrbitcardTracking() {
+            clearTimeout(orbitcardQueryTimer);
+            orbitcardTracking = false;
+            orbitcardConfirmedSuccess = false;
+            orbitcardQueryGeneration++;
+            document.getElementById('orbitcard-query-button')?.remove();
+            document.getElementById('orbitcard-order-info')?.remove();
+            showOrbitcardCaptcha(null);
+        }
+
+        function startOrbitcardTracking() {
+            stopOrbitcardTracking();
+            orbitcardTracking = true;
+            orbitcardTrackingUntil = Date.now() + 15 * 60 * 1000;
+            const button = document.createElement('button');
+            button.id = 'orbitcard-query-button';
+            button.type = 'button';
+            button.textContent = '查询代充结果';
+            button.onclick = () => queryOrbitcardOrder();
+            statusMsg.insertAdjacentElement('afterend', button);
+            queryOrbitcardOrder();
+        }
+
+        async function queryOrbitcardOrder() {
+            clearTimeout(orbitcardQueryTimer);
+            const cdk = verifiedCdk;
+            const generation = orbitcardQueryGeneration;
+            const button = document.getElementById('orbitcard-query-button');
+            if (!cdk || !button || button.disabled) return;
+            button.disabled = true;
+            let retryMs = 5000;
+            let keepPolling = true;
+            try {
+                const response = await fetch('/api/cdk/orbitcard/status', { method: 'POST', cache: 'no-store',
+                    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cdk }) });
+                const result = await response.json();
+                if (generation !== orbitcardQueryGeneration || cdk !== verifiedCdk) return;
+                if (!result.success) {
+                    showOrbitcardCaptcha(null);
+                    showStatus(result.message || '订单查询失败，请稍后重试', 'error');
+                    retryMs = Math.max(5000, Number(result.retry_after_ms) || 5000);
+                    if (response.status === 404 || result.stop_tracking) keepPolling = false;
+                } else {
+                    const state = result.data;
+                    if (orbitcardConfirmedSuccess && state.status !== 'success') { keepPolling = false; return; }
+                    applyTaskState({ ...state, type: 'snapshot' });
+                    if (!result.query_skipped) showOrbitcardCaptcha(result.captcha);
+                    let info = document.getElementById('orbitcard-order-info');
+                    if (!info) { info = document.createElement('p'); info.id = 'orbitcard-order-info'; button.insertAdjacentElement('afterend', info); }
+                    const order = state.order || {};
+                    info.textContent = `订单：${state.order_id || state.client_order_no} · CDK：${({reserved:'处理中，保持占用',redeemed:'已核销',available:'可重新兑换'})[state.cdk_state] || state.cdk_state}`
+                        + (order.fee_status ? ` · 服务费：${order.service_fee || '—'} ${order.currency || 'USDT'}（${order.fee_status}）` : '');
+                    keepPolling = state.cdk_state === 'reserved';
+                    if (keepPolling) startBtn.disabled = true;
+                }
+            } catch (_) {
+                if (generation !== orbitcardQueryGeneration) return;
+                showOrbitcardCaptcha(null);
+                showStatus('查询暂不可用，请继续查询原订单，勿重复支付', 'error');
+            } finally {
+                button.disabled = false;
+                if (generation === orbitcardQueryGeneration && keepPolling && Date.now() < orbitcardTrackingUntil) {
+                    orbitcardQueryTimer = setTimeout(queryOrbitcardOrder, retryMs);
+                }
+            }
+        }
+
         function showOrbitcardCaptcha(captcha) {
             clearTimeout(orbitcardCaptchaTimer);
             document.getElementById('orbitcard-captcha-button')?.remove();
@@ -608,9 +682,12 @@
             const status = String(data.status || 'running');
             const message = String(data.message || '');
             const forceProgress = data.type === 'snapshot';
+            if (orbitcardConfirmedSuccess && status !== 'success') return;
 
             if (status !== 'running') showOrbitcardCaptcha(null);
+            if (status === 'success' || status === 'failed') clearTimeout(orbitcardQueryTimer);
             if (status === 'success') {
+                if (orbitcardTracking) orbitcardConfirmedSuccess = true;
                 taskCompleted = true;
                 closeTaskSocket();
                 setActivationLock(false);
@@ -641,6 +718,7 @@
                 setButtonText(startBtn, START_FAILED_TEXT);
                 toggleLoading(startBtn, false);
                 startBtn.disabled = false;
+                if (status === 'manual' && orbitcardTracking) startBtn.disabled = true;
                 return;
             }
 
@@ -678,7 +756,6 @@
             socket.onmessage = (event) => {
                 try {
                     const data = JSON.parse(event.data);
-                    if (data.type === 'orbitcard-captcha') { showOrbitcardCaptcha(data.captcha); return; }
                     if (data.type === 'pong') {
                         scheduleSocketHeartbeatTimeout();
                         return;
@@ -686,6 +763,7 @@
                     if (data.jobKey && activeJobKey && data.jobKey !== activeJobKey) {
                         return;
                     }
+                    if (data.type === 'orbitcard-captcha') { showOrbitcardCaptcha(data.captcha); return; }
                     scheduleSocketHeartbeatTimeout();
                     if (data.type === 'snapshot' || data.type === 'progress' || data.type === 'status') {
                         applyTaskState(data);
@@ -718,6 +796,8 @@
                 return showStatus(sessionCheck.message, 'error');
             }
 
+            stopOrbitcardTracking();
+
             setButtonText(startBtn, START_PENDING_TEXT);
             toggleLoading(startBtn, true, { keepTextVisible: true });
             startBtn.disabled = true;
@@ -747,6 +827,7 @@
                     setProgress(8, '任务已启动，正在开通中...');
                     showStatus('任务已启动，正在为您开通中...', 'success');
                     initWebSocket(data.jobKey);
+                    if (data.provider === 'orbitcard') startOrbitcardTracking();
                 } else {
                     hideProgress();
                     updateFlowUI(2, 'failed');

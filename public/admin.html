@@ -1989,7 +1989,7 @@
                 <h2 class="panel-title">第三方代充 API（协议对接）</h2>
                 <p style="font-size: 13px; color: var(--text-dim); margin-top: 10px;">
                     開啟後，前台兌換開通將呼叫第三方 GPT 代充平台提交訂單並輪詢狀態；將不再使用本地開通流程。
-                    原有协议从本地银行卡池、代理池取用资产；Orbitcard 使用平台卡 ID。
+                    使用 Orbitcard HMAC V1 签名和平台卡 ID 进行代充。
                 </p>
                 <div class="toggle-field" style="margin-top: 18px;">
                     <div class="toggle-label"><span>啟用第三方代充 API（開啟後不再使用本地開通）</span></div>
@@ -1999,8 +1999,7 @@
                     </label>
                 </div>
                 <div class="form-group" style="margin-top: 18px;">
-                    <label>代充服务协议</label>
-                    <select id="gpt_api_provider" class="asset-input"><option value="legacy">原有 Bearer API</option><option value="orbitcard">Orbitcard HMAC V1</option></select>
+                    <p style="font-size:13px">代充协议：Orbitcard HMAC V1</p>
                     <label>Orbitcard 平台卡 ID</label>
                     <input id="orbitcard_card_id" type="number" min="1" class="asset-input" placeholder="getCardList 返回的本人平台卡 ID">
                     <label>Orbitcard 支付地区（留空使用当前套餐推荐地区）</label>
@@ -2010,15 +2009,15 @@
                     <p id="orbitcard_secret_hint" style="font-size:12px"></p>
                     <p style="font-size:12px">Orbitcard 使用平台卡 ID 和完整 Session，不使用本地卡池与代理。Secret 只从服务端 ORBITCARD_API_SECRET 读取。Base URL 填写 https://orbitcard.cc 或实际平台根域名。</p>
                     <label>API 基础地址（Base URL）</label>
-                    <input type="text" id="gpt_api_base_url" class="asset-input" placeholder="https://kc.vpss.eu.cc/">
+                    <input type="text" id="gpt_api_base_url" class="asset-input" placeholder="https://orbitcard.cc">
                 </div>
                 <div class="form-group" style="margin-top: 16px;">
                     <label>API Key</label>
-                    <input type="password" id="gpt_api_key" class="asset-input" placeholder="gptk_..." autocomplete="off">
+                    <input type="password" id="gpt_api_key" class="asset-input" placeholder="Orbitcard API Key" autocomplete="off">
                     <p id="gpt_api_key_hint" style="font-size: 12px; color: var(--text-dim); margin-top: 6px;"></p>
                 </div>
                 <p style="font-size: 12px; color: var(--text-dim); margin-top: 12px;">
-                    套餐自动对应 CDK 类型；原有协议使用 PH / PHP，Orbitcard 按当前套餐实时查询支付地区。
+                    套餐自动对应 CDK 类型，按当前套餐实时查询可用支付地区。开启后，用户兑换 CDK 时调用 Orbitcard 下单。
                 </p>
                 <div id="gpt_api_status" style="margin-top: 18px; padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-secondary);">
                     <div style="display:flex; justify-content:space-between; gap:12px; align-items:center; flex-wrap:wrap;">
@@ -2026,12 +2025,10 @@
                         <button type="button" class="btn btn-secondary" onclick="refreshGptApiStatus()"><i data-lucide="refresh-cw"></i>重新整理</button>
                     </div>
                     <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-top:14px;">
-                        <div><div style="font-size:12px;color:var(--text-dim)">可用積分</div><div id="gpt_api_credits" style="font-size:22px;font-weight:700">—</div></div>
-                        <div><div style="font-size:12px;color:var(--text-dim)">USD 餘額</div><div id="gpt_api_balance_usd" style="font-size:22px;font-weight:700">—</div></div>
+                        <div><div style="font-size:12px;color:var(--text-dim)">账户余额</div><div id="gpt_api_balance" style="font-size:22px;font-weight:700">—</div></div>
                         <div><div style="font-size:12px;color:var(--text-dim)">可用 GPT 套餐</div><div id="gpt_api_plans" style="font-size:13px;margin-top:5px">—</div></div>
-                        <div><div style="font-size:12px;color:var(--text-dim)">積分套餐</div><div id="gpt_api_credit_plans" style="font-size:13px;margin-top:5px">—</div></div>
                     </div>
-                    <div style="margin-top:14px; font-size:12px; color:var(--text-dim)">最近失敗代充（僅顯示供應商回傳的卡密前綴）</div>
+                    <div style="margin-top:14px; font-size:12px; color:var(--text-dim)">最近 CDK 代充订单</div>
                     <div id="gpt_api_recent_orders" style="font-size:13px; margin-top:7px; overflow-x:auto">尚未查詢</div>
                     <div id="gpt_api_status_hint" style="font-size:12px;color:var(--text-dim); margin-top:10px"></div>
                 </div>
@@ -6144,7 +6141,7 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
                     <td><code>${sessionPreview ? escapeHtml(sessionPreview) : '-'}</code></td>
                     <td style="text-align:center"><span class="readonly-switch ${shipped ? 'active' : ''}" title="${shipped ? '已出库' : '未出库'}"></span></td>
                     <td>${status === 'processing'
-                        ? '<span class="status-badge" style="background: rgba(245, 158, 11, 0.15); color: #f59e0b;">开通中</span>'
+                        ? `<span class="status-badge" style="background: rgba(245, 158, 11, 0.15); color: #f59e0b;">${cdk.orbitcard_pending_confirmation ? '结果待确认（占用中）' : '开通中'}</span>`
                         : (status === 'used'
                             ? '<span class="status-badge status-success">已使用</span>'
                             : '<span class="status-badge status-running">未使用</span>')}</td>
@@ -8284,7 +8281,6 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
                     throw new Error(data.message || '加载 API 配置失败');
                 }
                 const cfg = data.config || {};
-                document.getElementById('gpt_api_provider').value = cfg.provider || 'legacy';
                 for (const key of ['orbitcard_card_id', 'orbitcard_region', 'orbitcard_max_fee']) document.getElementById(key).value = cfg[key] || '';
                 document.getElementById('orbitcard_secret_hint').textContent = cfg.orbitcard_secret_saved ? '服务端 Orbitcard Secret 已配置' : '服务端尚未配置 ORBITCARD_API_SECRET';
                 const enabledEl = document.getElementById('gpt_api_enabled');
@@ -8295,8 +8291,8 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
                 const keyHint = document.getElementById('gpt_api_key_hint');
                 if (keyEl) keyEl.value = '';
                 if (keyEl) keyEl.placeholder = cfg.api_key_saved
-                    ? `已保存（${cfg.api_key_preview || 'gptk_…'}）留空不修改`
-                    : 'gptk_...';
+                    ? `已保存（${cfg.api_key_preview || '已隐藏'}）留空不修改`
+                    : 'Orbitcard API Key';
                 if (keyHint) {
                     keyHint.textContent = cfg.api_key_saved ? '✓ API Key 已保存' : '尚未配置 API Key';
                 }
@@ -8308,7 +8304,6 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
 
         function buildGptApiPayload() {
             return {
-                provider: document.getElementById('gpt_api_provider').value,
                 orbitcard_card_id: document.getElementById('orbitcard_card_id').value.trim(),
                 orbitcard_region: document.getElementById('orbitcard_region').value.trim().toUpperCase(),
                 orbitcard_max_fee: document.getElementById('orbitcard_max_fee').value.trim(),
@@ -8338,25 +8333,20 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
 
         function renderGptApiStatus(data) {
             const balance = data.balance || {};
-            document.getElementById('gpt_api_credits').textContent = balance.credits ?? '—';
-            document.getElementById('gpt_api_balance_usd').textContent = balance.balance_usd
-                ? `$${balance.balance_usd}`
-                : (balance.balance != null ? `${balance.balance} cents` : '—');
+            const amount = balance.balance ?? balance.available_balance ?? balance.available ?? balance.amount;
+            document.getElementById('gpt_api_balance').textContent = amount != null
+                ? `${typeof amount === 'object' ? JSON.stringify(amount) : amount}${balance.currency ? ` ${balance.currency}` : ''}` : '—';
             const gptPlans = (data.gpt_plans || []).filter((p) => p.enabled !== 0 && p.enabled !== false);
             document.getElementById('gpt_api_plans').textContent = gptPlans.length
-                ? gptPlans.map((p) => `${p.name || p.key} (${p.key || '—'})`).join('、')
+                ? gptPlans.map((p) => `${p.name || p.key} (${p.key || '—'})${p.service_fee != null ? ` · 服务费 ${p.service_fee} USDT` : ''}`).join('、')
                 : '無可用套餐';
-            const creditPlans = data.credit_plans || [];
-            document.getElementById('gpt_api_credit_plans').textContent = creditPlans.length
-                ? creditPlans.map((p) => `${p.name || p.id}: ${p.credits ?? '—'} 積分`).join('、')
-                : '無';
             const orders = data.recent_orders || [];
             document.getElementById('gpt_api_recent_orders').innerHTML = orders.length
-                ? `<table style="width:100%; border-collapse:collapse"><thead><tr><th style="text-align:left">訂單</th><th style="text-align:left">狀態</th><th style="text-align:left">套餐卡密</th><th style="text-align:left">更新時間</th></tr></thead><tbody>${orders.map((o) => `<tr><td>${escapeHtml(String(o.order_id || o.task_id || '—'))}</td><td>${escapeHtml(o.status || '—')}</td><td>${escapeHtml(o.topup_code || '—')}</td><td>${escapeHtml(o.updated_at || '—')}</td></tr>`).join('')}</tbody></table>`
-                : '尚無失敗的第三方代充訂單';
+                ? `<table style="width:100%; border-collapse:collapse"><thead><tr><th>CDK</th><th>订单</th><th>兑换结果</th><th>平台服务费</th><th>套餐卡密</th><th>更新时间</th></tr></thead><tbody>${orders.map((o) => `<tr><td>${escapeHtml(o.cdk_code || '—')}</td><td>${escapeHtml(String(o.order_id || o.orbitcard_order?.client_order_no || o.task_id || '—'))}</td><td>${escapeHtml(o.status || '—')}</td><td>${escapeHtml(o.orbitcard_order?.fee_status ? `${o.orbitcard_order.service_fee || '—'} ${o.orbitcard_order.currency || 'USDT'} (${o.orbitcard_order.fee_status})` : '—')}</td><td>${escapeHtml(o.topup_code || '—')}</td><td>${escapeHtml(o.updated_at || '—')}</td></tr>`).join('')}</tbody></table>`
+                : '暂无第三方代充订单';
             document.getElementById('gpt_api_status_hint').textContent = data.balance_error
-                ? `積分查詢失敗：${data.balance_error}`
-                : '資料來自供應商 /plans 與 /balance；完整卡密不會由接口回傳。';
+                ? `余额查询失败：${data.balance_error}`
+                : '数据来自 Orbitcard HMAC 套餐与余额接口；订阅结果与平台服务费独立展示。';
         }
 
         async function readApiJson(response, fallbackMessage) {
