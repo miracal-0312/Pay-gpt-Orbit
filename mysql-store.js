@@ -386,6 +386,7 @@ async function ensureLegacyColumns() {
     await ensureColumn('task_logs', 'raw_output', 'MEDIUMTEXT NULL');
     await ensureColumn('task_logs', 'failure_screenshots', 'TEXT NULL');
     await ensureColumn('task_logs', 'session_payload', 'MEDIUMTEXT NULL');
+    await ensureColumn('task_logs', 'local_payment_state', 'VARCHAR(32) NULL');
     await ensureColumn('task_logs', 'gpt_api_topup_code', "VARCHAR(255) NULL DEFAULT NULL");
     await ensureColumn('task_logs', 'created_at', 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP');
     await ensureColumn('task_logs', 'updated_at', 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
@@ -1171,9 +1172,9 @@ async function listCdks() {
 
     const runningRows = await runQuery(
         `SELECT cdk_code, MAX(updated_at) AS updated_at,
-                MAX(status = 'manual' AND orbitcard_state IN ('submitting','pending','manual')) AS orbitcard_pending_confirmation
+                MAX(status = 'manual') AS orbitcard_pending_confirmation
          FROM task_logs
-         WHERE (status = 'running' OR orbitcard_state IN ('prepared','submitting','pending','manual'))
+          WHERE (status IN ('running','manual') OR orbitcard_state IN ('prepared','submitting','pending','manual'))
            AND cdk_code IS NOT NULL
          GROUP BY cdk_code`
     );
@@ -2726,7 +2727,7 @@ async function updateAdminPassword(password) {
 async function createTaskLog({ tokenPreview, sessionPayload, cdkCode, phone, cardLast4, status, progress = 0 }, options = {}) {
     const now = new Date();
     const displayTime = now.toLocaleString('zh-CN', { hour12: false });
-    const jobKey = `${now.getTime()}-${Math.random().toString(36).slice(2, 10)}`;
+    const jobKey = `${now.getTime()}-${crypto.randomBytes(16).toString('hex')}`;
     const message = String(status) === 'running' ? '正在开通中' : null;
 
     await runExecute(
@@ -2766,7 +2767,7 @@ async function getRunningTaskByCdk(cdk) {
         `SELECT job_key, status, message, progress, updated_at, orbitcard_state, orbitcard_client_order_no
          FROM task_logs
          WHERE cdk_code = ?
-           AND (status = 'running' OR orbitcard_state IN ('prepared','submitting','pending','manual','success'))
+            AND (status IN ('running','manual') OR orbitcard_state IN ('prepared','submitting','pending','manual','success'))
          ORDER BY updated_at DESC, id DESC
          LIMIT 1`,
         [String(cdk)]
@@ -2780,7 +2781,7 @@ async function deleteTaskLogByJobKey(jobKey) {
         return { deleted: 0, mediaDeleted: 0 };
     }
     const rows = await runQuery(
-        `SELECT raw_output, failure_screenshots
+        `SELECT raw_output, failure_screenshots, status, cdk_code, orbitcard_client_order_no
          FROM task_logs
          WHERE job_key = ?
          LIMIT 1`,
@@ -2788,13 +2789,18 @@ async function deleteTaskLogByJobKey(jobKey) {
     );
     let mediaDeleted = 0;
     if (rows.length) {
+        if (rows[0].cdk_code || rows[0].orbitcard_client_order_no || ['running', 'manual'].includes(rows[0].status)) {
+            const error = new Error('充值任务包含订单与 CDK 凭据，不允许删除；可下载持久化日志');
+            error.statusCode = 409;
+            throw error;
+        }
         mediaDeleted = deleteTaskMediaFiles(rows[0]).deleted;
     }
     const result = await runExecute('DELETE FROM task_logs WHERE job_key = ? LIMIT 1', [key]);
     return { deleted: Number(result.affectedRows || 0), mediaDeleted };
 }
 
-async function updateTaskLog(jobKey, { status, message, rawOutput, cdkCode, phone, cardLast4, progress, failureScreenshots, gptApiOrderId, gptApiTaskId, gptApiRaw, gptApiTopupCode }) {
+async function updateTaskLog(jobKey, { status, message, rawOutput, cdkCode, phone, cardLast4, progress, failureScreenshots, gptApiOrderId, gptApiTaskId, gptApiRaw, gptApiTopupCode, localState }) {
     const screenshotsJson = Array.isArray(failureScreenshots)
         ? JSON.stringify(failureScreenshots)
         : null;
@@ -2811,8 +2817,9 @@ async function updateTaskLog(jobKey, { status, message, rawOutput, cdkCode, phon
              gpt_api_order_id = COALESCE(?, gpt_api_order_id),
              gpt_api_task_id = COALESCE(?, gpt_api_task_id),
              gpt_api_raw = COALESCE(?, gpt_api_raw),
-             gpt_api_topup_code = COALESCE(?, gpt_api_topup_code)
-         WHERE job_key = ?`,
+             gpt_api_topup_code = COALESCE(?, gpt_api_topup_code),
+             local_payment_state = COALESCE(?, local_payment_state)
+         WHERE job_key = ? AND (status = 'running' OR ? <> 'running')`,
         [
             String(status),
             message || null,
@@ -2826,7 +2833,9 @@ async function updateTaskLog(jobKey, { status, message, rawOutput, cdkCode, phon
             gptApiTaskId || null,
             gptApiRaw || null,
             gptApiTopupCode || null,
-            String(jobKey)
+            localState || null,
+            String(jobKey),
+            String(status)
         ]
     );
 }
@@ -3622,6 +3631,13 @@ async function createBillingRecord(data) {
     return result.insertId;
 }
 
+async function updateBillingRecord(id, data) {
+    return runExecute(`UPDATE billing_records SET status = ?, amount = ?, currency = ?,
+        error_code = ?, error_message = ? WHERE id = ? AND status <> 'success'`,
+    [data.status, Number(data.amount || 0), data.currency || 'USD',
+        data.error_code || null, String(data.error_message || '').slice(0, 512) || null, id]);
+}
+
 /**
  * 查询账单列表（分页 + 筛选）
  * @param {object} filters - { startDate, endDate, cardLast4, planType, status }
@@ -3754,7 +3770,7 @@ async function exportBillingRecordsCSV(filters = {}) {
 
 async function deleteBillingRecord(id) {
     const result = await runExecute(
-        `DELETE FROM billing_records WHERE id = ?`,
+        `DELETE FROM billing_records WHERE id = ? AND status <> 'pending'`,
         [Number(id)]
     );
     return result.affectedRows > 0;
@@ -3795,9 +3811,9 @@ async function listRecentGptApiOrders(limit = 10) {
     const safeLimit = Math.max(1, Math.min(Number(limit) || 10, 50));
     return runQuery(
         `SELECT job_key, cdk_code, status, message, progress, updated_at,
-                gpt_api_order_id, gpt_api_task_id, gpt_api_topup_code, gpt_api_raw
+                gpt_api_order_id, gpt_api_task_id, gpt_api_topup_code, gpt_api_raw, orbitcard_client_order_no
          FROM task_logs
-         WHERE (gpt_api_order_id IS NOT NULL OR gpt_api_task_id IS NOT NULL)
+          WHERE (gpt_api_order_id IS NOT NULL OR gpt_api_task_id IS NOT NULL OR orbitcard_client_order_no IS NOT NULL)
            AND (status = 'failed' OR orbitcard_client_order_no IS NOT NULL)
          ORDER BY updated_at DESC, id DESC
          LIMIT ?`,
@@ -3806,8 +3822,11 @@ async function listRecentGptApiOrders(limit = 10) {
 }
 
 const orbitcardCdkStore = require('./orbitcard-cdk-store')({ withTransaction, runQuery, runExecute, createTaskLog });
+const localTaskStore = require('./local-task-store')({ withTransaction, runQuery, runExecute, createTaskLog });
 
 module.exports = {
+    updateBillingRecord,
+    ...localTaskStore,
     ...orbitcardCdkStore,
     runQuery,
     runExecute,

@@ -8,6 +8,7 @@ scratch
 debug_screenshots
 product_files
 data/browser-pool
+data/logs
 *.sql.gz
 .DS_Store
 .vscode

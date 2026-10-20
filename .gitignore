@@ -17,6 +17,7 @@ debug_screenshots/
 product_files/
 data/hcaptcha-config.json
 data/browser-pool/
+data/logs/
 scratch/
 mail.txt
 

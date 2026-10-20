@@ -718,7 +718,7 @@
                 setButtonText(startBtn, START_FAILED_TEXT);
                 toggleLoading(startBtn, false);
                 startBtn.disabled = false;
-                if (status === 'manual' && orbitcardTracking) startBtn.disabled = true;
+                if (status === 'manual') startBtn.disabled = true;
                 return;
             }
 
@@ -740,7 +740,7 @@
             activeJobKey = jobKey;
 
             if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
-                socket.send(JSON.stringify({ type: 'subscribe', jobKey }));
+                if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'subscribe', jobKey, cdk: cdkInput.value.trim() }));
                 return;
             }
 
@@ -749,7 +749,7 @@
 
             socket.onopen = () => {
                 clearTimeout(reconnectTimer);
-                socket.send(JSON.stringify({ type: 'subscribe', jobKey }));
+                socket.send(JSON.stringify({ type: 'subscribe', jobKey: activeJobKey, cdk: cdkInput.value.trim() }));
                 startSocketHeartbeat();
             };
 

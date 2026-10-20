@@ -4,7 +4,7 @@ const { openApiCheckout } = require('./chatgpt');
 const store = require('./mysql-store');
 const { getRegionConfig, getRegionBrowserProfile } = require('./region-config');
 const { installChatGptSession, bootstrapChatGptSession } = require('./session-auth');
-const { cancelAutoRenew } = require('./subscription-check');
+const { cancelAutoRenew, querySubscriptionBySession } = require('./subscription-check');
 const { connectTaskBrowser, applyCdpEnv, closeTaskBrowser } = require('./browser-runtime');
 const { preparePlaywrightProxy } = require('./playwright-proxy');
 const { assertRequestCountry } = require('./proxy-region-check');
@@ -585,7 +585,16 @@ async function run() {
             cdkCode,
             email,
             stripeSessionId,
-            billingEmail: loginInfo.email
+            billingEmail: loginInfo.email,
+            verifySubscription: async () => {
+                const result = await querySubscriptionBySession(
+                    String(loginInfo.session?.accessToken || CONFIG.chatgptToken).trim(),
+                    { email: loginInfo.email || email }
+                );
+                if (!result.ok) throw new Error('订阅状态核验失败，停止自动支付');
+                return result.data?.hasActiveSubscription === true
+                    && result.data.planKey === planType;
+            }
         });
 
         if (paymentResult.success) {

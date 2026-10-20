@@ -3,6 +3,7 @@
 const axios = require('axios');
 const crypto = require('node:crypto');
 const { DEFAULT_BASE_URL, normalizeBaseUrl } = require('./orbitcard-config');
+const audit = require('./runtime-log');
 
 const PLAN_MAP = Object.freeze({ plus: 'gpt-plus', pro100: 'gpt-pro-5x', pro200: 'gpt-pro-20x', pro500: 'gpt-pro-25x', pro_5x: 'gpt-pro-5x', pro_20x: 'gpt-pro-20x' });
 
@@ -16,6 +17,17 @@ async function request(cfg, operation, body = {}, idempotencyKey = '') {
         url = new URL(normalizeBaseUrl(cfg.base_url));
     } catch (_) { return { success: false, error: 'Orbitcard Base URL 必须为 HTTPS 域名根地址' }; }
     const path = `/api/open/v1/${operation}`;
+    const startedAt = Date.now();
+    const record = (event, details = {}) => audit.push({
+        jobKey: cfg.auditJobKey || '', source: 'orbitcard', event,
+        text: `${operation} ${event}`,
+        data: { operation, plan_type: body.plan_type, card_id: body.card_id,
+            client_order_no: body.client_order_no, task_no: body.task_no,
+            payment_region: body.payment_region, max_service_fee: body.max_service_fee,
+            idempotency_key: idempotencyKey || undefined,
+            elapsed_ms: Date.now() - startedAt, ...details }
+    });
+    record('request_started');
     const raw = JSON.stringify(body);
     const timestamp = String(Math.floor(Date.now() / 1000));
     const nonce = crypto.randomBytes(24).toString('base64url');
@@ -34,12 +46,20 @@ async function request(cfg, operation, body = {}, idempotencyKey = '') {
         const headerSeconds = retryHeader && !Number.isFinite(Number(retryHeader))
             ? Math.max(0, (Date.parse(retryHeader) - Date.now()) / 1000) : Number(retryHeader || 0);
         const seconds = Math.max(headerSeconds || 0, Number(envelope?.request_error?.retry_after_seconds || envelope?.data?.request_error?.retry_after_seconds || 0));
+        const requestError = envelope?.request_error || envelope?.data?.request_error;
+        record('request_finished', { http_status: response.status, platform_code: envelope?.code,
+            success, order: summary(envelope?.data), request_error: requestError ? {
+                code: typeof requestError.code === 'string' ? requestError.code : undefined,
+                submission_outcome: typeof requestError.submission_outcome === 'string' ? requestError.submission_outcome : undefined,
+                source: typeof requestError.source === 'string' ? requestError.source : undefined
+            } : undefined, retry_after_ms: Number.isFinite(seconds) ? seconds * 1000 : 0 });
         return { success, status: response.status, code: envelope?.code, data: envelope?.data,
             requestError: envelope?.request_error || envelope?.data?.request_error,
             retryAfterMs: Number.isFinite(seconds) ? Math.max(0, seconds * 1000) : 0,
             error: success ? undefined : `Orbitcard 请求失败（HTTP ${response.status} / code ${envelope?.code ?? 'unknown'}）` };
     } catch (_) {
         // Axios errors contain the signed request and the customer's entire Session.
+        record('request_failed', { outcome: 'unknown', error: 'network_or_audit_failure' });
         return { success: false, error: 'Orbitcard 网络请求失败，结果待确认' };
     }
 }
@@ -64,7 +84,12 @@ function summary(data) {
     const keys = ['task_no', 'orderId', 'client_order_no', 'plan_type', 'payment_region', 'paymentRegion',
         'status', 'upstream_status', 'subscription_succeeded', 'subscriptionCancelled', 'service_fee', 'currency',
         'fee_status', 'billing_policy', 'stage', 'query_source', 'result_source', 'error_code'];
-    return Object.fromEntries(keys.filter(k => data?.[k] !== undefined).map(k => [k, data[k]]));
+    const result = Object.fromEntries(keys.filter(k => data?.[k] === null || ['string', 'number', 'boolean'].includes(typeof data?.[k]))
+        .map(k => [k, typeof data[k] === 'string' ? data[k].slice(0, 256) : data[k]]));
+    if (Number.isFinite(data?.payment?.amount) && typeof data.payment.currency === 'string') {
+        result.payment = { amount: data.payment.amount, currency: data.payment.currency.slice(0, 8) };
+    }
+    return result;
 }
 
 function captcha(data) {

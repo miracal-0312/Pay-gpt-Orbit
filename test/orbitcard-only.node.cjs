@@ -11,7 +11,7 @@ function load(name, mocks = {}) {
     const realRequire = createRequire(filename);
     const module = { exports: {} };
     new Function('require', 'module', 'exports', fs.readFileSync(filename, 'utf8'))(
-        id => Object.hasOwn(mocks, id) ? mocks[id] : realRequire(id), module, module.exports);
+        id => Object.hasOwn(mocks, id) ? mocks[id] : id === './runtime-log' ? { push() {} } : realRequire(id), module, module.exports);
     return module.exports;
 }
 

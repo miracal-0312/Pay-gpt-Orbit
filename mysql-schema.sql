@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS task_logs (
     job_key VARCHAR(64) NOT NULL,
     token_preview VARCHAR(64) NOT NULL,
     session_payload MEDIUMTEXT NULL,
+    local_payment_state VARCHAR(32) NULL,
     orbitcard_client_order_no VARCHAR(128) NULL,
     orbitcard_state VARCHAR(32) NULL,
     orbitcard_plan_type VARCHAR(64) NULL,

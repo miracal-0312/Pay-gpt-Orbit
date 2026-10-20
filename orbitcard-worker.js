@@ -56,7 +56,11 @@ async function run({ cfg, planType, session, cdk, setProgress, onSubmission, bro
         }
         const data = result.data;
         const receivedId = data?.orderId || data?.task_no;
-        if (!validOrder(data, { orderId, clientOrderNo: identity, planType: plan, email: session.user.email })) break;
+        if (!validOrder(data, { orderId, clientOrderNo: identity, planType: plan, email: session.user.email })) {
+            require('./runtime-log').push({ jobKey: cfg.auditJobKey || '', source: 'orbitcard',
+                event: 'ownership_mismatch', text: '订单归属校验失败，保留 CDK 和原订单' });
+            break;
+        }
         orderId = receivedId;
         last = api.summary(data);
         const status = api.outcome(data, true);

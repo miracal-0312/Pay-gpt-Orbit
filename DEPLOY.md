@@ -227,3 +227,13 @@ npm test
 | 修改管理员 `.env` 不生效 | 初始化后管理员信息由数据库管理，在后台修改 |
 
 如通过反向代理对外提供服务，需要转发 WebSocket 的 `Upgrade` / `Connection` 头，避免订单进度推送断开。代理到应用实际端口，并配置 HTTPS。
+
+### 充值审计修复升级
+
+使用 `docker compose up -d --build app` 更新应用（不要删除 MySQL 数据卷）；裸机部署重启 Node 服务。前后端需同时更新并刷新浏览器缓存，任务 WebSocket 订阅现在校验对应 CDK 或管理员登录。
+
+启动会自动增加 `task_logs.local_payment_state`。未启动的本地任务可释放 CDK；已启动但未结算的本地任务会转为待确认并继续占用 CDK。该恢复逻辑按单个应用实例设计，不要让多个应用实例同时管理同一套本地浏览器任务。
+
+默认日志在项目 `data/logs/`；裸机可设置 `TASK_LOG_DIR`，Compose 固定使用 `/app/data/logs` 并通过 `./data:/app/data` 保存到宿主机。部署账号必须能创建和追加日志。把该目录与数据库一起备份并监控剩余空间；按日文件和按任务文件均保留，不自动清理历史。后台“清空显示缓存”不会删除磁盘文件。
+
+升级前已丢失的内存日志无法恢复。账单 `pending`、任务 `manual` 表示需要核对原支付或原订单，不要直接把 CDK 改为未使用后再次充值。详情见 [RECHARGE-AUDIT.md](RECHARGE-AUDIT.md)。

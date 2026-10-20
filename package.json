@@ -8,7 +8,7 @@
     "start": "node server.js",
     "start:headful": "cross-env HEADFUL=1 node server.js",
     "test": "vitest --run",
-    "test:orbitcard": "node --test test/env-loading.node.cjs test/orbitcard-only.node.cjs test/orbitcard-cdk.node.cjs test/plan-registry.node.cjs test/checkout-pro-option.node.cjs test/proxy-region-routing.node.cjs",
+    "test:orbitcard": "node --test test/*.node.cjs",
     "test:watch": "vitest"
   },
   "engines": {

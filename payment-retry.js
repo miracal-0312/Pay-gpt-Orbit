@@ -64,7 +64,7 @@ async function resolveBilledAmountForRecord(page, paymentResult, preTaxAmount, c
  * @returns {Promise<{ success: boolean, error?: string, cardLast4?: string, manualIntervention?: boolean, screenshots?: string[] }>}
  */
 async function executePaymentWithRetry(page, options) {
-    const { planType, cdkCode, email, onProgress, stripeSessionId, billingEmail } = options || {};
+    const { planType, cdkCode, email, onProgress, stripeSessionId, billingEmail, verifySubscription } = options || {};
 
     const progress = (msg) => {
         console.log(`[PaymentRetry] ${msg}`);
@@ -81,6 +81,10 @@ async function executePaymentWithRetry(page, options) {
     }
     const { currency } = regionConfig;
     progress(`支付地区: ${region}, 币种: ${currency}`);
+    if (typeof verifySubscription !== 'function') throw new Error('缺少订阅结果核验器，停止支付');
+    if (await verifySubscription()) {
+        return { success: false, error: '目标套餐已生效，无需重复支付' };
+    }
 
     const lastUsedIdRaw = await store.getAppConfigValue('last_used_address_id', null);
     const lastUsedId = lastUsedIdRaw ? Number(lastUsedIdRaw) : null;
@@ -147,8 +151,23 @@ async function executePaymentWithRetry(page, options) {
         progress(`已预留卡片 #${cardAttempt}: ...${cardLast4}`);
 
         let cardHandled = false;
+        let billingId;
+        let outcomeRecorded = false;
+        const recordOutcome = async data => {
+            await store.updateBillingRecord(billingId, data);
+            outcomeRecorded = true;
+        };
 
         try {
+            // Persist an attempt before any possible submit; a crash leaves a reconcilable pending record.
+            billingId = await store.createBillingRecord({
+                card_number: card.card_number, card_last4: cardLast4,
+                amount: billedAmount, currency: billedCurrency, plan_type: planType || 'plus',
+                cdk_code: cdkCode, email, stripe_session_id: stripeSessionId || null,
+                status: 'pending', error_code: 'payment_result_unknown',
+                error_message: '本地支付尝试已创建，结果待确认'
+            });
+            progress(`BILLING_ATTEMPT: ${billingId}, card=...${cardLast4}, session=${stripeSessionId || 'unknown'}`);
             const paymentResult = await completeStripeCardPayment(page, cardInfo, address, {
                 cardAttempt,
                 billingEmail,
@@ -159,7 +178,17 @@ async function executePaymentWithRetry(page, options) {
                 billingHolderName = paymentResult.holderName;
             }
 
+            // Browser redirects/text alone cannot prove that the requested subscription was activated.
+            if (paymentResult.success || (paymentResult.submitted && !paymentResult.declined)) {
+                let verified = false;
+                try { verified = typeof verifySubscription === 'function' && await verifySubscription() === true; }
+                catch (_) { progress('订阅状态查询失败，保留待核对状态'); }
+                paymentResult.success = verified;
+                if (!verified) paymentResult.error = '支付结果待确认：尚未核实目标套餐已生效';
+            }
             if (paymentResult.success) {
+                // Emit before accounting/notification: a subsequent DB failure must not permit another charge.
+                console.log('PAYMENT_SUCCESS');
                 const resolved = await resolveBilledAmountForRecord(
                     page,
                     paymentResult,
@@ -169,6 +198,7 @@ async function executePaymentWithRetry(page, options) {
                 billedAmount = resolved.amount;
                 billedCurrency = resolved.currency;
                 progress(`实际扣款金额（免税后）: ${billedCurrency} ${billedAmount}`);
+                await recordOutcome({ status: 'success', amount: billedAmount, currency: billedCurrency });
 
                 const holderName = paymentResult.holderName || card.card_holder || billingHolderName || '';
                 await store.bindCardPaymentProfile(card.id, { holderName, address });
@@ -178,17 +208,6 @@ async function executePaymentWithRetry(page, options) {
                 const usageResult = await store.recordCardUsage(card.id);
                 await store.releaseCard(card.id);
                 cardHandled = true;
-                await store.createBillingRecord({
-                    card_number: card.card_number,
-                    card_last4: cardLast4,
-                    amount: billedAmount,
-                    currency: billedCurrency,
-                    plan_type: planType || 'plus',
-                    cdk_code: cdkCode,
-                    email,
-                    stripe_session_id: stripeSessionId || null,
-                    status: 'success'
-                });
                 progress(`支付成功！卡片: ...${cardLast4}，姓名: ${holderName}，地址: ${address.line1}, ${address.city}`);
                 if (usageResult.exhausted) {
                     progress(`卡 ...${cardLast4} 已达到订阅绑定上限，已标记为订阅额度用尽`);
@@ -206,9 +225,9 @@ async function executePaymentWithRetry(page, options) {
                 progress(`FAILURE_SCREENSHOT: ${paymentResult.screenshot}`);
             }
 
-            const declined = paymentResult.declined || isPaymentDeclined(lastError);
+            const declined = paymentResult.declined === true;
             if (declined) {
-                await store.createBillingRecord({
+                await recordOutcome({
                     card_number: card.card_number,
                     card_last4: cardLast4,
                     amount: billedAmount,
@@ -237,6 +256,7 @@ async function executePaymentWithRetry(page, options) {
                 const summary = declinedLast4s.length > 1
                     ? `${declinedLast4s.length} 张卡均被拒 (...${declinedLast4s.join(', ...')})`
                     : `银行卡被拒绝: ${lastError}`;
+                console.log('PAYMENT_CONFIRMED_FAILED');
                 return {
                     success: false,
                     error: summary,
@@ -251,7 +271,7 @@ async function executePaymentWithRetry(page, options) {
                 progress('检测到 Cloudflare/hCaptcha 人机验证，自动化无法可靠通过');
             }
 
-            await store.createBillingRecord({
+            await recordOutcome({
                 card_number: card.card_number,
                 card_last4: cardLast4,
                 amount: billedAmount,
@@ -260,10 +280,11 @@ async function executePaymentWithRetry(page, options) {
                 cdk_code: cdkCode,
                 email,
                 stripe_session_id: stripeSessionId || null,
-                status: 'failed',
-                error_code: 'form_validation_failed',
+                status: paymentResult.submitted ? 'pending' : 'failed',
+                error_code: paymentResult.submitted ? 'payment_result_unknown' : 'form_validation_failed',
                 error_message: lastError
             });
+            if (!paymentResult.submitted) console.log('PAYMENT_CONFIRMED_FAILED');
 
             progress('支付自动化失败，需人工操作');
             return {
@@ -273,6 +294,9 @@ async function executePaymentWithRetry(page, options) {
                 manualIntervention: true,
                 screenshots
             };
+        } catch (error) {
+            progress(`支付尝试异常，账单 #${billingId || '未创建'} ${outcomeRecorded ? '已记录结果' : '需要核对'}；保留原始任务日志`);
+            throw error;
         } finally {
             if (card?.id && !cardHandled) {
                 await store.releaseCard(card.id).catch(() => { });
@@ -283,6 +307,7 @@ async function executePaymentWithRetry(page, options) {
     const summary = declinedLast4s.length
         ? `${declinedLast4s.length} 张卡均被拒 (...${declinedLast4s.join(', ...')})`
         : (lastError || '支付失败');
+    console.log('PAYMENT_CONFIRMED_FAILED');
     return {
         success: false,
         error: summary,

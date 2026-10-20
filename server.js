@@ -10,6 +10,8 @@ const WebSocket = require('ws');
 const axios = require('axios');
 const store = require('./mysql-store');
 const runtimeLog = require('./runtime-log');
+const { redactText } = require('./log-safety');
+const localPayment = require('./local-payment-state');
 const { REGION_CONFIG, isSupportedRegion, getPlanTypeLabel } = require('./region-config');
 const taxFreeAddress = require('./tax-free-address');
 const { testProxyUrl, normalizeProxyLines } = require('./proxy-pool');
@@ -270,6 +272,7 @@ async function sendTaskSnapshot(ws, jobKey) {
 }
 
 function logTask(jobKey, message, level = 'log') {
+    message = redactText(message);
     runtimeLog.push({
         jobKey,
         level,
@@ -281,7 +284,7 @@ function logTask(jobKey, message, level = 'log') {
 }
 
 function logTaskChunk(jobKey, attempt, source, chunk) {
-    const text = String(chunk || '');
+    const text = redactText(chunk || '');
     if (!text) {
         return;
     }
@@ -767,7 +770,7 @@ function analyzeProcessOutput(output, timedOut) {
         || normalized.includes('配置套餐')
         || normalized.includes('定价页')
         || normalized.includes('#pricing');
-    const success = normalized.includes('PAYMENT_SUCCESS') || normalized.includes('最终校验：支付成功') || normalized.includes('支付成功');
+    const success = /(?:^|\n)PAYMENT_SUCCESS\s*(?:\r?\n|$)/.test(normalized);
 
     if (success) {
         return {
@@ -1196,6 +1199,21 @@ function runCheckoutScript(jobKey, scriptPath, env, attempt = 1, onProgress = nu
         let idleTimer = null;
         let finished = false;
         let timedOut = false;
+        let auditError = null;
+        const writeAudit = (fn) => {
+            try { fn(); } catch (_) {
+                if (!auditError) {
+                    auditError = '任务日志写入失败，停止自动处理并保留待核对状态';
+                    output += `\n[AUDIT_ERROR] ${auditError}\n`;
+                    console.error(`[Task ${jobKey}] ${auditError}`);
+                    child.kill();
+                }
+            }
+        };
+        let progressWrites = Promise.resolve();
+        const decoders = { stdout: new (require('node:string_decoder').StringDecoder)('utf8'),
+            stderr: new (require('node:string_decoder').StringDecoder)('utf8') };
+        const pendingLines = { stdout: '', stderr: '' };
 
         activeProcesses.add(child);
         const cleanup = () => {
@@ -1219,18 +1237,27 @@ function runCheckoutScript(jobKey, scriptPath, env, attempt = 1, onProgress = nu
             idleTimer = setTimeout(() => {
                 timedOut = true;
                 output += '\n[TIMEOUT] 超过 3 分钟没有打印，任务终止。\n';
-                logTask(jobKey, `attempt=${attempt} 超过 ${PROCESS_IDLE_TIMEOUT_MS / 1000} 秒无输出，终止子进程`, 'warn');
+                writeAudit(() => logTask(jobKey, `attempt=${attempt} 超过 ${PROCESS_IDLE_TIMEOUT_MS / 1000} 秒无输出，终止子进程`, 'warn'));
                 child.kill();
             }, PROCESS_IDLE_TIMEOUT_MS);
         };
 
-        const appendChunk = (source, chunk) => {
-            const text = chunk.toString();
+        const appendText = (source, raw) => {
+            const text = redactText(raw);
             output += text;
-            logTaskChunk(jobKey, attempt, source, text);
+            writeAudit(() => logTaskChunk(jobKey, attempt, source, text));
             if (onProgress) {
-                onProgress(getCheckoutProgress(output), output).catch((error) => console.error('[Progress Update Error]', error));
+                const snapshot = output;
+                progressWrites = progressWrites.then(() => onProgress(getCheckoutProgress(snapshot), snapshot))
+                    .catch(() => writeAudit(() => logTask(jobKey, '进度写入失败，完整输出已保存在持久化日志', 'error')));
             }
+            resetIdleTimer();
+        };
+        const appendChunk = (source, chunk) => {
+            pendingLines[source] += decoders[source].write(chunk);
+            const lines = pendingLines[source].split('\n');
+            pendingLines[source] = lines.pop();
+            if (lines.length) appendText(source, `${lines.join('\n')}\n`);
             resetIdleTimer();
         };
 
@@ -1239,17 +1266,24 @@ function runCheckoutScript(jobKey, scriptPath, env, attempt = 1, onProgress = nu
         child.stderr.on('data', (chunk) => appendChunk('stderr', chunk));
         child.on('error', (error) => {
             output += `\n[SPAWN_ERROR] ${error.message}\n`;
-            logTask(jobKey, `attempt=${attempt} 子进程启动失败: ${error.message}`, 'error');
+            writeAudit(() => logTask(jobKey, `attempt=${attempt} 子进程启动失败: ${error.message}`, 'error'));
         });
-        child.on('close', (code, signal) => {
+        child.on('close', async (code, signal) => {
+            for (const source of ['stdout', 'stderr']) {
+                const last = pendingLines[source] + decoders[source].end();
+                if (last) appendText(source, last);
+            }
             cleanup();
-            logTask(jobKey, `attempt=${attempt} 子进程退出 code=${code} signal=${signal || 'none'} timedOut=${timedOut}`);
+            await progressWrites;
+            writeAudit(() => logTask(jobKey, `attempt=${attempt} 子进程退出 code=${code} signal=${signal || 'none'} timedOut=${timedOut}`));
             finish({
                 code,
                 signal,
                 timedOut,
                 output,
-                analysis: analyzeProcessOutput(output, timedOut)
+                analysis: localPayment.classifyResult(auditError
+                    ? { status: 'manual', shouldRetry: false, message: auditError }
+                    : analyzeProcessOutput(output, timedOut), output)
             });
         });
     });
@@ -1507,8 +1541,8 @@ app.get('/api/admin/runtime-logs', authenticateAdmin, (req, res) => {
 app.post('/api/admin/runtime-logs/clear', authenticateAdmin, (req, res) => {
     try {
         runtimeLog.clear();
-        runtimeLog.push({ jobKey: '', level: 'system', source: 'server', text: '🧹 运行日志已手动清空' });
-        res.json({ success: true, message: '运行日志已清空' });
+        runtimeLog.push({ jobKey: '', level: 'system', source: 'server', text: '运行日志显示缓存已清空，磁盘历史保留' });
+        res.json({ success: true, message: '显示缓存已清空，持久化日志保留' });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
     }
@@ -2258,7 +2292,7 @@ app.delete('/api/admin/task-logs/:jobKey', async (req, res) => {
                 : '任务记录已删除'
         });
     } catch (error) {
-        return res.status(500).json({ success: false, message: error.message });
+        return res.status(error.statusCode || 500).json({ success: false, message: error.message });
     }
 });
 
@@ -2289,6 +2323,17 @@ app.post('/api/admin/telegram', async (req, res) => {
         res.json({ success: true, message: 'Telegram 通知配置已保存' });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+app.get('/api/admin/task-logs/:jobKey/audit', (req, res) => {
+    try {
+        const file = runtimeLog.taskFile(req.params.jobKey);
+        if (!fs.existsSync(file)) return res.status(404).json({ success: false, message: '此任务没有持久化日志；升级前的历史无法补录' });
+        res.set('Cache-Control', 'no-store');
+        return res.download(file, `task-${req.params.jobKey}.jsonl`);
+    } catch (_) {
+        return res.status(400).json({ success: false, message: '无效的任务日志标识' });
     }
 });
 
@@ -2528,6 +2573,7 @@ app.get('/api/admin/gpt-api/status', async (req, res) => {
             message: order.message,
             updated_at: order.updated_at,
             order_id: order.gpt_api_order_id,
+            client_order_no: order.orbitcard_client_order_no,
             task_id: order.gpt_api_task_id,
             topup_code: order.gpt_api_topup_code || null,
             orbitcard_order: (() => {
@@ -3302,11 +3348,14 @@ async function runGptApiWorker({ task, session, cdk, planType }) {
             orbitcardState: extra.orbitcardState || (status === 'failed' ? 'rejected' : 'prepared')
         });
         if (!saved.applied) throw new Error('兑换尝试已结束或已被替换，停止提交');
+        runtimeLog.push({ jobKey, source: 'orbitcard', event: 'task_state', text: message,
+            data: { status, progress, orbitcard_state: extra.orbitcardState } });
         broadcastToTask(jobKey, { type: status === 'running' ? 'progress' : 'status', jobKey, status, progress, message, cdkCode: cdk });
     };
     try {
         if (!task.orbitcardClientOrderNo) throw new Error('任务缺少 Orbitcard 订单绑定，请重新验证 CDK');
         const cfg = task.apiConfig || await store.getGptApiConfig();
+        cfg.auditJobKey = jobKey;
         if (!cfg.enabled || !cfg.api_key) throw new Error('Orbitcard 代充未启用或 API Key 未配置');
         await require('./orbitcard-worker').run({
             cfg, planType, session, cdk, setProgress, sleep,
@@ -3342,262 +3391,51 @@ async function runGptApiWorker({ task, session, cdk, planType }) {
 }
 
 function spawnActivationWorker({ task, token, sessionRaw, cdk, cdkDetails, clientIp }) {
-    (async () => {
-        const checkoutScript = path.join(__dirname, 'index.js');
-        let finalRun = null;
-        const allOutputs = [];
-        let shouldRollbackCdk = true;
-        let lastProgress = 0;
-        const accountEmail = extractEmailFromSession(sessionRaw) || task.tokenPreview || '';
-
-        try {
-            for (let attempt = 1; attempt <= MAX_PROCESS_ATTEMPTS; attempt += 1) {
-                logTask(task.jobKey, `开始第 ${attempt}/${MAX_PROCESS_ATTEMPTS} 次尝试`);
-
-                const attemptProgress = normalizeTaskProgress(attempt > 1 ? 1 : 3, 'running', lastProgress);
-                broadcastToTask(task.jobKey, {
-                    type: 'progress',
-                    jobKey: task.jobKey,
-                    progress: attemptProgress,
-                    status: 'running',
-                    message: `正在进行第 ${attempt} 次尝试...`,
-                    cdkCode: cdk
-                });
-
-                const paymentRegion = await store.getPaymentRegion();
-                const proxy = await store.getActiveProxy(paymentRegion);
-                const hcaptchaCfg = await store.getHcaptchaConfig();
-                const { env: hcaptchaEnv } = buildHcaptchaEnvFromConfig(hcaptchaCfg);
-                const runtimeEnv = {
-                    ...process.env,
-                    ...hcaptchaEnv,
-                    JOB_KEY: task.jobKey,
-                    CHATGPT_TOKEN: token,
-                    CHATGPT_SESSION_JSON: String(sessionRaw || '').startsWith('{') ? sessionRaw : '',
-                    CDK_CODE: cdk,
-                    CDK_PLAN_TYPE: cdkDetails.plan_type || 'plus',
-                    PAYMENT_REGION_OVERRIDE: paymentRegion,
-                    PROXY: proxy
-                };
-
-                logTask(task.jobKey, `尝试 ${attempt} 启动自动化 proxy=${proxy ? 'yes' : 'no'}`);
-
-                const run = await spawnWorkerWithBrowser({
-                    jobKey: task.jobKey,
-                    runtimeEnv,
-                    runScript: (workerEnv) => runCheckoutScript(task.jobKey, checkoutScript, workerEnv, attempt, async (progress, liveOutput) => {
-                        if (progress > 0) {
-                            const runningProgress = normalizeTaskProgress(progress, 'running', lastProgress);
-                            lastProgress = runningProgress;
-                            const updatePayload = {
-                                status: 'running',
-                                message: '正在开通中',
-                                rawOutput: null,
-                                cdkCode: cdk,
-                                progress: runningProgress
-                            };
-                            if (liveOutput) {
-                                const liveMedia = extractTaskMediaFromOutput(liveOutput);
-                                const combined = [...liveMedia.screenshots, ...liveMedia.videos];
-                                if (combined.length) {
-                                    updatePayload.failureScreenshots = combined;
-                                }
-                            }
-                            await store.updateTaskLog(task.jobKey, updatePayload);
-                            broadcastToTask(task.jobKey, {
-                                type: 'progress',
-                                jobKey: task.jobKey,
-                                progress: runningProgress,
-                                status: 'running',
-                                message: '正在开通中',
-                                cdkCode: cdk,
-                                screenshots: liveOutput ? extractTaskMediaFromOutput(liveOutput).screenshots : undefined,
-                                videos: liveOutput ? extractTaskMediaFromOutput(liveOutput).videos : undefined
-                            });
-                        }
-                    })
-                });
-
-                const cardLast4 = extractCardLast4FromOutput(run.output);
-                allOutputs.push(`===== ATTEMPT ${attempt}${cardLast4 ? ` | CARD ${cardLast4}` : ''} =====\n${run.output}`);
-                finalRun = { ...run, output: allOutputs.join('\n\n') };
-
-                const currentStatus = run.analysis.status === 'success' ? 'success' : 'running';
-                const currentProgress = normalizeTaskProgress(
-                    getCheckoutProgress(run.output, currentStatus),
-                    currentStatus,
-                    lastProgress
-                );
-                lastProgress = currentProgress;
-                await store.updateTaskLog(task.jobKey, {
-                    status: currentStatus,
-                    message: currentStatus === 'success' ? '激活成功' : '正在开通中',
-                    rawOutput: finalRun.output,
-                    progress: currentProgress,
-                    cdkCode: cdk,
-                    cardLast4
-                });
-
-                broadcastToTask(task.jobKey, {
-                    type: 'progress',
-                    jobKey: task.jobKey,
-                    progress: currentProgress,
-                    status: currentStatus,
-                    message: currentStatus === 'success' ? '激活成功' : '正在开通中',
-                    cdkCode: cdk,
-                    cardLast4
-                });
-
-                if (!run.analysis.shouldRetry || attempt >= MAX_PROCESS_ATTEMPTS) {
-                    logTask(task.jobKey, `尝试 ${attempt} 结束，status=${run.analysis.status} shouldRetry=${run.analysis.shouldRetry}`);
-                    break;
+    const email = extractEmailFromSession(sessionRaw) || task.tokenPreview || '';
+    require('./local-worker').run({
+        task, cdk, store, maxAttempts: MAX_PROCESS_ATTEMPTS,
+        metadata: output => ({ ...extractTaskMediaFromOutput(output), cardLast4: extractCardLast4FromOutput(output) }),
+        log: message => logTask(task.jobKey, message),
+        broadcast: data => broadcastToTask(task.jobKey, {
+            type: data.status === 'running' ? 'progress' : 'status', jobKey: task.jobKey, cdkCode: cdk, ...data
+        }),
+        runAttempt: async (attempt, onProgress, onLaunch) => {
+            const paymentRegion = await store.getPaymentRegion();
+            const proxy = await store.getActiveProxy(paymentRegion);
+            const { env: hcaptchaEnv } = buildHcaptchaEnvFromConfig(await store.getHcaptchaConfig());
+            const runtimeEnv = { ...process.env, ...hcaptchaEnv, JOB_KEY: task.jobKey,
+                CHATGPT_TOKEN: token, CHATGPT_SESSION_JSON: String(sessionRaw || '').startsWith('{') ? sessionRaw : '',
+                CDK_CODE: cdk, CDK_PLAN_TYPE: cdkDetails.plan_type || 'plus',
+                ACTIVATION_EMAIL: email, PAYMENT_REGION_OVERRIDE: paymentRegion, PROXY: proxy };
+            return spawnWorkerWithBrowser({ jobKey: task.jobKey, runtimeEnv,
+                runScript: workerEnv => {
+                    onLaunch();
+                    return runCheckoutScript(task.jobKey, path.join(__dirname, 'index.js'), workerEnv, attempt, onProgress);
                 }
-                logTask(task.jobKey, `尝试 ${attempt} 失败，准备重试`, 'warn');
-            }
-
-            const rawOutput = finalRun?.output || '';
-            const normalizedAnalysis = finalRun?.analysis?.status === 'retry'
-                ? { ...finalRun.analysis, status: 'failed', message: String(finalRun.analysis.message || '激活失败').replace('，准备重试', '') }
-                : finalRun?.analysis;
-            const finalStatus = normalizedAnalysis?.status || 'failed';
-
-            const finalProgress = normalizeTaskProgress(finalStatus === 'success' ? 100 : lastProgress, finalStatus, lastProgress);
-            const taskMedia = extractTaskMediaFromOutput(rawOutput);
-            const failureScreenshots = [...taskMedia.screenshots, ...taskMedia.videos];
-            await store.updateTaskLog(task.jobKey, {
-                status: finalStatus,
-                message: normalizedAnalysis?.message || null,
-                rawOutput,
-                cdkCode: cdk,
-                progress: finalProgress,
-                failureScreenshots
             });
-
-            broadcastToTask(task.jobKey, {
-                type: 'status',
-                jobKey: task.jobKey,
-                status: finalStatus,
-                message: normalizedAnalysis?.message,
-                cdkCode: cdk,
-                progress: finalProgress,
-                screenshots: taskMedia.screenshots,
-                videos: taskMedia.videos
-            });
-
-            logTask(
-                task.jobKey,
-                `任务结束 status=${finalStatus} progress=${finalProgress} message=${normalizedAnalysis?.message || ''}`
-            );
-
-            if (finalStatus === 'success') {
-                shouldRollbackCdk = false;
+        },
+        notify: async (status, message, output) => {
+            if (status === 'success') {
                 await store.resetCdkFailure(cdk);
-                if (clientIp) {
-                    await store.resetActivationAttemptFailure('ip', clientIp);
-                }
-                notifyTaskOutcome({
-                    event: 'success',
-                    email: accountEmail,
-                    cdk,
-                    jobKey: task.jobKey,
-                    message: normalizedAnalysis?.message || '激活成功'
-                });
-            } else if (isCardPoolExhaustedIssue(rawOutput, normalizedAnalysis)) {
-                notifyTaskOutcome({
-                    event: 'card_pool_empty',
-                    email: accountEmail,
-                    cdk,
-                    jobKey: task.jobKey,
-                    message: normalizedAnalysis?.message || '卡池资产枯竭'
-                });
-            } else if (finalStatus === 'failed' || finalStatus === 'manual') {
-                notifyTaskOutcome({
-                    event: 'failure',
-                    email: accountEmail,
-                    cdk,
-                    jobKey: task.jobKey,
-                    message: normalizedAnalysis?.message || '激活失败'
-                });
+                if (clientIp) await store.resetActivationAttemptFailure('ip', clientIp);
+            } else if (isNoActivationEligibilityMessage(message)) {
+                await store.recordCdkFailure(cdk);
+                if (clientIp) await store.recordActivationAttemptFailure('ip', clientIp);
             }
-
-            if (finalStatus !== 'success') {
-                await store.markCdkUnused(cdk);
-                logTask(task.jobKey, `CDK ${cdk} 已回滚为未使用`);
-            }
-
-            if (isNoActivationEligibilityMessage(normalizedAnalysis?.message)) {
-                const cdkCooledDown = await store.recordCdkFailure(cdk);
-                const ipCooledDown = clientIp
-                    ? await store.recordActivationAttemptFailure('ip', clientIp)
-                    : false;
-
-                if (cdkCooledDown || ipCooledDown) {
-                    const cooldownParts = [];
-                    if (cdkCooledDown) {
-                        cooldownParts.push('该 CDK 已冷却 10 分钟');
-                        logTask(task.jobKey, `CDK ${cdk} 因连续无资格提交进入 10 分钟冷却`, 'warn');
-                    }
-                    if (ipCooledDown) {
-                        cooldownParts.push(`IP ${clientIp} 已冷却 10 分钟`);
-                        logTask(task.jobKey, `IP ${clientIp} 因连续无资格提交进入 10 分钟冷却`, 'warn');
-                    }
-                    const cooldownMessage = `${normalizedAnalysis?.message || '该账号无激活权限,请更换账号重试'}（${cooldownParts.join('，')}）`;
-                    await store.updateTaskLog(task.jobKey, {
-                        status: finalStatus,
-                        message: cooldownMessage,
-                        rawOutput,
-                        cdkCode: cdk,
-                        progress: finalProgress
-                    });
-                    broadcastToTask(task.jobKey, {
-                        type: 'status',
-                        jobKey: task.jobKey,
-                        status: finalStatus,
-                        message: cooldownMessage,
-                        cdkCode: cdk,
-                        progress: finalProgress
-                    });
-                }
-            }
-        } catch (bgError) {
-            console.error(`[Background Task Error] ${task.jobKey}:`, bgError);
-            logTask(task.jobKey, `后台任务异常: ${bgError.message}`, 'error');
-            await store.updateTaskLog(task.jobKey, {
-                status: 'failed',
-                message: bgError.message,
-                rawOutput: bgError.message,
-                cdkCode: cdk,
-                progress: normalizeTaskProgress(lastProgress, 'failed', lastProgress)
-            });
-            broadcastToTask(task.jobKey, {
-                type: 'status',
-                jobKey: task.jobKey,
-                status: 'failed',
-                message: bgError.message,
-                cdkCode: cdk,
-                progress: normalizeTaskProgress(lastProgress, 'failed', lastProgress)
-            });
-            notifyTaskOutcome({
-                event: 'failure',
-                email: accountEmail,
-                cdk,
-                jobKey: task.jobKey,
-                message: bgError.message
-            });
-            if (shouldRollbackCdk) {
-                await store.markCdkUnused(cdk);
-                logTask(task.jobKey, `CDK ${cdk} 已回滚为未使用`);
-            }
-        } finally {
-            releaseForegroundSlot(task.jobKey);
-            if (getTotalActiveJobs() === 0) {
-                const maintenanceModeState = await store.getMaintenanceModeState();
-                if (maintenanceModeState.enabled && maintenanceModeState.drain) {
-                    await store.setMaintenanceModeState(true, false);
-                }
-            }
+            notifyTaskOutcome({ event: status === 'success' ? 'success'
+                : isCardPoolExhaustedIssue(output, { message }) ? 'card_pool_empty' : 'failure',
+                email, cdk, jobKey: task.jobKey, message });
         }
-    })();
+    }).catch(error => {
+        console.error(`[Local Worker] ${task.jobKey}: ${redactText(error.message)}`);
+        // Persistence errors cannot safely release the CDK. Startup recovery preserves it.
+    }).finally(async () => {
+        releaseForegroundSlot(task.jobKey);
+        if (getTotalActiveJobs() === 0) {
+            const state = await store.getMaintenanceModeState();
+            if (state.enabled && state.drain) await store.setMaintenanceModeState(true, false);
+        }
+    }).catch(error => console.error(`[Local Worker Cleanup] ${redactText(error.message)}`));
 }
 
 async function handleActivationRequest(req, res) {
@@ -3695,11 +3533,10 @@ async function handleActivationRequest(req, res) {
             if (!task) return res.status(409).json({ success: false, message: 'CDK 已使用或正在处理，请重新验证 CDK 查询原订单' });
             ownsCdkLock = true;
         } else {
-            const lockSuccess = await store.markCdkUsed(cdk);
-            if (!lockSuccess) return res.status(403).json({ success: false, message: 'CDK 不可用或正在被他人使用' });
+            task = await store.createLocalTask({ cdk, planType: cdkDetails.plan_type || 'plus',
+                tokenPreview: extractSessionPreview(storedSession), sessionPayload: storedSession });
+            if (!task) return res.status(409).json({ success: false, message: 'CDK 不可用或已有待确认任务' });
             ownsCdkLock = true;
-            task = await store.createTaskLog({ tokenPreview: extractSessionPreview(storedSession), sessionPayload: storedSession,
-                cdkCode: cdk, phone: null, cardLast4: null, status: 'running', progress: 3 });
         }
         claimedTask = task;
         task.apiConfig = gptApiConfig;
@@ -3728,7 +3565,9 @@ async function handleActivationRequest(req, res) {
                 if (claimedTask?.orbitcardClientOrderNo) {
                     await store.settleOrbitcardTask(claimedTask.jobKey, { status: 'failed', progress: 0,
                         message: '任务尚未提交，CDK 已释放', orbitcardState: 'rejected' });
-                } else { await store.markCdkUnused(cdk); }
+                } else if (claimedTask?.localPayment) {
+                    await store.settleLocalTask(claimedTask.jobKey, { status: 'failed', localState: 'failed', message: '任务尚未启动，CDK 已释放' });
+                }
             } catch (_) { }
         }
         return res.status(500).json({ success: false, message: error.message });
@@ -3882,7 +3721,10 @@ app.get('/api/cdk/download', async (req, res) => {
 });
 
 async function start() {
+    runtimeLog.initialize();
     await ensureStoreReady();
+    const recovered = await store.recoverLocalTasks();
+    for (const task of recovered) logTask(task.job_key, '启动恢复：本地中断任务已按提交阶段处理，请核对任务状态');
 
     try {
         const poolInfo = await syncBrowserPoolModeFromStore();
@@ -3939,7 +3781,7 @@ async function start() {
     });
 
     // WebSocket Server Setup
-    const wss = new WebSocket.Server({ server });
+    const wss = new WebSocket.Server({ server, maxPayload: 16384 });
     wss.on('connection', (ws) => {
         let currentJobKey = null;
 
@@ -3956,6 +3798,12 @@ async function start() {
                     return;
                 }
                 if (data.type === 'subscribe' && data.jobKey) {
+                    const allowed = await require('./task-subscription').authorize(data, { store, verifyAdminToken });
+                    if (!allowed) {
+                        ws.close(1008, 'Unauthorized task subscription');
+                        return;
+                    }
+                    if (ws.readyState !== WebSocket.OPEN) return;
                     if (currentJobKey && currentJobKey !== data.jobKey) {
                         unsubscribeTaskClient(currentJobKey, ws);
                     }

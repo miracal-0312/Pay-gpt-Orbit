@@ -3190,6 +3190,7 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
                             <option value="">全部</option>
                             <option value="success">成功</option>
                             <option value="failed">失败</option>
+                            <option value="pending">待确认</option>
                         </select>
                     </div>
                 </div>
@@ -3254,7 +3255,7 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
                         <i data-lucide="refresh-cw"></i> 立即刷新
                     </button>
                     <button type="button" class="btn btn-delete" id="runtime_log_clear_btn" onclick="clearRuntimeLogs()">
-                        <i data-lucide="trash-2"></i> 清空日志
+                        <i data-lucide="trash-2"></i> 清空显示缓存
                     </button>
                 </div>
                 <p class="runtime-log-hint">与「任务管理」中的数据库记录不同：此处为实时流水，便于排查 Playwright / 子进程输出；筛选 Job 可在文本内搜索。</p>
@@ -3595,7 +3596,7 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
 
         async function clearRuntimeLogs() {
             const ok = await showAdminConfirm(
-                '确定清空当前内存中的运行日志？（不影响任务管理数据库表）',
+                '确定清空当前显示缓存？数据库记录和磁盘审计日志均保留。',
                 '清空运行日志'
             );
             if (!ok) {
@@ -3968,6 +3969,12 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
             if (videoBtn) {
                 event.preventDefault();
                 showTaskVideoByJobKey(videoBtn.getAttribute('data-view-video') || '');
+                return;
+            }
+            const auditBtn = event.target.closest('[data-download-audit]');
+            if (auditBtn) {
+                event.preventDefault();
+                downloadTaskAudit(auditBtn.getAttribute('data-download-audit') || '');
                 return;
             }
             const deleteBtn = event.target.closest('[data-delete-task]');
@@ -6484,11 +6491,27 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
                     </td>
                     <td>${renderStatus(l.status)}</td>
                     <td style="text-align:center">${mediaCell}</td>
-                    <td style="text-align:center"><button type="button" class="btn-delete" title="删除此任务记录" data-delete-task="${escapeHtml(l.id)}"><i data-lucide="trash-2"></i></button></td>
+                    <td style="text-align:center"><button type="button" class="btn btn-primary" data-download-audit="${escapeHtml(l.id)}">下载日志</button></td>
                 </tr>`;
             }).join('');
             renderPagination('log_pagination', 'log', pageData.total);
             lucide.createIcons();
+        }
+
+        async function downloadTaskAudit(jobKey) {
+            try {
+                const res = await authFetch(`/api/admin/task-logs/${encodeURIComponent(jobKey)}/audit`);
+                if (!res.ok) {
+                    const data = await res.json().catch(() => ({}));
+                    throw new Error(data.message || '日志下载失败');
+                }
+                const url = URL.createObjectURL(await res.blob());
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = `task-${jobKey}.jsonl`;
+                link.click();
+                setTimeout(() => URL.revokeObjectURL(url), 1000);
+            } catch (error) { showMessage(error.message, 'error'); }
         }
 
         async function deleteAdminTaskLog(jobKey) {
@@ -6497,7 +6520,7 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
                 return;
             }
             const ok = await showAdminConfirm(
-                `确定删除任务记录「${key}」？仅删除数据库中的本条记录，不会强制终止正在运行的子进程。`,
+                `确定删除已结束的调试记录「${key}」？充值关联记录和未结束任务受保护，不能删除。`,
                 '删除任务'
             );
             if (!ok) {
@@ -7537,7 +7560,7 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
                     socket.onopen = () => {
                         clearTimeout(reconnectTimer);
                         reconnectTimer = null;
-                        socket.send(JSON.stringify({ type: 'subscribe', jobKey: data.jobKey }));
+                        socket.send(JSON.stringify({ type: 'subscribe', jobKey: data.jobKey, adminToken: getAdminToken() }));
                         startHeartbeat();
                     };
 
@@ -7672,8 +7695,8 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
             const planLabels = { plus: 'Plus', pro100: 'Pro 100', pro200: 'Pro 200', pro500: 'Pro 500', pro_5x: 'Pro 5x (legacy)', pro_20x: 'Pro 20x (legacy)' };
             tbody.innerHTML = records.map(r => {
                 const time = r.payment_time ? new Date(r.payment_time).toLocaleString('zh-CN') : '-';
-                const statusClass = r.status === 'success' ? 'status-success' : 'status-failed';
-                const statusText = r.status === 'success' ? '成功' : '失败';
+                const statusClass = r.status === 'success' ? 'status-success' : r.status === 'pending' ? 'status-manual' : 'status-failed';
+                const statusText = r.status === 'success' ? '成功' : r.status === 'pending' ? '待确认' : '失败';
                 const planLabel = planLabels[r.plan_type] || r.plan_type || '-';
                 const cardDisplay = escapeHtml(r.card_number || r.card_last4 || '-');
                 const cardSummaryKey = escapeHtml(r.card_last4 || (r.card_number ? String(r.card_number).slice(-4) : ''));
@@ -8342,7 +8365,7 @@ http://USER-session-{session}:PASS@proxy.example.com:1000"></textarea>
                 : '無可用套餐';
             const orders = data.recent_orders || [];
             document.getElementById('gpt_api_recent_orders').innerHTML = orders.length
-                ? `<table style="width:100%; border-collapse:collapse"><thead><tr><th>CDK</th><th>订单</th><th>兑换结果</th><th>平台服务费</th><th>套餐卡密</th><th>更新时间</th></tr></thead><tbody>${orders.map((o) => `<tr><td>${escapeHtml(o.cdk_code || '—')}</td><td>${escapeHtml(String(o.order_id || o.orbitcard_order?.client_order_no || o.task_id || '—'))}</td><td>${escapeHtml(o.status || '—')}</td><td>${escapeHtml(o.orbitcard_order?.fee_status ? `${o.orbitcard_order.service_fee || '—'} ${o.orbitcard_order.currency || 'USDT'} (${o.orbitcard_order.fee_status})` : '—')}</td><td>${escapeHtml(o.topup_code || '—')}</td><td>${escapeHtml(o.updated_at || '—')}</td></tr>`).join('')}</tbody></table>`
+                ? `<table style="width:100%; border-collapse:collapse"><thead><tr><th>CDK</th><th>订单</th><th>兑换结果</th><th>平台服务费</th><th>套餐卡密</th><th>更新时间</th></tr></thead><tbody>${orders.map((o) => `<tr><td>${escapeHtml(o.cdk_code || '—')}</td><td>${escapeHtml(String(o.order_id || o.client_order_no || o.orbitcard_order?.client_order_no || o.task_id || '—'))}</td><td>${escapeHtml(o.status || '—')}</td><td>${escapeHtml(o.orbitcard_order?.fee_status ? `${o.orbitcard_order.service_fee || '—'} ${o.orbitcard_order.currency || 'USDT'} (${o.orbitcard_order.fee_status})` : '—')}</td><td>${escapeHtml(o.topup_code || '—')}</td><td>${escapeHtml(o.updated_at || '—')}</td></tr>`).join('')}</tbody></table>`
                 : '暂无第三方代充订单';
             document.getElementById('gpt_api_status_hint').textContent = data.balance_error
                 ? `余额查询失败：${data.balance_error}`

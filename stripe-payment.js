@@ -462,6 +462,7 @@ async function fillLocatedInput(target, text) {
  * @returns {Promise<{ success: boolean, error?: string, screenshot?: string, declined?: boolean, canRetryCard?: boolean }>}
  */
 async function completeStripeCardPayment(page, cardInfo, address, options = {}) {
+    let paymentSubmitted = false;
     const stopBeforeSubmit = options.stopBeforeSubmit === true || process.env.CHECKOUT_DEBUG_ONLY === '1';
     const ELEMENT_TIMEOUT = 45000;
     const cardAttempt = Number(options.cardAttempt) || 1;
@@ -682,7 +683,11 @@ async function completeStripeCardPayment(page, cardInfo, address, options = {}) 
                 screenshot: await saveDebugScreenshot(page, 'checkout_debug_filled'),
                 dueAmount: checkoutDue?.amount, dueCurrency: checkoutDue?.currency };
         }
-        const payResult = await finalizeCheckoutPayment(page, holderName);
+        const payResult = await finalizeCheckoutPayment(page, holderName, () => {
+            paymentSubmitted = true;
+            console.log('PAYMENT_SUBMITTING');
+        });
+        payResult.submitted = paymentSubmitted;
         if (checkoutDue?.amount) {
             payResult.dueAmount = checkoutDue.amount;
             payResult.dueCurrency = checkoutDue.currency;
@@ -692,7 +697,7 @@ async function completeStripeCardPayment(page, cardInfo, address, options = {}) 
     } catch (error) {
         console.error(`[Stripe] ❌ 支付流程异常: ${error.message}`);
         const screenshotPath = await saveDebugScreenshot(page, 'payment_exception');
-        return { success: false, error: error.message, screenshot: screenshotPath };
+        return { success: false, submitted: paymentSubmitted, error: error.message, screenshot: screenshotPath };
     }
 }
 
@@ -760,6 +765,7 @@ function buildDeclinedPaymentResult(page, msg, screenshotPath) {
  * @returns {Promise<string|null>}
  */
 async function detectPaymentDeclineOnPage(page) {
+    if (!isPaymentCheckoutUrl(page.url())) return null;
     try {
         const bodyText = String(await page.textContent('body', { timeout: 3000 }).catch(() => '') || '');
         for (const re of PAYMENT_DECLINE_PATTERNS) {
@@ -780,6 +786,14 @@ async function detectPaymentDeclineOnPage(page) {
         }
     } catch (_) { /* ignore */ }
     return null;
+}
+
+function isPaymentCheckoutUrl(value) {
+    try {
+        const url = new URL(value);
+        return url.protocol === 'https:' && (['checkout.stripe.com', 'pay.openai.com'].includes(url.hostname)
+            || (url.hostname === 'chatgpt.com' && /^\/checkout(?:\/|$)/.test(url.pathname)));
+    } catch (_) { return false; }
 }
 
 async function dismissCheckoutPaymentError(page) {
@@ -837,9 +851,6 @@ async function handlePostSubmitPhase(page) {
         if (url.includes('redirect_status=succeeded')) {
             return { action: 'success' };
         }
-        if (/chatgpt\.com/i.test(url) && !/\/checkout\//i.test(url)) {
-            return { action: 'success' };
-        }
 
         const elapsedSec = Math.floor((Date.now() - startedAt) / 1000);
         if (elapsedSec >= lastLogSec + 5) {
@@ -885,10 +896,10 @@ async function handlePostSubmitPhase(page) {
     return { action: 'continue', captcha: postCaptcha };
 }
 
-async function finalizeCheckoutPayment(page, holderName) {
+async function finalizeCheckoutPayment(page, holderName, beforeSubmit) {
     if (process.env.CHECKOUT_DEBUG_ONLY === '1') throw new Error('调试模式禁止提交付款');
     console.log('[Stripe] Step 9: 点击订阅/支付...');
-    const submitted = await clickCheckoutSubmitButton(page);
+    const submitted = await clickCheckoutSubmitButton(page, beforeSubmit);
     if (!submitted) {
         const screenshotPath = await saveDebugScreenshot(page, 'submit_not_found');
         return { success: false, error: '无法找到提交/支付按钮', screenshot: screenshotPath };
@@ -985,14 +996,10 @@ async function waitForPaymentResult(page, holderName) {
             return buildPaymentSuccessResult(page, holderName);
         }
 
-        if (/chatgpt\.com/i.test(url) && !/\/checkout\//i.test(url)) {
-            console.log('[Stripe] ✅ 已离开 checkout 页面');
-            return buildPaymentSuccessResult(page, holderName);
-        }
 
         const bodyText = String(await page.textContent('body', { timeout: 8000 }).catch(() => '') || '');
 
-        for (const re of PAYMENT_DECLINE_PATTERNS) {
+        for (const re of (isPaymentCheckoutUrl(url) ? PAYMENT_DECLINE_PATTERNS : [])) {
             if (re.test(bodyText)) {
                 const match = bodyText.match(re);
                 const msg = match ? match[0] : 'card declined';
@@ -1015,7 +1022,7 @@ async function waitForPaymentResult(page, holderName) {
             for (let i = 0; i < alertCount; i += 1) {
                 const alertText = String(await alerts.nth(i).textContent({ timeout: 500 }).catch(() => '') || '');
                 if (!alertText.trim()) continue;
-                if (PAYMENT_DECLINE_PATTERNS.some((re) => re.test(alertText))) {
+                if (isPaymentCheckoutUrl(url) && PAYMENT_DECLINE_PATTERNS.some((re) => re.test(alertText))) {
                     console.log(`[Stripe] ❌ Alert 拒付: ${alertText.trim()}`);
                     const screenshotPath = await saveDebugScreenshot(page, 'payment_declined');
                     return buildDeclinedPaymentResult(page, alertText.trim(), screenshotPath);
@@ -2503,7 +2510,7 @@ async function fillBillingLine1Strict(page, value) {
     return ok;
 }
 
-async function clickCheckoutSubmitButton(page) {
+async function clickCheckoutSubmitButton(page, beforeSubmit = () => {}) {
     if (process.env.CHECKOUT_DEBUG_ONLY === '1') throw new Error('调试模式禁止点击付款按钮');
     await dismissAddressAutocomplete(page);
     await page.keyboard.press('Escape').catch(() => {});
@@ -2513,6 +2520,7 @@ async function clickCheckoutSubmitButton(page) {
     await page.waitForTimeout(400);
 
     const tryClick = async (locator, label) => {
+        let attempted = false;
         try {
             const target = locator.first ? locator.first() : locator;
             if (!(await target.isVisible({ timeout: 2000 }).catch(() => false))) {
@@ -2524,11 +2532,15 @@ async function clickCheckoutSubmitButton(page) {
             }
             await target.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
             await page.waitForTimeout(randomBetween(150, 350));
+            beforeSubmit();
+            attempted = true;
             await target.click({ timeout: 8000, delay: randomBetween(40, 120) });
             console.log(`[Stripe] ✅ 已点击提交按钮 (${label})`);
             return true;
         } catch (error) {
             console.log(`[Stripe] 提交按钮点击失败 (${label}): ${error.message}`);
+            // A click timeout can happen after submission. Never click another selector.
+            if (attempted) throw error;
             return false;
         }
     };

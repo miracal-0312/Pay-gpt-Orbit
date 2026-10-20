@@ -43,6 +43,7 @@ services:
       - "127.0.0.1:${NOVNC_PORT:-6080}:6080"
     environment:
       PORT: 3000
+      TASK_LOG_DIR: /app/data/logs
       DB_HOST: mysql
       DB_PORT: 3306
       DB_USER: root
@@ -85,6 +86,12 @@ services:
       - ./public:/app/public
       - ./server.js:/app/server.js
       - ./load-env.js:/app/load-env.js:ro
+      - ./runtime-log.js:/app/runtime-log.js:ro
+      - ./log-safety.js:/app/log-safety.js:ro
+      - ./local-payment-state.js:/app/local-payment-state.js:ro
+      - ./local-task-store.js:/app/local-task-store.js:ro
+      - ./local-worker.js:/app/local-worker.js:ro
+      - ./task-subscription.js:/app/task-subscription.js:ro
       - ./chatgpt.js:/app/chatgpt.js
       - ./index.js:/app/index.js
       - ./playwright-proxy.js:/app/playwright-proxy.js

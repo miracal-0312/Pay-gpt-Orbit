@@ -115,9 +115,11 @@ CDK 占用和订单关联在同一数据库事务中创建。每次兑换尝试�
 
 ## 升级
 
+充值状态和日志修复的变更、待确认订单处理方式、日志字段及验证范围见 [RECHARGE-AUDIT.md](RECHARGE-AUDIT.md)。本地任务与 Orbitcard 请求现在写入 `data/logs`，后台任务列表可下载完整 JSONL 日志；清空运行日志仅清空显示缓存。
+
 - 合并 `.env.example` 中新增配置，保留已有数据库连接、管理员信息和业务凭据。
 - 更新到 Node.js 24；Docker 使用 `docker compose up -d --build app` 更新镜像和环境。
-- 启动自动补齐 Orbitcard 订单关联字段并迁移协议配置，数据库账号需要 `ALTER TABLE` 权限。
+- 启动自动补齐 Orbitcard 订单关联字段、本地支付阶段 `local_payment_state` 并迁移协议配置，数据库账号需要 `ALTER TABLE` 权限。
 - 已有 Orbitcard 配置保留；尚未迁移的旧代充配置会停用、清空旧 Key、恢复 Orbitcard 默认地址。重新填写参数后再启用。
 - 历史任务和卡池数据保留；原供应商未完成订单需在原供应商侧核实，不会由 Orbitcard 代为查询。
 
