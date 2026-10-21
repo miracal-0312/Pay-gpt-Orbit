@@ -99,11 +99,28 @@ test('live inactive status overrides cached ACTIVE and the next active card is s
     assert.equal(f.db.issues.length,0);assert.equal(f.db.fundings.length,0);
 });
 
-test('a previously managed eligible card missing from the platform list cannot trigger automatic opening',async () => {
+test('a previously managed card missing from the live list is skipped and a new card is opened',async () => {
     const f=serviceFixture();await f.addCard(42);f.setCards([]);const task=await f.claim();
-    await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/人工售后/);
-    assert.equal(f.calls.filter(call=>['createCard','rechargeCard'].includes(call.operation)).length,0);
+    assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),100);
+    assert.equal(f.calls.filter(call=>call.operation==='createCard').length,1);
+    assert.equal(f.calls.filter(call=>call.operation==='rechargeCard').length,1);
     assert.ok(f.events.some(event=>event.event==='card_unavailable'&&event.data.reason==='missing_from_platform_list'));
+});
+
+test('a pending opening owned by another order is never adopted as this payment card',async () => {
+    const f=serviceFixture();f.setCards([]);const task=await f.claim();
+    f.db.issues.push({issue_key:'card-other',scope:require('../orbitcard-card-policy').cardScope(cfg.base_url),
+        job_key:'another-order',plan_type:'plus',state:'pending'});
+    await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/另一笔开卡申请/);
+    assert.equal(f.calls.filter(call=>call.operation==='createCard').length,0);
+});
+
+test('an already reserved card missing from the live list cannot trigger a second opening',async () => {
+    const f=serviceFixture();await f.addCard(42);const task=await f.claim();
+    await f.store.cardMethods(f.base).reserveCard(42,task.jobKey,'plus');
+    f.setCards([]);
+    await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/预占卡片/);
+    assert.equal(f.calls.filter(call=>call.operation==='createCard').length,0);
 });
 
 test('documented product response automatically supplies the exact createCard fields without membership prices',async () => {
@@ -370,10 +387,11 @@ test('fixed 20 USD issue never silently raises the amount to satisfy a higher pr
     assert.throws(() => f.api.chooseProduct(rows,'plus',cfg),/20 USD/);
 });
 
-test('quota-available cards with unsupported state or currency require support without opening another card',async () => {
+test('quota-available cards with unsupported state or currency are skipped for a new card',async () => {
     for(const change of [{status:'CANCELLED'},{currency:'EUR'}]) {
         const f=serviceFixture(),card=await f.addCard();f.setCards([{...card,status:'ACTIVE',...change}]);const task=await f.claim();
-        await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/人工售后/);assert.equal(f.db.issues.length,0);assert.equal(f.db.fundings.length,0);
+        assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),101);
+        assert.equal(f.db.issues.length,1);
     }
 });
 
@@ -642,15 +660,14 @@ test('unknown automatic opening stays bound to the CDK and reuses its original k
     assert.equal(f.db.issues.length,1);
 });
 
-test('busy or abnormal cards with remaining quota require support instead of another issue',async () => {
+test('busy or abnormal cards with remaining quota are skipped before opening a new card',async () => {
     for(const setup of ['busy','frozen']) {
         const f=serviceFixture(),card=await f.addCard(42);
         f.setCards([{...card,status:setup==='frozen'?'FROZEN':'ACTIVE',balance:50}]);
         if(setup==='busy') f.db.cards[0].active_job='other';
         const task=await f.claim();
-        await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),
-            error=>error instanceof require('../orbitcard-card-policy').CardSwitchExhaustedError);
-        assert.equal(f.calls.filter(call=>call.operation==='createCard').length,0);
+        assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),101);
+        assert.equal(f.calls.filter(call=>call.operation==='createCard').length,1);
     }
 });
 

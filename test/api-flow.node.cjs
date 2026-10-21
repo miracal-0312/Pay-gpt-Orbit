@@ -145,7 +145,7 @@ test('historical tasks retain reservations and migrations do not drop legacy dat
     assert.ok(executed.some(([sql]) => sql.includes('used_at = COALESCE(used_at')));
     assert.ok(executed.some(([sql]) => sql.includes("status = 'manual'")));
     assert.ok(executed.every(([sql]) => !/DROP|TRUNCATE|used_at = NULL/.test(sql)));
-    assert.ok(columns.every(([table]) => ['app_config','cdk_codes','task_logs'].includes(table)));
+    assert.ok(columns.every(([table]) => ['app_config','cdk_codes','task_logs','orbitcard_admin_orders'].includes(table)));
 });
 test('new tasks store only the account preview and never a submitted Session', async () => {
     let insert;

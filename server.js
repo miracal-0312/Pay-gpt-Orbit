@@ -41,7 +41,7 @@ async function notify(task) {
     });
 }
 const cardService = require('./orbitcard-card-service')({ store, audit: entry => runtimeLog.push(entry) });
-const manualService = require('./orbitcard-manual-service')({ store, activeJobs, audit: entry => runtimeLog.push(entry) });
+const manualService = require('./orbitcard-manual-service')({ store, activeJobs, cardService, audit: entry => runtimeLog.push(entry) });
 const recovery = require('./order-recovery')({ store, query: require('./orbitcard-query'), activeJobs,
     audit: entry => runtimeLog.push(entry), notify,
     reconcileCards: async () => cardService.recover(await store.getGptApiConfig()),

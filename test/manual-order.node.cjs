@@ -6,8 +6,8 @@ const createService = require('../orbitcard-manual-service');
 const createStore = require('../orbitcard-manual-store');
 const { cardScope } = require('../orbitcard-card-policy');
 
-function fixture({ unknown = false } = {}) {
-    const orders = new Map(), calls = [], created = [];
+function fixture({ unknown = false, pendingAllocation = false } = {}) {
+    const orders = new Map(), calls = [], created = [], allocations = [];
     const cfg = { enabled: true, base_url: 'https://orbitcard.cc', api_key: 'key' };
     const plans = [
         { type: 'gpt-go', name: 'Go' }, { type: 'gpt-plus', name: 'Plus' },
@@ -23,14 +23,26 @@ function fixture({ unknown = false } = {}) {
             active_job: null, successful_plus: 0, successful_pro100: 0,
             successful_pro200: 0, successful_pro500: 0 }] }),
         withCardAllocationLock: async (_url, action) => action({ syncCards: async () => {} }),
-        createManualOrder: async input => {
+        prepareManualOrder: async input => {
             created.push(input);
             const row = { request_id: input.requestId, client_order_no: `manual-${input.requestId}`,
                 scope: cardScope(input.baseUrl),
                 api_key_hash: require('node:crypto').createHash('sha256').update(cfg.api_key).digest('hex'),
                 plan_type: input.planType, plan_name: input.planName, target_email: input.targetEmail,
-                card_id: input.cardId, mode: input.mode, cdk_code: input.cdkCode, state: 'prepared' };
-            orders.set(input.requestId, row); return { order: row, created: true };
+                card_id: 0, mode: input.mode, cdk_code: input.cdkCode, state: 'preparing' };
+            orders.set(input.requestId, row); return row;
+        },
+        markManualPrepared: async (requestId, key, cardId) => {
+            const row = orders.get(requestId);
+            assert.equal(row.client_order_no, key);
+            row.card_id = cardId; row.state = 'prepared';
+            return row;
+        },
+        failManualPreparation: async (requestId, _key, message) => {
+            const row = orders.get(requestId);
+            if (pendingAllocation) throw new Error('原补款意图待确认');
+            if (row?.state === 'preparing' && !row.card_id) { row.state = 'failed'; row.message = message; }
+            return row;
         },
         claimManualSubmission: async id => {
             const row = orders.get(id);
@@ -61,13 +73,15 @@ function fixture({ unknown = false } = {}) {
                 upstream_status: 'succeeded', query_source: 'upstream' } };
         }
     };
-    const cards = {
-        listCards: async () => [{ card_id: 12, last4: '1234', provider_status: 'ACTIVE', currency: 'USD', balance_amount: 30 }],
-        cardDetailsInBatches: async () => [{ card_id: 12, last4: '1234', provider_status: 'ACTIVE', currency: 'USD', balance_amount: 30 }],
-        positiveId: value => Number.isSafeInteger(Number(value)) && Number(value) > 0 ? Number(value) : null
-    };
-    const service = createService({ store, activeJobs: new Set(), audit: () => {}, provider, cards });
-    return { service, calls, created, orders, cfg };
+    const cardService = { allocate: async (_cfg, jobKey, planType, selection) => {
+        allocations.push({ jobKey, planType, selection });
+        if (pendingAllocation && allocations.length === 1) {
+            throw new (require('../orbitcard-card-policy').FundingPendingError)('原补款结果待确认');
+        }
+        return 12;
+    } };
+    const service = createService({ store, activeJobs: new Set(), audit: () => {}, provider, cardService });
+    return { service, calls, created, orders, allocations, cfg };
 }
 
 async function until(check) {
@@ -83,7 +97,7 @@ const id = '1b056caa-d7a6-4c39-9672-88e9cc5c6577';
 
 test('test mode uses only Plus and Pro plans and charges once without a CDK', async () => {
     process.env.ORBITCARD_API_KEY = 'key'; process.env.ORBITCARD_API_SECRET = 'secret';
-    const { service, calls, created, orders, cfg } = fixture();
+    const { service, calls, created, orders, allocations, cfg } = fixture();
     cfg.enabled = false; // Public new-order switch does not disable an authenticated administrator test.
     const catalog = await service.catalog();
     assert.deepEqual(catalog.plans.map(x => x.type), ['gpt-plus']);
@@ -93,6 +107,7 @@ test('test mode uses only Plus and Pro plans and charges once without a CDK', as
         mode: 'test', cdkCode: '', session, authorized: true, adminEmail: 'admin@example.com' });
     await until(() => orders.get(id).state === 'success');
     assert.equal(created[0].cdkCode, null);
+    assert.deepEqual(allocations, [{jobKey:`manual-${id}`,planType:'gpt-plus',selection:{manualRequestId:id}}]);
     assert.equal(calls.filter(x => x.operation === 'createSubscription').length, 1);
     assert.equal(calls[0].key, `manual-${id}`);
     assert.equal(calls[0].body.session_json.user.email, 'buyer@example.com');
@@ -127,6 +142,19 @@ test('unknown submission queries the original order and never submits again', as
     assert(calls.filter(x => x.operation === 'getSubscription').every(x => x.body.client_order_no === `manual-${id}`));
 });
 
+test('pending funding keeps the same manual request and never submits until it is confirmed', async () => {
+    process.env.ORBITCARD_API_KEY = 'key'; process.env.ORBITCARD_API_SECRET = 'secret';
+    const { service, allocations, calls, orders } = fixture({ pendingAllocation: true });
+    const input = { requestId: id, planType: 'gpt-plus', mode: 'test', session, authorized: true };
+    await assert.rejects(service.create(input), /原补款结果待确认/);
+    assert.equal(orders.get(id).state, 'preparing');
+    assert.equal(calls.filter(x => x.operation === 'createSubscription').length, 0);
+    await service.create(input);
+    await until(() => orders.get(id).state === 'success');
+    assert.equal(allocations.length, 2);
+    assert.equal(calls.filter(x => x.operation === 'createSubscription').length, 1);
+});
+
 function storeFixture() {
     const scope = cardScope('https://orbitcard.cc');
     const db = { orders: [], cdks: [{ cdk_code: 'KC-READY', is_active: 1, type: '自助',
@@ -138,16 +166,23 @@ function storeFixture() {
         if (q.startsWith('SELECT * FROM orbitcard_admin_orders WHERE request_id')) return db.orders.filter(o => o.request_id === p[0]
             && (!q.includes("state = 'prepared'") || o.state === 'prepared')).map(o => structuredClone(o));
         if (q.startsWith('SELECT request_id FROM orbitcard_admin_orders WHERE scope')) return db.orders.filter(o => o.scope === p[0]
-            && o.target_email === p[1] && o.plan_type === p[2] && ['prepared','submitting','pending','manual'].includes(o.state)).map(o => structuredClone(o));
+            && o.target_email === p[1] && o.plan_type === p[2] && ['preparing','prepared','submitting','pending','manual'].includes(o.state)).map(o => structuredClone(o));
         if (q.startsWith('SELECT request_id FROM orbitcard_admin_orders WHERE cdk_code')) return db.orders.filter(o => o.cdk_code === p[0] && o.state === 'success').map(o => structuredClone(o));
         if (q.startsWith('SELECT * FROM cdk_codes') || q.startsWith('SELECT cdk_code FROM cdk_codes')) return db.cdks.filter(c => c.cdk_code === p[0]).map(o => structuredClone(o));
         if (q.startsWith('SELECT job_key FROM task_logs')) return [];
+        if (q.startsWith('SELECT funding_key FROM orbitcard_card_fundings')) return [];
         if (q.startsWith('SELECT * FROM orbitcard_managed_cards')) return db.card.scope === p[0] && db.card.card_id === p[1] ? [structuredClone(db.card)] : [];
         throw new Error(`Unexpected query ${q}`);
     };
     const runExecute = async (sql, p = []) => {
         const q = clean(sql);
-        if (q.startsWith('INSERT INTO orbitcard_admin_orders')) db.orders.push({
+        if (q.startsWith('INSERT INTO orbitcard_admin_orders') && q.includes("0,?,'preparing'")) db.orders.push({
+            request_id: p[0], client_order_no: p[1], scope: p[2], api_key_hash: p[3],
+            mode: p[4], cdk_code: p[5], plan_type: p[6], plan_name: p[7],
+            target_email: p[8], card_id: 0, admin_email: p[9], state: 'preparing',
+            task_no: null, snapshot: null, message: p[10], issue_key: null
+        });
+        else if (q.startsWith('INSERT INTO orbitcard_admin_orders')) db.orders.push({
             request_id: p[0], client_order_no: p[1], scope: p[2], api_key_hash: p[3],
             mode: p[4], cdk_code: p[5], plan_type: p[6], plan_name: p[7],
             target_email: p[8], card_id: p[9], admin_email: p[10], state: 'prepared',
@@ -155,6 +190,13 @@ function storeFixture() {
         });
         else if (q.startsWith('UPDATE cdk_codes SET used_at = CURRENT_TIMESTAMP')) db.cdks.find(c => c.cdk_code === p[0]).used_at = 'reserved';
         else if (q.startsWith('UPDATE cdk_codes SET used_at = NULL')) db.cdks.find(c => c.cdk_code === p[0]).used_at = null;
+        else if (q.startsWith('UPDATE orbitcard_admin_orders SET card_id = ?')) {
+            const row = db.orders.find(o => o.request_id === p[2]); row.card_id = p[0]; row.message = p[1];
+        } else if (q.startsWith('UPDATE orbitcard_admin_orders SET issue_key = ?')) {
+            const row = db.orders.find(o => o.request_id === p[2]); row.issue_key = p[0]; row.message = p[1];
+        } else if (q.startsWith("UPDATE orbitcard_admin_orders SET state = 'prepared'")) {
+            const row = db.orders.find(o => o.request_id === p[1]); row.state = 'prepared'; row.message = p[0];
+        }
         else if (q.startsWith('UPDATE orbitcard_managed_cards SET active_job = ?')) {
             db.card.active_job = p[0]; db.card.active_plan = p[1];
         } else if (q.startsWith("UPDATE orbitcard_admin_orders SET state = 'submitting'")) {
@@ -168,7 +210,8 @@ function storeFixture() {
             db.card.active_job = null; db.card.active_plan = null;
             if (q.includes('successful_plus = successful_plus + 1')) db.card.successful_plus++;
         } else if (q.startsWith("UPDATE orbitcard_admin_orders SET state = 'failed'")) {
-            const row = db.orders.find(o => o.request_id === p[0]); row.state = 'failed'; row.message = 'abandoned';
+            const row = db.orders.find(o => o.request_id === (p.length > 1 ? p[1] : p[0]));
+            row.state = 'failed'; row.message = p.length > 1 ? p[0] : 'abandoned';
         } else if (q.startsWith('INSERT INTO cdk_codes')) {
             db.cdks.push({ cdk_code: p[0], is_active: 1, type: '手动', plan_type: p[1], used_at: null });
         } else throw new Error(`Unexpected execute ${q}`);
@@ -223,4 +266,31 @@ test('a prepared order interrupted before submission releases its CDK and card w
     assert.equal(db.orders[0].state, 'failed');
     assert.equal(db.cdks[0].used_at, null);
     assert.equal(db.card.active_job, null);
+});
+
+test('automatic manual preparation reserves its CDK before card funding and binds one eligible card', async () => {
+    const { db, store } = storeFixture();
+    const order = await store.prepareManualOrder(manualInput(id));
+    assert.equal(order.state, 'preparing');
+    assert.equal(order.card_id, 0);
+    assert.equal(db.cdks[0].used_at, 'reserved');
+    await assert.rejects(store.prepareManualOrder(manualInput('36aad0bb-5eb7-4771-93f5-1ebd049b29e0')), /待确认管理员订单/);
+    assert.ok(await store.reserveManualCard(id, 12, `manual-${id}`, 'gpt-plus'));
+    assert.equal(db.card.active_job, `manual-${id}`);
+    await store.markManualPrepared(id, `manual-${id}`, 12);
+    assert.equal(await store.claimManualSubmission(id), true);
+    await store.settleManualOrder(id, { state: 'success', message: 'confirmed success' });
+    assert.equal(db.card.successful_plus, 1);
+    assert.equal(db.card.active_job, null);
+    assert.equal(db.cdks[0].used_at, 'reserved');
+});
+
+test('a failed manual preparation before any remote write releases its card and CDK', async () => {
+    const { db, store } = storeFixture();
+    await store.prepareManualOrder(manualInput(id));
+    await store.reserveManualCard(id, 12, `manual-${id}`, 'gpt-plus');
+    await store.failManualPreparation(id, `manual-${id}`, '账户余额不足');
+    assert.equal(db.orders[0].state, 'failed');
+    assert.equal(db.card.active_job, null);
+    assert.equal(db.cdks[0].used_at, null);
 });

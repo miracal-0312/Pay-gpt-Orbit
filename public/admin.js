@@ -5,7 +5,7 @@ const cardPlans = { plus: 'Plus', pro100: 'Pro 100', pro200: 'Pro 200', pro500: 
 let cdkPlans = {};
 let loginUrl = '/admin-login', selected = 'overview', savedBaseUrl = '';
 let cdkPlanFilter = '', cdkLoadSequence = 0, cdkLoadedFilter = null;
-let manualCatalog = { plans: [], cards: [] }, manualRequestId = null;
+let manualCatalog = { plans: [] }, manualOrders = [];
 function notice(text, type = '') { $('notice').textContent = text; $('notice').className = `message ${type}`; }
 function escapeHtml(value) { return String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch])); }
 function logout() { localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(SECONDARY_KEY); location.assign(loginUrl); }
@@ -34,7 +34,7 @@ async function perform(action, success) {
     try { const result = await action(); if (success) notice(success, 'success'); return result; }
     catch (error) { notice(error.message, 'error'); return null; }
 }
-function status(value) { const text = { success: '成功', failed: '失败', retry: '待重新提交 Session', running: '处理中', prepared: '已保存', submitting: '提交中', manual: '待确认', pending: '待确认', unused: '未使用', used: '已使用', redeemed: '已核销', processing: '占用中' }[value] || value; return `<span class="pill ${escapeHtml(value)}">${escapeHtml(text)}</span>`; }
+function status(value) { const text = { success: '成功', failed: '失败', retry: '待重新提交 Session', running: '处理中', preparing: '准备支付', prepared: '已保存', submitting: '提交中', manual: '待确认', pending: '待确认', unused: '未使用', used: '已使用', redeemed: '已核销', processing: '占用中' }[value] || value; return `<span class="pill ${escapeHtml(value)}">${escapeHtml(text)}</span>`; }
 function renderTasks(tasks) {
     $('tasks').innerHTML = tasks.map(task => {
         const order = task.order || {}, fee = order.fee_status ? `${order.service_fee ?? '—'} ${order.currency || 'USDT'} / ${order.fee_status}` : '—';
@@ -237,50 +237,38 @@ form('importForm', async () => {
     $('cdkImport').value = ''; notice(data.message, 'success'); await loadCdks();
 });
 function manualMode() { return document.querySelector('input[name="manualMode"]:checked')?.value || 'test'; }
-function renderManualCardOptions() {
-    const previous = $('manualCard').value, plan = $('manualPlan').value;
-    const quota = { 'gpt-plus': ['plus', 4], 'gpt-pro-5x': ['pro100', 1],
-        'gpt-pro-20x': ['pro200', 1], 'gpt-pro-25x': ['pro500', 1] }[plan];
-    const available = manualCatalog.cards.filter(card => card.provider_status === 'ACTIVE'
-        && card.currency === 'USD' && Number(card.balance) > 0
-        && card.history_confirmed && !card.busy
-        && (!quota || Number(card.usage?.[quota[0]] || 0) < quota[1]));
-    $('manualCard').innerHTML = `<option value="">${available.length ? '请选择可用卡片' : '没有符合条件的已登记卡片'}</option>`
-        + available.map(card => `<option value="${escapeHtml(card.card_id)}">卡 ${escapeHtml(card.card_id)} · ****${escapeHtml(card.last4 || '—')} · ${escapeHtml(card.balance)} USD</option>`).join('');
-    if (available.some(card => String(card.card_id) === previous)) $('manualCard').value = previous;
-    $('manualCatalogState').textContent = `实时套餐 ${manualCatalog.plans.length} 项；当前可选卡 ${available.length} 张。卡片需为 ACTIVE、USD、已核对历史次数且未被其他任务占用。`;
-}
 async function loadManualCatalog() {
-    $('manualCatalogState').textContent = '正在读取 Orbitcard 套餐与卡片…';
+    $('manualCatalogState').textContent = '正在读取 Orbitcard 套餐…';
     const current = $('manualPlan').value;
-    manualCatalog = { plans: [], cards: [] };
+    manualCatalog = { plans: [] };
     $('manualPlan').innerHTML = '<option value="">正在读取平台套餐</option>';
-    $('manualCard').innerHTML = '<option value="">正在读取平台卡片</option>';
     let data;
     try { data = await request('/api/admin/manual/catalog'); }
-    catch (error) { $('manualCatalogState').textContent = `套餐或卡片读取失败：${error.message}`; throw error; }
-    manualCatalog = { plans: data.plans || [], cards: data.cards || [] };
+    catch (error) { $('manualCatalogState').textContent = `套餐读取失败：${error.message}`; throw error; }
+    manualCatalog = { plans: data.plans || [] };
     $('manualPlan').innerHTML = '<option value="">请选择平台已开放套餐</option>'
         + manualCatalog.plans.map(plan => `<option value="${escapeHtml(plan.type)}">${escapeHtml(plan.name)}（${escapeHtml(plan.type)}）</option>`).join('');
     if (manualCatalog.plans.some(plan => plan.type === current)) $('manualPlan').value = current;
-    renderManualCardOptions();
+    $('manualCatalogState').textContent = `实时套餐 ${manualCatalog.plans.length} 项；提交时自动读取卡台卡片并准备支付资金。`;
 }
 function renderManualOrders(orders) {
     $('manualOrderRows').innerHTML = orders.map(order => {
         const outcome = status(order.state);
         const captcha = order.captcha?.url ? `<br><a href="${escapeHtml(order.captcha.url)}" target="_blank" rel="noopener noreferrer">打开平台验证链接</a>` : '';
-        const action = `${['submitting','pending','manual'].includes(order.state)
+        const action = `${order.state === 'preparing'
+            ? `<button type="button" class="secondary" data-retry-manual="${escapeHtml(order.request_id)}">继续准备</button>` : ''}${['submitting','pending','manual'].includes(order.state)
             ? `<button type="button" class="secondary" data-refresh-manual="${escapeHtml(order.request_id)}">查询原订单</button>` : ''}
             <button type="button" class="secondary" data-download-manual="${escapeHtml(order.client_order_no)}">下载日志</button>`;
         return `<tr><td>${escapeHtml(new Date(order.created_at).toLocaleString('zh-CN'))}<br>${escapeHtml(order.target_email)}</td>
-            <td>${order.mode === 'fulfillment' ? '人工交付' : '测试开通'}<br>${escapeHtml(order.plan_name || order.plan_type)}<br>卡 ${escapeHtml(order.card_id)}${order.cdk_code ? `<br><code>${escapeHtml(order.cdk_code)}</code>` : ''}</td>
-            <td><code>${escapeHtml(order.client_order_no)}</code>${order.task_no ? `<br><code>${escapeHtml(order.task_no)}</code>` : ''}</td>
+            <td>${order.mode === 'fulfillment' ? '人工交付' : '测试开通'}<br>${escapeHtml(order.plan_name || order.plan_type)}<br>${order.card_id ? `卡 ${escapeHtml(order.card_id)}` : '待选卡'}${order.cdk_code ? `<br><code>${escapeHtml(order.cdk_code)}</code>` : ''}</td>
+            <td><code>${escapeHtml(order.client_order_no)}</code><br><small>请求 ${escapeHtml(order.request_id)}</small>${order.task_no ? `<br><code>${escapeHtml(order.task_no)}</code>` : ''}</td>
             <td>${outcome}<br>${escapeHtml(order.message || '')}${captcha}</td><td>${action}</td></tr>`;
     }).join('') || '<tr><td colspan="5">暂无管理员订单</td></tr>';
 }
 async function loadManualOrders() {
     const data = await request('/api/admin/manual/orders');
-    renderManualOrders(data.orders || []);
+    manualOrders = data.orders || [];
+    renderManualOrders(manualOrders);
 }
 function updateManualMode() {
     const fulfillment = manualMode() === 'fulfillment';
@@ -289,7 +277,6 @@ function updateManualMode() {
     if (!fulfillment) $('manualCdk').value = '';
 }
 document.querySelectorAll('input[name="manualMode"]').forEach(input => input.addEventListener('change', updateManualMode));
-$('manualPlan').addEventListener('change', renderManualCardOptions);
 $('refreshManualCatalog').onclick = () => perform(loadManualCatalog);
 $('refreshManualOrders').onclick = () => perform(loadManualOrders);
 $('manualSessionFile').addEventListener('change', async event => {
@@ -301,13 +288,14 @@ $('manualSessionFile').addEventListener('change', async event => {
 form('manualForm', async () => {
     if (!manualCatalog.plans.some(plan => plan.type === $('manualPlan').value)) throw new Error('请选择当前开放的套餐');
     try { JSON.parse($('manualSession').value); } catch (_) { throw new Error('Session 必须是完整 JSON'); }
-    manualRequestId ||= crypto.randomUUID();
+    const requestId = $('manualRetryId').value.trim() || crypto.randomUUID();
+    $('manualRetryId').value = requestId;
     const data = await request('/api/admin/manual/orders', {
-        request_id: manualRequestId, mode: manualMode(), plan_type: $('manualPlan').value,
-        card_id: Number($('manualCard').value), cdk_code: manualMode() === 'fulfillment' ? $('manualCdk').value.trim() : '',
+        request_id: requestId, mode: manualMode(), plan_type: $('manualPlan').value,
+        cdk_code: manualMode() === 'fulfillment' ? $('manualCdk').value.trim() : '',
         session: $('manualSession').value, authorized: $('manualAuthorized').checked
     });
-    manualRequestId = null;
+    $('manualRetryId').value = '';
     $('manualSession').value = ''; $('manualSessionFile').value = ''; $('manualAuthorized').checked = false;
     notice(`订单 ${data.order.client_order_no} 已受理；请在下方查询原订单确认结果。`, 'success');
     await loadManualOrders();
@@ -431,6 +419,20 @@ $('cdkFilters').addEventListener('click', event => {
 });
 $('clearLogs').onclick = () => perform(async () => { await request('/api/admin/runtime-logs/clear', {}); await loadLogs(); notice('显示缓存已清空，磁盘历史保留', 'success'); });
 document.addEventListener('click', event => {
+    const retryManual = event.target.closest('[data-retry-manual]');
+    if (retryManual) {
+        const order = manualOrders.find(item => item.request_id === retryManual.dataset.retryManual);
+        if (order && order.state === 'preparing') {
+            $('manualRetryId').value = order.request_id;
+            $('manualPlan').value = order.plan_type;
+            const mode = [...document.querySelectorAll('input[name="manualMode"]')].find(input => input.value === order.mode);
+            if (mode) mode.checked = true;
+            updateManualMode();
+            if (order.cdk_code) $('manualCdk').value = order.cdk_code;
+            notice(`已载入原请求 ${order.request_id}；重新上传该账号 Session 后继续，不能创建新的订单。`, 'success');
+            $('manualSession').focus();
+        }
+    }
     const downloadManual = event.target.closest('[data-download-manual]');
     if (downloadManual) perform(async () => {
         const job = downloadManual.dataset.downloadManual;

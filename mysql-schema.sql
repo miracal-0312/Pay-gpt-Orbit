@@ -131,6 +131,7 @@ CREATE TABLE IF NOT EXISTS orbitcard_admin_orders (
     plan_name VARCHAR(128) NOT NULL,
     target_email VARCHAR(255) NOT NULL,
     card_id BIGINT UNSIGNED NOT NULL,
+    issue_key VARCHAR(80) NULL,
     admin_email VARCHAR(128) NOT NULL,
     state VARCHAR(16) NOT NULL DEFAULT 'prepared',
     task_no VARCHAR(128) NULL,

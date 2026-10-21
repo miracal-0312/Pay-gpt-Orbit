@@ -2,7 +2,6 @@
 
 const crypto = require('node:crypto');
 const api = require('./orbitcard-client');
-const cardsApi = require('./orbitcard-cards-client');
 const { parseSession } = require('./session-input');
 const { validOrder } = require('./orbitcard-cdk');
 const { cardScope, CardPreparationError } = require('./orbitcard-card-policy');
@@ -18,7 +17,7 @@ class ManualOrderError extends Error {
     constructor(message, status = 400) { super(message); this.status = status; }
 }
 
-module.exports = function createManualService({ store, activeJobs, audit, provider = api, cards = cardsApi }) {
+module.exports = function createManualService({ store, activeJobs, audit, cardService, provider = api }) {
     const inFlight = new Set(), challenges = new Map();
     let recovering = false;
     const record = (order, event, text, data = {}) => audit({ jobKey: order?.client_order_no || '', source: 'orbitcard', event, text, data });
@@ -48,7 +47,7 @@ module.exports = function createManualService({ store, activeJobs, audit, provid
         try { snapshot = order.snapshot ? JSON.parse(order.snapshot) : null; } catch (_) { /* historical malformed snapshot */ }
         return { request_id: order.request_id, client_order_no: order.client_order_no,
             task_no: order.task_no || null, plan_type: order.plan_type, plan_name: order.plan_name,
-            target_email: order.target_email, card_id: Number(order.card_id), state: order.state,
+            target_email: order.target_email, card_id: Number(order.card_id) || null, state: order.state,
             mode: order.mode, cdk_code: order.cdk_code || null,
             message: order.message || '', order: snapshot, created_at: order.created_at, updated_at: order.updated_at,
             captcha: challenges.get(order.request_id) || null };
@@ -56,45 +55,28 @@ module.exports = function createManualService({ store, activeJobs, audit, provid
 
     async function catalog() {
         const cfg = await config();
-        let availablePlans, listedCards, savedCards, liveCards;
-        try {
-            [availablePlans, listedCards, savedCards] = await Promise.all([
-                plans(cfg), cards.listCards(cfg), store.cardMethods(cfg.base_url).listCards()
-            ]);
-            liveCards = await cards.cardDetailsInBatches(cfg, listedCards.map(card => card.card_id));
-        } catch (error) {
-            if (error instanceof CardPreparationError) throw new ManualOrderError(error.message, 503);
-            throw error;
-        }
-        const saved = new Map(savedCards.map(row => [Number(row.card_id), row]));
-        return { plans: availablePlans, cards: liveCards.map(card => {
-            const row = saved.get(card.card_id);
-            return { card_id: card.card_id, last4: card.last4, provider_status: card.provider_status,
-                balance: card.balance_amount, currency: card.currency,
-                history_confirmed: Boolean(row?.history_confirmed), busy: Boolean(row?.active_job),
-                usage: row ? Object.fromEntries(['plus','pro100','pro200','pro500'].map(plan => [plan, Number(row[`successful_${plan}`])])) : null };
-        }) };
+        // Card details are read only when a payment is prepared. An unrelated
+        // missing card must not prevent the administrator from choosing a plan.
+        return { plans: await plans(cfg) };
     }
 
     async function list() { return (await store.listManualOrders()).map(publicOrder); }
     async function get(requestId) { return publicOrder(await store.getManualOrder(requestId)); }
 
-    function matches(order, { planType, targetEmail, cardId, cfg }) {
+    function matches(order, { planType, targetEmail, cfg }) {
         const hash = crypto.createHash('sha256').update(String(cfg.api_key || '')).digest('hex');
         return order.plan_type === planType && order.target_email === targetEmail
-            && Number(order.card_id) === cardId && order.api_key_hash === hash
+            && order.api_key_hash === hash
             && order.scope === cardScope(cfg.base_url);
     }
 
-    async function create({ requestId, planType, cardId, mode, cdkCode, session: rawSession, authorized, adminEmail }) {
+    async function create({ requestId, planType, mode, cdkCode, session: rawSession, authorized, adminEmail }) {
         if (!REQUEST_ID.test(String(requestId || ''))) throw new ManualOrderError('请使用有效的请求编号');
         if (typeof planType !== 'string' || !PLAN_ID.test(planType)) throw new ManualOrderError('请选择有效的卡台套餐');
         if (!['test', 'fulfillment'].includes(mode)) throw new ManualOrderError('请选择测试开通或人工交付模式');
         const code = String(cdkCode || '').trim();
         if (mode === 'fulfillment' && !CDK_CODE.test(code)) throw new ManualOrderError('人工交付必须填写有效 CDK');
         if (mode === 'test' && code) throw new ManualOrderError('测试开通不能填写 CDK');
-        const id = cards.positiveId(cardId);
-        if (!id) throw new ManualOrderError('请选择有效的支付卡');
         if (authorized !== true) throw new ManualOrderError('请先确认已取得目标账号的订阅支付授权');
         let session;
         try { session = parseSession(rawSession); }
@@ -102,11 +84,11 @@ module.exports = function createManualService({ store, activeJobs, audit, provid
         const cfg = await config(), email = session.user.email.trim().toLowerCase();
         const keyHash = crypto.createHash('sha256').update(String(cfg.api_key || '')).digest('hex');
         let existing = await store.getManualOrder(requestId);
-        if (existing && (!matches(existing, { planType, targetEmail: email, cardId: id, cfg })
+        if (existing && (!matches(existing, { planType, targetEmail: email, cfg })
             || existing.mode !== mode || (existing.cdk_code || '') !== code)) {
             throw new ManualOrderError('此请求编号已用于另一笔管理员订单', 409);
         }
-        if (existing && existing.state !== 'prepared') return publicOrder(existing);
+        if (existing && !['preparing','prepared'].includes(existing.state)) return publicOrder(existing);
         const enabled = await plans(cfg);
         const selected = enabled.find(item => item.type === planType);
         if (!selected) throw new ManualOrderError('卡台当前未对该 API Key 开放此套餐', 409);
@@ -118,34 +100,38 @@ module.exports = function createManualService({ store, activeJobs, audit, provid
         try {
             if (!existing) {
                 try {
-                    const created = await store.withCardAllocationLock(cfg.base_url, async locked => {
-                        const listed = await cards.listCards(cfg);
-                        if (!listed.some(card => card.card_id === id)) throw new ManualOrderError('所选卡不在当前卡台账户中', 409);
-                        const detailed = await cards.cardDetailsInBatches(cfg, listed.map(card => card.card_id));
-                        const detail = detailed.find(card => card.card_id === id);
-                        if (!detail || detail.provider_status !== 'ACTIVE' || detail.currency !== 'USD'
-                            || detail.balance_amount === null || Number(detail.balance_amount) <= 0) {
-                            throw new ManualOrderError('所选卡不可用或没有可用 USD 余额，请先检查卡台余额', 409);
-                        }
-                        await locked.syncCards([detail]);
-                        return store.createManualOrder({ requestId, planType, planName: selected.name,
-                            targetEmail: email, cardId: id, baseUrl: cfg.base_url, apiKeyHash: keyHash,
-                            adminEmail: String(adminEmail || '').slice(0, 128), mode, cdkCode: code || null,
-                            acceptedCdkPlans: [planType, CDK_PLAN[planType]].filter(Boolean) });
-                    });
-                    existing = created.order;
+                    existing = await store.prepareManualOrder({ requestId, planType,
+                        planName: selected.name, targetEmail: email, baseUrl: cfg.base_url, apiKeyHash: keyHash,
+                        adminEmail: String(adminEmail || '').slice(0, 128), mode, cdkCode: code || null,
+                        acceptedCdkPlans: [planType, CDK_PLAN[planType]].filter(Boolean) });
                 } catch (error) {
-                    if (error instanceof ManualOrderError) throw error;
-                    if (error instanceof CardPreparationError || /请求编号|待确认管理员订单|支付卡|次数已达到上限|CDK|卡密/.test(error.message)) {
-                        throw new ManualOrderError(error.message, 409);
-                    }
+                    if (/请求编号|待确认管理员订单|CDK|卡密/.test(error.message)) throw new ManualOrderError(error.message, 409);
                     throw error;
                 }
             }
             if (!existing) throw new Error('管理员订单未能保存');
-            if (!matches(existing, { planType, targetEmail: email, cardId: id, cfg })
+            if (!matches(existing, { planType, targetEmail: email, cfg })
                 || existing.mode !== mode || (existing.cdk_code || '') !== code) {
                 throw new ManualOrderError('此请求编号已用于另一笔管理员订单', 409);
+            }
+            if (existing.state === 'preparing') {
+                try {
+                    if (!cardService || typeof cardService.allocate !== 'function') throw new Error('自动选卡服务尚未初始化');
+                    const cardId = await cardService.allocate(cfg, existing.client_order_no, planType,
+                        { manualRequestId: requestId });
+                    existing = await store.markManualPrepared(requestId, existing.client_order_no, cardId);
+                    record(existing, 'manual_card_ready', '管理员订单支付卡已准备', { card_id: cardId, plan_type: planType });
+                } catch (error) {
+                    // Release a preparation with no remote write or reserved card;
+                    // otherwise preserve the original issue/funding intent for retry.
+                    await store.failManualPreparation(requestId, existing.client_order_no,
+                        `支付准备失败：${error.message}`).catch(() => {});
+                    if (error instanceof ManualOrderError) throw error;
+                    if (error instanceof CardPreparationError || /请求编号|待确认管理员订单|支付卡|CDK|卡密/.test(error.message)) {
+                        throw new ManualOrderError(error.message, 409);
+                    }
+                    throw error;
+                }
             }
             if (await store.claimManualSubmission(requestId)) {
                 activeJobs.delete(slot);
@@ -153,7 +139,7 @@ module.exports = function createManualService({ store, activeJobs, audit, provid
                 const job = submit(existing, cfg, session);
                 job.catch(() => {}).finally(() => activeJobs.delete(existing.client_order_no));
                 record(existing, 'manual_order_accepted', '管理员订单已保存并认领提交',
-                    { plan_type: planType, card_id: id, target_email: email, mode, cdk_code: code || undefined });
+                    { plan_type: planType, card_id: Number(existing.card_id), target_email: email, mode, cdk_code: code || undefined });
             }
             return publicOrder(await store.getManualOrder(requestId));
         } finally { activeJobs.delete(slot); }

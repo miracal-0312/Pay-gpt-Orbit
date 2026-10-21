@@ -98,4 +98,5 @@ input,textarea,select{min-width:0}pre,code{overflow-wrap:anywhere}.panel{box-sha
 .manual-cdk-controls[hidden]{display:none}.manual-cdk-controls label{min-width:240px;max-width:440px;flex:1}
 .manual-cdk-controls small{flex-basis:100%;color:var(--muted)}
 #manualOrderRows td{overflow-wrap:anywhere;vertical-align:top}#manualOrderRows code{font-size:12px}
+.pill.preparing{background:#fff2d6;color:#805715}
 @media(max-width:640px){.manual-grid{grid-template-columns:1fr}.manual-cdk-controls label,.manual-cdk-controls button{width:100%;max-width:none}}

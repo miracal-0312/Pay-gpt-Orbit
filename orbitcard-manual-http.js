@@ -24,7 +24,7 @@ module.exports = function registerManualRoutes(app, { service, requireSecondaryA
     }));
     app.post('/api/admin/manual/orders', requireSecondaryAuth, route(async (req, res) => {
         const order = await service.create({ requestId: req.body?.request_id,
-            planType: req.body?.plan_type, cardId: req.body?.card_id,
+            planType: req.body?.plan_type,
             mode: req.body?.mode, cdkCode: req.body?.cdk_code,
             session: req.body?.session, authorized: req.body?.authorized,
             adminEmail: req.admin?.email || '' });
