@@ -689,15 +689,10 @@ app.get('/api/admin/gpt-api', async (req, res) => {
             success: true,
             config: {
                 provider: cfg.provider,
-                orbitcard_region: cfg.orbitcard_region,
                 orbitcard_max_fee: cfg.orbitcard_max_fee,
                 orbitcard_product_code: cfg.orbitcard_product_code,
                 orbitcard_safety_margin: cfg.orbitcard_safety_margin,
                 orbitcard_max_initial_amount: cfg.orbitcard_max_initial_amount,
-                ...Object.fromEntries(['plus','pro100','pro200','pro500'].flatMap(plan => [
-                    [`orbitcard_price_${plan}`, cfg[`orbitcard_price_${plan}`]],
-                    [`orbitcard_region_${plan}`, cfg[`orbitcard_region_${plan}`]]
-                ])),
                 orbitcard_secret_configured: Boolean(String(process.env.ORBITCARD_API_SECRET || '').trim()),
                 enabled: cfg.enabled,
                 base_url: cfg.base_url,
@@ -726,11 +721,15 @@ app.post('/api/admin/gpt-api/test', async (req, res) => {
             ...saved,
             base_url: String(body.base_url || '').trim() || saved.base_url
         };
+        let target;
+        try { target = gptApi.normalizeBaseUrl(merged.base_url); }
+        catch (error) { return res.status(400).json({ success: false, message: error.message }); }
         const result = await gptApi.testConnection(merged);
         if (!result.success) {
-            return res.status(400).json({ success: false, message: result.error || '连接失败' });
+            return res.status(400).json({ success: false, message: result.error || '连接失败', target, checks: result.checks || [] });
         }
-        res.json({ success: true, message: result.message, plans: result.plans, balance: result.balance });
+        res.json({ success: true, message: result.message, plans: result.plans, balance: result.balance,
+            balance_error: result.balanceError || null, target, checks: result.checks || [] });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
     }
@@ -742,13 +741,13 @@ app.get('/api/admin/gpt-api/status', async (req, res) => {
         if (!cfg.api_key) {
             return res.status(400).json({ success: false, message: '尚未配置第三方代充 API Key' });
         }
-        const [plansResult, balanceResult, recentOrders] = await Promise.all([
-            gptApi.fetchPlans(cfg),
-            gptApi.queryBalance(cfg),
+        const [connection, recentOrders] = await Promise.all([
+            gptApi.testConnection(cfg),
             store.listRecentGptApiOrders(10)
         ]);
-        if (!plansResult.success) {
-            return res.status(400).json({ success: false, message: `套餐查询失败: ${plansResult.error || '未知错误'}` });
+        if (!connection.success) {
+            return res.status(400).json({ success: false, message: connection.error || '套餐查询失败',
+                target: gptApi.normalizeBaseUrl(cfg.base_url), checks: connection.checks || [] });
         }
         const orders = recentOrders.map((order) => ({
             job_key: order.job_key,
@@ -766,10 +765,12 @@ app.get('/api/admin/gpt-api/status', async (req, res) => {
         }));
         res.json({
             success: true,
-            gpt_plans: plansResult.gptPlans,
-            credit_plans: plansResult.creditPlans,
-            balance: balanceResult.success ? balanceResult.data : null,
-            balance_error: balanceResult.success ? null : balanceResult.error,
+            gpt_plans: connection.gptPlans,
+            credit_plans: connection.creditPlans,
+            balance: connection.balance,
+            balance_error: connection.balanceError,
+            target: gptApi.normalizeBaseUrl(cfg.base_url),
+            checks: connection.checks || [],
             recent_orders: orders
         });
     } catch (error) {

@@ -13,7 +13,8 @@
 ```mermaid
 flowchart TD
     A[验证 CDK 和完整 Session] --> B[事务创建任务并占用 CDK]
-    B --> C[查询套餐与支付地区]
+    B --> C[查询套餐与产品 USD 推荐价]
+    C -->|缺少当前套餐价格| Q[停止自动充值 提示管理员核对产品接口]
     C --> D{账户 available_balance 足够套餐金额}
     D -->|否| E[锁定 CDK 提醒联系管理员充值账户]
     D -->|是| F[读取产品 getCardList 和批量 cardDetail]
@@ -33,7 +34,7 @@ flowchart TD
     N --> K
 ```
 
-先调用 `getAccountBalance`，只用 `available_balance` 判断账户是否达到套餐单次 USD 金额；不足时停止并锁定 CDK，提示联系管理员手动充值。随后读取产品目录、`getCardList` 和批量 `cardDetail(card_ids)`，每批最多 20 张；仅从本轮批量结果中选择状态 `ACTIVE`、USD、余额资料有效、已确认历史次数、当前套餐次数未满且未被任务占用的卡。批量详情缺少个别卡时跳过缺项并选其余合格卡，不逐张补查；若有剩余次数的卡却因状态、资料或详情异常不可用，锁定 CDK 并提示人工售后。卡池为空或当前套餐次数全部用尽时自动开卡。批量返回外来或重复卡 ID 时停止选卡并锁定 CDK；平台网络或认证故障则按接口故障处理，不假定卡片可用。
+先调用 `getAccountBalance` 读取 `available_balance`，再从 `getProductCode` 取得当前套餐的 USD 价格并检查账户余额；产品缺价时停止自动充值，余额不足时锁定 CDK 并提示联系管理员手动充值。随后读取 `getCardList` 和批量 `cardDetail(card_ids)`，每批最多 20 张；仅从本轮批量结果中选择状态 `ACTIVE`、USD、余额资料有效、已确认历史次数、当前套餐次数未满且未被任务占用的卡。批量详情缺少个别卡时跳过缺项并选其余合格卡，不逐张补查；若有剩余次数的卡却因状态、资料或详情异常不可用，锁定 CDK 并提示人工售后。卡池为空或当前套餐次数全部用尽时自动开卡。批量返回外来或重复卡 ID 时停止选卡并锁定 CDK；平台网络或认证故障则按接口故障处理，不假定卡片可用。
 
 合格卡按所需补款差额排序，预占一张；余额不足时调用 `rechargeCard` 补到「套餐金额 + 产品最低保留余额」。补款提交前及补款确认后仍按原补款意图核对卡片状态和余额，避免重复资金操作。选卡完成后不再额外逐张复核候选卡，也不在 `createSubscription` 前再次调用单卡详情。订阅已提交或结果未知时，只核对原订单，绝不因为超时换卡重付。
 
@@ -41,15 +42,15 @@ flowchart TD
 
 ## 卡片预算、补款与自动开卡
 
-套餐金额优先取产品目录中对应的 USD 单价；目录未提供时，管理员必须配置该套餐的 USD 单次预算。服务费不替代套餐金额。`rechargeCard` 的金额为 `max(0, 套餐金额 + 最低保留余额 - 卡片可用余额)`，用定点十进制向上取整到美分。补款意图、原订单号、请求正文、幂等键及 API Key 身份在发送前持久化；结果未知时只确认原补款，不重复扣款，也不切换卡。
+套餐金额只取产品目录中对应的 USD 价格；目录未提供时停止自动充值，旧后台预算和订阅套餐的 USDT 服务费都不能替代套餐金额。`rechargeCard` 的金额为 `max(0, 套餐金额 + 最低保留余额 - 卡片可用余额)`，用定点十进制向上取整到美分。补款意图、原订单号、请求正文、幂等键及 API Key 身份在发送前持久化；结果未知时只确认原补款，不重复扣款，也不切换卡。
 
-自动或管理员手动申请卡时，实时调用 `getProductCode` 选择符合库存及最低首充要求的产品，向 `createCard` 仅发送 `product_code`、`amount:"20.00"`、`quantity:1`。自动申请先把原请求正文、产品、金额、API Key 身份及固定幂等键落库并绑定 CDK；结果未知时只确认原申请，不换键重复开卡。新卡确认 `ACTIVE` 后登记独立套餐次数，余额不足则按原补款规则补差额，再提交订阅。单卡首充上限只约束首次开卡充值；开卡产品码及各套餐 USD 预算可在后台配置。
+自动或管理员手动申请卡时，实时调用 `getProductCode` 选择符合库存及最低首充要求的产品，向 `createCard` 仅发送 `product_code`、`amount:"20.00"`、`quantity:1`。自动申请先把原请求正文、产品、金额、API Key 身份及固定幂等键落库并绑定 CDK；结果未知时只确认原申请，不换键重复开卡。新卡确认 `ACTIVE` 后登记独立套餐次数，余额不足则按原补款规则补差额，再提交订阅。单卡首充上限只约束首次开卡充值；后台可设置开卡产品码，但不设置套餐支付价格。
 
 Plus 每卡最多成功 4 次；Pro 100、Pro 200、Pro 500 各最多成功 1 次，四项独立计数且可混用。历史卡需管理员确认已有次数后参与选卡。同步平台卡片不会重置计数或卡片占用。
 
 ## 管理后台与已有卡迁移
 
-「卡片与开卡」提供：同步平台卡片、查看状态/尾号/余额、四项成功次数与占用、查询产品与预算、手动申请首充 20 USD 的卡，以及确认原开卡/补款。「Orbitcard 配置」可在保存 API Key 与根域名后读取四档套餐各自的可用支付地区。补款记录显示任务、卡 ID、原订单、金额、费用和目标余额。CDK 列表标识账户余额不足锁定。
+「卡片与开卡」提供：同步平台卡片、查看状态/尾号/余额、四项成功次数与占用、查询产品和平台价格、手动申请首充 20 USD 的卡，以及确认原开卡/补款。「Orbitcard 配置」显示产品推荐价；接口调试可分别查看连接测试、套餐余额和只读地区查询结果。补款记录显示任务、卡 ID、原订单、金额、费用和目标余额。CDK 列表标识账户余额不足锁定。
 
 历史卡片的订阅使用次数不能从卡片列表可靠推断，因此同步后保持“历史未确认”。管理员通过二级验证，如实分别填写 Plus、Pro 100、Pro 200、Pro 500 的历史成功次数，卡片才参与自动选卡。不要把已使用的卡当成全新卡填写 0。尚有旧版本未绑定卡片身份的未确认充值时，先查清原订单，再确认历史次数。
 
@@ -64,7 +65,7 @@ Plus 每卡最多成功 4 次；Pro 100、Pro 200、Pro 500 各最多成功 1 �
 | POST 接口 | 请求 |
 | --- | --- |
 | `/api/open/v1/getAccountBalance` | `{}`；只读 `available_balance` 用于资金门槛 |
-| `/api/open/v1/getProductCode` | `{}`，产品、库存、最低首充及保留余额；不保证返回会员价格 |
+| `/api/open/v1/getProductCode` | `{}`，产品、库存、最低首充、保留余额及 `gpt_plan_prices`；按 `id` 将 `plus`、`pro`、`pro_20x`、`pro_max` 分别映射到 Plus、Pro 100、Pro 200、Pro 500，价格为 USD 十进制定点字符串；实际响应缺价时停止自动充值 |
 | `/api/open/v1/getCardList` | `{page,page_size}`，完整分页读取卡片 |
 | `/api/open/v1/cardDetail` | 选卡和同步用 `{card_ids:[...],reveal_sensitive:false}` 分批最多 20 张；选中卡提交前用 `{card_id,reveal_sensitive:false}` 再读摘要 |
 | `/api/open/v1/createCard` | `{product_code,amount,quantity:1}`；固定 `Idempotency-Key` |
@@ -83,7 +84,7 @@ API Key 需要 `subscriptions:read`、`subscriptions:create`、`account:read`、
 | `GET /api/admin/orbitcard/cards` | 本地卡片摘要、最近 100 条开卡和补款记录；不返回原始请求或凭据哈希 |
 | `POST /api/admin/orbitcard/cards/sync` | 同步卡片列表及非敏感详情；不重置次数 |
 | `GET /api/admin/orbitcard/products` | 查询产品、套餐单价和首充预算，返回 `automatic_application` 与 `application_error`；只读预览不实际开卡 |
-| `GET /api/admin/orbitcard/payment-regions` | 按四档套餐查询可用支付地区及平台默认标记；只读，使用后台已保存的 API 配置 |
+| `GET /api/admin/orbitcard/payment-regions` | 按四档套餐查询可用支付地区及平台默认标记；仅用于诊断，不影响下单 |
 | `POST /api/admin/orbitcard/cards/:cardId/bind` | `{usage:{plus:0,pro100:0,pro200:0,pro500:0}}`；一次性确认历史，需二级验证 |
 | `GET /api/admin/orbitcard/cards/:cardId/transactions?page=1` | 管理员只读查询该卡脱敏消费交易；每页 50 条，不获取完整卡号、CVV 或 Session |
 | `POST /api/admin/orbitcard/cards/apply` | `{plan_type:"plus"或"pro100"或"pro200"或"pro500"}`；需二级验证 |

@@ -15,9 +15,7 @@ const DEFAULT_ADMIN_LOGIN_PATH = String(process.env.ADMIN_LOGIN_PATH || 'admin-l
 const DEFAULT_ADMIN_PANEL_PATH = String(process.env.ADMIN_PANEL_PATH || 'admin').trim().toLowerCase();
 const GPT_API_CONFIG_KEYS = [
     'gpt_api_enabled', 'gpt_api_base_url', 'gpt_api_protocol_version',
-    'orbitcard_region', 'orbitcard_max_fee', 'orbitcard_product_code', 'orbitcard_safety_margin', 'orbitcard_max_initial_amount',
-    'orbitcard_price_plus', 'orbitcard_price_pro100', 'orbitcard_price_pro200', 'orbitcard_price_pro500',
-    'orbitcard_region_plus', 'orbitcard_region_pro100', 'orbitcard_region_pro200', 'orbitcard_region_pro500'
+    'orbitcard_max_fee', 'orbitcard_product_code', 'orbitcard_safety_margin', 'orbitcard_max_initial_amount'
 ];
 
 function getPool() {
@@ -94,10 +92,9 @@ async function ensureGptApiConfigDefaults() {
         const rows = await runQuery(`SELECT config_key, config_value FROM app_config WHERE config_key IN (${keys.map(() => '?').join(', ')}) FOR UPDATE`, keys, options);
         const saved = Object.fromEntries(rows.map(row => [row.config_key, row.config_value]));
         const defaults = { gpt_api_enabled: '0', gpt_api_base_url: orbitcardConfig.DEFAULT_BASE_URL,
-            orbitcard_region: '', orbitcard_max_fee: '',
+            orbitcard_max_fee: '',
             orbitcard_product_code: '', orbitcard_safety_margin: '1', orbitcard_max_initial_amount: '',
-            orbitcard_price_plus: '', orbitcard_price_pro100: '', orbitcard_price_pro200: '', orbitcard_price_pro500: '',
-            orbitcard_region_plus: '', orbitcard_region_pro100: '', orbitcard_region_pro200: '', orbitcard_region_pro500: '' };
+        };
         for (const [key, value] of Object.entries(defaults)) {
             if (saved[key] == null) await runExecute('INSERT IGNORE INTO app_config (config_key, config_value) VALUES (?, ?)', [key, value], options);
         }
@@ -125,15 +122,10 @@ async function getGptApiConfig() {
         enabled: map.gpt_api_enabled === '1',
         base_url: String(map.gpt_api_base_url || orbitcardConfig.DEFAULT_BASE_URL).trim(),
         api_key: String(process.env.ORBITCARD_API_KEY || '').trim(),
-        orbitcard_region: String(map.orbitcard_region || ''),
         orbitcard_max_fee: String(map.orbitcard_max_fee || ''),
         orbitcard_product_code: String(map.orbitcard_product_code || ''),
         orbitcard_safety_margin: String(map.orbitcard_safety_margin ?? '1'),
-        orbitcard_max_initial_amount: String(map.orbitcard_max_initial_amount || ''),
-        ...Object.fromEntries(['plus','pro100','pro200','pro500'].flatMap(plan => [
-            [`orbitcard_price_${plan}`, String(map[`orbitcard_price_${plan}`] || '')],
-            [`orbitcard_region_${plan}`, String(map[`orbitcard_region_${plan}`] || '')]
-        ]))
+        orbitcard_max_initial_amount: String(map.orbitcard_max_initial_amount || '')
     };
 }
 
@@ -141,17 +133,16 @@ async function saveGptApiConfig(input = {}) {
     if (Object.hasOwn(input, 'api_key') || Object.hasOwn(input, 'api_secret')) {
         throw new Error('API Key 和 API Secret 只能在服务器环境变量中配置');
     }
+    if (Object.keys(input).some(key => key === 'orbitcard_region' || /^orbitcard_(?:price|region)_(?:plus|pro100|pro200|pro500)$/.test(key))) {
+        throw new Error('套餐金额使用平台推荐价，支付地区由平台默认选择；后台不再接收预算或地区设置');
+    }
     const existing = await getGptApiConfig();
     const cfg = orbitcardConfig.prepareConfig(input, existing, Boolean(String(process.env.ORBITCARD_API_SECRET || '').trim()));
     const values = { gpt_api_enabled: cfg.enabled ? '1' : '0', gpt_api_base_url: cfg.base_url,
         gpt_api_protocol_version: orbitcardConfig.PROTOCOL_VERSION,
-        orbitcard_region: cfg.orbitcard_region, orbitcard_max_fee: cfg.orbitcard_max_fee,
+        orbitcard_max_fee: cfg.orbitcard_max_fee,
         orbitcard_product_code: cfg.orbitcard_product_code, orbitcard_safety_margin: cfg.orbitcard_safety_margin,
-        orbitcard_max_initial_amount: cfg.orbitcard_max_initial_amount,
-        ...Object.fromEntries(['plus','pro100','pro200','pro500'].flatMap(plan => [
-            [`orbitcard_price_${plan}`, cfg[`orbitcard_price_${plan}`]],
-            [`orbitcard_region_${plan}`, cfg[`orbitcard_region_${plan}`]]
-        ])) };
+        orbitcard_max_initial_amount: cfg.orbitcard_max_initial_amount };
     await withTransaction(async connection => {
         for (const [key, value] of Object.entries(values)) {
             await runExecute(`INSERT INTO app_config (config_key, config_value) VALUES (?, ?)

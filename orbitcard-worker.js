@@ -4,18 +4,6 @@ const api = require('./orbitcard-client');
 const { CardPreparationError } = require('./orbitcard-card-policy');
 const { clientOrderNo: makeClientOrderNo, validOrder } = require('./orbitcard-cdk');
 
-function selectRegion(cfg, planType, options) {
-    const configured = String(cfg[`orbitcard_region_${planType}`] || '').trim().toUpperCase();
-    const regions = Array.isArray(options) ? options.filter(item => item && /^[A-Z]{2}$/.test(String(item.code || '').toUpperCase())) : [];
-    if (!regions.length) throw new CardPreparationError('平台未返回当前套餐的可用支付地区，请稍后重试');
-    // The Open API permits omitting payment_region so the provider chooses its default.
-    // A default=true entry is a recommendation, not a required field.
-    if (!configured) return null;
-    const selected = regions.find(item => String(item.code).toUpperCase() === configured);
-    if (!selected) throw new CardPreparationError(`当前套餐不支持后台设置的支付地区 ${configured}`);
-    return String(selected.code).toUpperCase();
-}
-
 async function run({ cfg, planType, session, cdk, setProgress, onSubmission, broadcast, sleep,
     maxPolls = 180, intervalMs = 5000, onOutcome = () => {}, onConfirmedFailure, onRejectedSubmission,
     clientOrderNo, attemptKey = 'legacy', selectCard }) {
@@ -28,10 +16,6 @@ async function run({ cfg, planType, session, cdk, setProgress, onSubmission, bro
     const plans = await api.fetchPlans(cfg);
     if (!plans.success) throw new CardPreparationError(plans.error || 'Orbitcard 套餐查询失败，请稍后重试');
     if (!plans.plans.some(p => p.type === plan)) throw new CardPreparationError('Orbitcard 当前未开放此套餐');
-    const regions = await api.request(cfg, 'getSubscriptionPaymentRegions', { plan_type: plan });
-    if (!regions.success) throw new CardPreparationError(regions.error || 'Orbitcard 支付地区查询失败，请稍后重试');
-    if (regions.data?.plan_type && regions.data.plan_type !== plan) throw new CardPreparationError('支付地区目录与当前套餐不一致，已停止提交');
-    const region = selectRegion(cfg, planType, regions.data?.payment_regions);
     if (cfg.orbitcard_max_fee && !/^\d+(?:\.\d+)?$/.test(cfg.orbitcard_max_fee)) throw new Error('最高服务费必须为非负十进制金额');
     if (typeof selectCard !== 'function') throw new Error('自动选卡服务尚未初始化');
     const cardId = Number(await selectCard());
@@ -40,7 +24,6 @@ async function run({ cfg, planType, session, cdk, setProgress, onSubmission, bro
     const identity = clientOrderNo || makeClientOrderNo(cdk, attemptKey);
     const body = { client_order_no: identity, plan_type: plan, card_id: cardId, session_json: session,
         authorized: true };
-    if (region) body.payment_region = region;
     if (cfg.orbitcard_max_fee) body.max_service_fee = cfg.orbitcard_max_fee;
     // Persist the binding before any remote write, so a crash can only trigger a query.
     await setProgress('running', 20, '正在提交 Orbitcard 订阅订单...', {
@@ -110,4 +93,4 @@ async function run({ cfg, planType, session, cdk, setProgress, onSubmission, bro
     return false;
 }
 
-module.exports = { run, selectRegion };
+module.exports = { run };

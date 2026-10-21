@@ -133,12 +133,25 @@ async function queryBalance(cfg) {
 }
 
 async function testConnection(cfg) {
-    const [plans, balance] = await Promise.all([fetchPlans(cfg), queryBalance(cfg)]);
-    if (!plans.success) return { success: false, error: `套餐查询失败: ${plans.error}` };
+    async function check(operation, action) {
+        const started = Date.now();
+        const result = await action();
+        return { result, log: { operation, path: `/api/open/v1/${operation}`,
+            checked_at: new Date(started).toISOString(), elapsed_ms: Date.now() - started,
+            success: result.success === true, http_status: result.status ?? null,
+            platform_code: result.code ?? null, error: result.success ? null : result.error || '请求失败' } };
+    }
+    const [planCheck, balanceCheck] = await Promise.all([
+        check('getSubscriptionPlans', () => fetchPlans(cfg)),
+        check('getAccountBalance', () => queryBalance(cfg))
+    ]);
+    const plans = planCheck.result, balance = balanceCheck.result;
+    const checks = [planCheck.log, balanceCheck.log];
+    if (!plans.success) return { success: false, error: `套餐查询失败: ${plans.error}`, checks };
     return { success: true, message: `Orbitcard HMAC 连接成功，可用套餐 ${plans.plans.length} 个`,
         plans: plans.plans, gptPlans: plans.gptPlans, creditPlans: [],
         balance: balance.success ? balance.data : null,
-        balanceError: balance.success ? null : balance.error };
+        balanceError: balance.success ? null : balance.error, checks };
 }
 
 module.exports = { DEFAULT_BASE_URL, normalizeBaseUrl, maskApiKey, request, fetchPlans, queryBalance,

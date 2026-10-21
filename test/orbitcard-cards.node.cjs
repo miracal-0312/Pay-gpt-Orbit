@@ -162,7 +162,16 @@ test('admin region choices are read separately for each plan and expose only val
     const server=app.listen(0,'127.0.0.1');await once(server,'listening');t.after(async()=>{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));});
     const data=await (await fetch(`http://127.0.0.1:${server.address().port}/api/admin/orbitcard/payment-regions`)).json();
     assert.deepEqual(calls,Object.values(plans));
-    assert.deepEqual(data.regions.plus.options,[{code:'PH',default:true},{code:'US',default:false}]);
+    assert.deepEqual(data.regions.plus.options,[
+        {code:'PH',default:true,region_price:null,currency:''},
+        {code:'US',default:false,region_price:null,currency:''}
+    ]);
+    assert.equal(data.regions.plus.trace.path,'/api/open/v1/getSubscriptionPaymentRegions');
+    assert.equal(data.regions.plus.trace.success,true);
+    assert.ok(Number.isFinite(data.regions.plus.trace.elapsed_ms));
+    const one=await (await fetch(`http://127.0.0.1:${server.address().port}/api/admin/orbitcard/payment-regions?plan=pro200`)).json();
+    assert.deepEqual(Object.keys(one.regions),['pro200']);
+    assert.deepEqual(calls,[...Object.values(plans),plans.pro200]);
     assert.ok(!JSON.stringify(data).includes('api_key'));
 });
 
@@ -211,13 +220,36 @@ test('card list pagination continues when the server caps the requested page siz
     assert.deepEqual((await f.api.listCards(cfg)).map(c => c.card_id),[1,2]);
 });
 
-test('missing real plan prices cannot fall back to Plus pricing',() => {
+test('missing platform plan prices cannot fall back to another plan or retired manual budgets',() => {
     const f=serviceFixture(); const rows=f.api.normalizeProducts([{...product,gpt_plan_prices:[{id:'plus',price:20,currency:'USD'}]}]);
     assert.throws(() => f.api.chooseProduct(rows,'pro500',cfg),/没有符合/);
     assert.equal(f.api.chooseProduct(rows,'plus',cfg).amount,'20.00');
     const documentedRows=f.api.normalizeProducts({list:[{...product,gpt_plan_prices:undefined}]});
     assert.throws(() => f.api.chooseProduct(documentedRows,'pro100',cfg));
-    assert.equal(f.api.chooseProduct(documentedRows,'pro100',{...cfg,orbitcard_price_pro100:'100'}).amount,'20.00');
+    assert.throws(() => f.api.chooseProduct(documentedRows,'pro100',{...cfg,orbitcard_price_pro100:'100'}));
+});
+
+test('documented GPT price IDs map to four plans and retain fixed decimal strings',() => {
+    const f=serviceFixture();
+    const rows=f.api.normalizeProducts({list:[{...product,gpt_plan_prices:[
+        {id:'plus',name:'Plus',price:'20.00000000',currency:'USD',source:'config'},
+        {id:'pro',name:'Pro 100',price:'100.50',currency:'USD',source:'transaction'},
+        {id:'pro_20x',name:'Pro 200',price:'200.00',currency:'USD',source:'config'},
+        {id:'pro_max',name:'Pro 100',price:'500.00',currency:'USD',source:'transaction'}
+    ]}]});
+    assert.equal(f.api.planPrice(rows[0],'plus'),'20.00000000');
+    assert.equal(f.api.planPrice(rows[0],'pro100'),'100.50');
+    assert.equal(f.api.planPrice(rows[0],'pro200'),'200.00');
+    assert.equal(f.api.planPrice(rows[0],'pro500'),'500.00');
+    assert.equal(rows[0].prices.find(price => price.plan_type==='pro100').source,'transaction');
+    assert.equal(f.api.chooseProduct(rows,'pro500',cfg).price,'500.00');
+});
+
+test('CDK redemption stops before card funding or issuing when the product has no USD price',async () => {
+    const f=serviceFixture({getProductCode:async()=>({success:true,data:[{...product,gpt_plan_prices:undefined}]})});
+    const task=await f.claim();
+    await assert.rejects(f.service.allocate({...cfg,orbitcard_price_plus:'1'},task.jobKey,'plus'),/未返回当前套餐的 USD 推荐价/);
+    assert.equal(f.calls.some(call => ['createCard','rechargeCard'].includes(call.operation)),false);
 });
 
 test('Open API only fulfills status=success with valid numeric card ID and a complete matching order',async () => {
@@ -271,21 +303,22 @@ test('exhausting one plan does not prevent selecting the same funded card for an
 test('available account balance is checked before cards; frozen, total and card balances cannot bypass the locked CDK',async () => {
     const f=serviceFixture({getAccountBalance:async () => ({success:true,data:{available_balance:'19.99',total_balance:'9999',frozen_balance:'9000',estimated_card_balance:'5000'}})});
     const card=await f.addCard();f.setCards([{...card,status:'ACTIVE',balance:1000}]);const task=await f.claim();
-    await assert.rejects(f.service.allocate({...cfg,orbitcard_price_plus:'20'},task.jobKey,'plus'),/联系管理员/);
-    assert.deepEqual(f.calls.map(c => c.operation),['getAccountBalance']);
+    await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/联系管理员/);
+    assert.deepEqual(f.calls.map(c => c.operation),['getAccountBalance','getProductCode']);
     assert.equal(f.db.tasks[0].orbitcard_state,'balance_blocked');assert.equal(f.db.tasks[0].status,'failed');assert.equal(f.db.tasks[0].orbitcard_required_balance,'20.00000000');
     assert.ok(f.db.cdks[0].used_at);assert.equal(f.db.issues.length,0);assert.equal(f.db.fundings.length,0);
 });
 
 test('restoring account balance only releases the CDK for a fresh Session, never pays automatically',async () => {
     const f=serviceFixture(),task=await f.claim();f.setAccount(0);
-    await assert.rejects(f.service.allocate({...cfg,orbitcard_price_plus:'20'},task.jobKey,'plus'));
+    await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'));
     const recovery=require('../order-recovery')({store:f.store,activeJobs:new Set(),audit() {},checkBalance:task => f.service.canResumeBalance(cfg,task),
         query:{refresh:async () => {throw new Error('must not query a nonexistent subscription');}}});
     await recovery.refreshTask({...f.db.tasks[0]});assert.ok(f.db.cdks[0].used_at);
     f.setAccount(20);f.advance();await recovery.refreshTask({...f.db.tasks[0]});
     assert.equal(f.db.tasks[0].status,'retry');assert.equal(f.db.cdks[0].used_at,null);
-    assert.ok(f.calls.every(c => c.operation==='getAccountBalance'));
+    assert.equal(f.calls.filter(c => c.operation==='getProductCode').length,1);
+    assert.equal(f.calls.some(c => ['getCardList','createCard','rechargeCard'].includes(c.operation)),false);
 });
 
 test('a card with quota but insufficient balance receives only the exact deficit, without creating a new card',async () => {
@@ -394,7 +427,7 @@ test('card allocation failure prevents any subscription create request',async ()
     try {
         await assert.rejects(worker.run({cfg:{},planType:'plus',session:{user:{email:'c@example.test'},account:{},accessToken:'secret'},
             selectCard:async () => {throw new Error('card unavailable');}}),/card unavailable/);
-        assert.deepEqual(calls,['getSubscriptionPaymentRegions']);
+        assert.deepEqual(calls,[]);
     } finally {if(previous===undefined) delete process.env.ORBITCARD_API_SECRET; else process.env.ORBITCARD_API_SECRET=previous;}
 });
 

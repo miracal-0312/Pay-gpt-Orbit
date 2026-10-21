@@ -26,12 +26,10 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
         record(jobKey,'account_balance_blocked',message,{available_balance:money.decimal(available),required_balance:money.decimal(threshold)});
         throw new AccountBalanceError(message);
     }
-    function budgetFor(products,plan,cfg) {
-        const configured=cardsApi.planPrice(null,plan,cfg);
-        const prices=products.map(product => cardsApi.planPrice(product,plan,cfg)).filter(value => value>0);
-        const value=configured || (prices.length?Math.min(...prices):null);
-        if(!value) throw new CardPreparationError('缺少当前套餐单次 USD 金额，请管理员在后台配置预算');
-        return money.units(value);
+    function budgetFor(products,plan) {
+        const prices=products.map(product => cardsApi.planPrice(product,plan)).filter(Boolean).map(money.units);
+        if(!prices.length) throw new CardPreparationError('平台产品目录未返回当前套餐的 USD 推荐价，已停止充值；请联系管理员核对产品接口');
+        return prices.reduce((lowest,value) => value < lowest ? value : lowest);
     }
 
     async function confirmIssue(cfg, locked, issue, polls = maxIssuePolls) {
@@ -147,7 +145,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
             if (!eligible) continue;
             if(row.active_job) {busy=true;continue;}
             const product = products.find(item => item.product_code === card.product_code);
-            const price = cardsApi.planPrice(product, plan, cfg);
+            const price = cardsApi.planPrice(product, plan);
             if (!price || card.currency !== 'USD' || !Number.isFinite(product?.min_retained_balance)
                 || product.min_retained_balance < 0 || card.balance_amount === null) {
                 noteAbnormal(card.card_id,'invalid_payment_data',card.provider_status);continue;
@@ -188,16 +186,14 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
             const available=await account(cfg);
             const originalFunding=await locked.fundingForJob(jobKey);
             if(originalFunding && !['ready','failed'].includes(originalFunding.state)) return (await fundingService.confirm(cfg,locked,originalFunding)).card_id;
-            const configured=cardsApi.planPrice(null,planType,cfg);
-            if(configured) await requireFunds(locked,jobKey,available,money.units(configured));
-            const products = await cardsApi.products(cfg),planBudget=budgetFor(products,planType,cfg);
+            const products = await cardsApi.products(cfg),planBudget=budgetFor(products,planType);
             await requireFunds(locked,jobKey,available,planBudget);
             const listed = await cardsApi.listCards(cfg);
             await locked.syncCards(listed);
             const selected = await reusable(cfg, locked, jobKey, planType, listed, products,planBudget,available,selection);
             if (selected) return selected.card_id;
             const {card:opened,products:latestProducts} = await issueFor(cfg, locked, planType, jobKey, products);
-            const newBudget = budgetFor(latestProducts,planType,cfg);
+            const newBudget = budgetFor(latestProducts,planType);
             const newSelection = await reusable(cfg,locked,jobKey,planType,[opened],latestProducts,newBudget,available,selection);
             if (!newSelection) throw new CardSwitchExhaustedError('新卡已开立但当前套餐仍无可用支付卡；CDK 已锁定，请联系人工售后');
             return newSelection.card_id;

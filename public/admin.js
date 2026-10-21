@@ -2,7 +2,7 @@
 const $ = id => document.getElementById(id);
 const TOKEN_KEY = 'plus_admin_token', SECONDARY_KEY = 'plus_admin_secondary_token';
 const cardPlans = { plus: 'Plus', pro100: 'Pro 100', pro200: 'Pro 200', pro500: 'Pro 500' };
-let loginUrl = '/admin-login', selected = 'overview', regionCatalog = null;
+let loginUrl = '/admin-login', selected = 'overview', savedBaseUrl = '';
 function notice(text, type = '') { $('notice').textContent = text; $('notice').className = `message ${type}`; }
 function escapeHtml(value) { return String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch])); }
 function logout() { localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(SECONDARY_KEY); location.assign(loginUrl); }
@@ -12,11 +12,18 @@ async function request(url, body, method = body === undefined ? 'GET' : 'POST') 
     const headers = { Authorization: `Bearer ${token}`, 'x-admin-secondary-token': localStorage.getItem(SECONDARY_KEY) || '' };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     const response = await fetch(url, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    const data = await response.json();
+    let data;
     if (response.status === 401) { logout(); throw new Error('登录已失效'); }
+    try { data = await response.json(); }
+    catch (_) { throw new Error(`服务端响应格式异常（HTTP ${response.status}）`); }
+    if (!data || typeof data !== 'object') throw new Error(`服务端响应格式异常（HTTP ${response.status}）`);
     if (!response.ok || data.success === false) {
         if (data.secondaryRequired) { localStorage.removeItem(SECONDARY_KEY); $('unlockState').textContent = '请重新验证二级密码'; }
-        throw new Error(data.message || `请求失败（${response.status}）`);
+        const error = new Error(data.message || `请求失败（${response.status}）`);
+        error.httpStatus = response.status;
+        error.checks = Array.isArray(data.checks) ? data.checks : [];
+        error.target = data.target || '';
+        throw error;
     }
     return data;
 }
@@ -44,26 +51,38 @@ async function loadOverview() {
     $('adminChat').value = telegram.admin_chat_id || ''; $('groupChat').value = telegram.group_chat_id || '';
     for (const [id, key] of [['notifyAdmin','notify_admin'],['notifyGroup','notify_group'],['onSuccess','on_success'],['onFailure','on_failure']]) $(id).checked = Boolean(telegram[key]);
 }
-function fillRegionOptions(plan, value) {
-    const input = $(`region_${plan}`), choices = regionCatalog?.[plan]?.options || [];
-    input.replaceChildren(new Option('平台默认', ''));
-    for (const item of choices) input.add(new Option(`${item.code}${item.default ? '（平台默认）' : ''}`, item.code));
-    if (value && !choices.some(item => item.code === value)) input.add(new Option(`${value}（当前配置，待核对）`, value));
-    input.value = value || '';
-}
 async function loadApi() {
     const { config } = await request('/api/admin/gpt-api');
+    savedBaseUrl = config.base_url;
     $('apiEnabled').checked = config.enabled; $('baseUrl').value = config.base_url;
     $('productCode').value = config.orbitcard_product_code || '';
     $('maxInitialAmount').value = config.orbitcard_max_initial_amount || ''; $('maxFee').value = config.orbitcard_max_fee;
-    for (const plan of Object.keys(cardPlans)) {
-        $(`price_${plan}`).value = config[`orbitcard_price_${plan}`] || '';
-        fillRegionOptions(plan,config[`orbitcard_region_${plan}`] || '');
-    }
+    $('orderState').textContent = config.enabled ? '正在接单' : '已暂停新订单';
+    $('orderState').className = `pill ${config.enabled ? 'success' : 'pending'}`;
     $('keyState').textContent = config.api_key_configured ? '环境变量已配置' : '缺少 ORBITCARD_API_KEY';
     $('secretState').textContent = config.orbitcard_secret_configured ? '环境变量已配置' : '缺少 ORBITCARD_API_SECRET';
-    if (config.api_key_configured && config.orbitcard_secret_configured) await loadCardIdPreview();
-    else $('cardIdPreview').textContent = '请先在服务器环境变量中配置配对的 API Key 和 API Secret。';
+    $('keyState').dataset.state = config.api_key_configured ? 'configured' : 'missing';
+    $('secretState').dataset.state = config.orbitcard_secret_configured ? 'configured' : 'missing';
+    if (config.api_key_configured && config.orbitcard_secret_configured) {
+        await Promise.all([loadCardIdPreview(), loadPricePreview()]);
+    } else {
+        $('cardIdPreview').textContent = '请先在服务器环境变量中配置配对的 API Key 和 API Secret。';
+        $('pricePreview').textContent = '凭据尚未配置，无法读取平台推荐价。';
+    }
+}
+async function loadPricePreview() {
+    const output = $('pricePreview');
+    output.textContent = '正在读取产品目录中的套餐 USD 价格…';
+    try {
+        const data = await request('/api/admin/orbitcard/products');
+        const configuredCode = $('productCode').value.trim();
+        const products = (data.products || []).filter(product => !configuredCode || product.product_code === configuredCode);
+        output.innerHTML = Object.entries(cardPlans).map(([plan, label]) => {
+            const prices = products.flatMap(product => (product.prices || []).filter(price => price.plan_type === plan && price.currency === 'USD')
+                .map(price => `<small>${escapeHtml(product.product_code)}：${escapeHtml(price.price)} USD · ${escapeHtml(price.source === 'transaction' ? '交易参考价' : price.source === 'config' ? '平台配置价' : '平台返回价')}</small>`));
+            return `<div class="price-card"><strong>${escapeHtml(label)}</strong>${prices.length ? prices.join('') : '<small>平台未返回 USD 推荐价，暂不能自动充值</small>'}</div>`;
+        }).join('');
+    } catch (error) { output.textContent = `推荐价查询失败：${error.message}`; }
 }
 async function loadCardIdPreview() {
     $('cardIdPreview').textContent = '正在从 Orbitcard 读取卡片 ID…';
@@ -73,9 +92,9 @@ async function loadCardIdPreview() {
         $('cardIdPreview').textContent = `平台共 ${data.total} 张卡，可用 ${data.active} 张。${ids.length ? `前 ${ids.length} 张：${ids.join('、')}` : '当前没有卡片，支付时会按规则自动开卡。'}`;
     } catch (error) { $('cardIdPreview').textContent = `卡片 ID 读取失败：${error.message}`; }
 }
-function apiInput() { return { enabled: $('apiEnabled').checked, base_url: $('baseUrl').value.trim(), orbitcard_product_code: $('productCode').value.trim(), orbitcard_max_initial_amount: $('maxInitialAmount').value.trim(), orbitcard_max_fee: $('maxFee').value.trim(), ...Object.fromEntries(Object.keys(cardPlans).flatMap(plan => [
-    [`orbitcard_price_${plan}`, $(`price_${plan}`).value.trim()], [`orbitcard_region_${plan}`, $(`region_${plan}`).value.trim()]
-])) }; }
+function apiInput() { return { enabled: $('apiEnabled').checked, base_url: $('baseUrl').value.trim(),
+    orbitcard_product_code: $('productCode').value.trim(), orbitcard_max_initial_amount: $('maxInitialAmount').value.trim(),
+    orbitcard_max_fee: $('maxFee').value.trim() }; }
 async function loadCards() {
     const data = await request('/api/admin/orbitcard/cards');
     const currentCardId = $('transactionCardId').value;
@@ -113,7 +132,10 @@ $('tabs').addEventListener('click', event => {
     const button = event.target.closest('[data-tab]'); if (!button) return;
     selected = button.dataset.tab;
     for (const section of document.querySelectorAll('.view')) section.hidden = section.id !== selected;
-    for (const item of $('tabs').querySelectorAll('button')) item.classList.toggle('active', item === button);
+    for (const item of $('tabs').querySelectorAll('button')) {
+        item.classList.toggle('active', item === button);
+        if (item === button) item.setAttribute('aria-current','page'); else item.removeAttribute('aria-current');
+    }
     perform(loadSelected);
 });
 $('logout').onclick = logout; $('reload').onclick = () => perform(loadSelected);
@@ -137,17 +159,85 @@ form('importForm', async () => {
     const data = await request('/api/admin/cdks/import', { cdks: $('cdkImport').value.split(/[\s,;]+/).filter(Boolean), plan_type: $('planType').value });
     $('cdkImport').value = ''; notice(data.message, 'success'); await loadCdks();
 });
-form('apiForm', async () => { const result = await request('/api/admin/gpt-api', apiInput()); regionCatalog = null; notice(result.message, 'success'); await loadApi(); });
-$('testApi').onclick = () => perform(async () => { const result = await request('/api/admin/gpt-api/test', apiInput()); notice(result.message, 'success'); });
-$('loadCatalog').onclick = () => perform(async () => { const data = await request('/api/admin/gpt-api/status'); $('catalog').textContent = JSON.stringify({ balance: data.balance, balance_error: data.balance_error, plans: data.gpt_plans }, null, 2); });
-$('loadRegions').onclick = () => perform(async () => {
-    const current = Object.fromEntries(Object.keys(cardPlans).map(plan => [plan,$(`region_${plan}`).value]));
-    const data = await request('/api/admin/orbitcard/payment-regions');
-    regionCatalog = data.regions;
-    for (const plan of Object.keys(cardPlans)) fillRegionOptions(plan,current[plan]);
-    const unavailable = Object.entries(data.regions).filter(([,row]) => row.error).map(([plan]) => cardPlans[plan]);
-    notice(unavailable.length ? `已读取可用地区；${unavailable.join('、')} 查询失败，请稍后重试` : '已读取四种套餐的可用支付地区', unavailable.length ? 'error' : 'success');
+form('apiForm', async () => { const result = await request('/api/admin/gpt-api', apiInput()); notice(result.message, 'success'); await loadApi(); });
+const diagnosticLines = [];
+function appendDiagnosticLog(line) {
+    diagnosticLines.unshift(`[${new Date().toLocaleString('zh-CN')}] ${line}`);
+    diagnosticLines.length = Math.min(diagnosticLines.length, 100);
+    $('diagnosticLog').textContent = diagnosticLines.join('\n') || '尚无调试记录。';
+}
+function appendPlatformChecks(checks, target = '') {
+    for (const check of Array.isArray(checks) ? checks : []) {
+        if (!check || typeof check !== 'object') continue;
+        const path = /^\/api\/open\/v1\/[A-Za-z]+$/.test(check.path || '') ? check.path : '/api/open/v1/unknown';
+        const status = check.http_status == null ? '无响应' : `HTTP ${check.http_status}`;
+        const code = check.platform_code == null ? '' : ` / code ${check.platform_code}`;
+        const plan = check.plan_type ? ` / ${check.plan_type}` : '';
+        appendDiagnosticLog(`平台 ${check.success ? '成功' : '失败'} ${target}${path}${plan} · ${status}${code} · ${check.elapsed_ms ?? '—'} ms${check.error ? ` · ${String(check.error).slice(0, 160)}` : ''}`);
+    }
+}
+async function diagnosticFetch(path, body) {
+    const method = body === undefined ? 'GET' : 'POST', started = performance.now();
+    appendDiagnosticLog(`请求 ${method} ${path}`);
+    try {
+        const data = await request(path, body);
+        appendDiagnosticLog(`完成 ${method} ${path} · HTTP 200 · ${Math.round(performance.now() - started)} ms`);
+        appendPlatformChecks(data.checks, data.target || '');
+        return data;
+    } catch (error) {
+        appendDiagnosticLog(`失败 ${method} ${path} · ${error.httpStatus ? `HTTP ${error.httpStatus}` : '网络/响应异常'} · ${Math.round(performance.now() - started)} ms · ${error.message}`);
+        appendPlatformChecks(error.checks, error.target || '');
+        throw error;
+    }
+}
+async function runDiagnostic(buttonId, outputId, action) {
+    const button = $(buttonId), output = $(outputId);
+    button.disabled = true; output.className = 'diagnostic-output'; output.textContent = '正在查询平台接口…';
+    try { const result = await action(output); output.innerHTML = typeof result === 'string' ? result : result.html;
+        output.className = `diagnostic-output ${typeof result === 'object' && result.warning ? 'warning' : 'success'}`; }
+    catch (error) { output.textContent = `查询失败：${error.message}`; output.className = 'diagnostic-output error'; }
+    finally { button.disabled = false; }
+}
+function checkedAt() { return escapeHtml(new Date().toLocaleString('zh-CN')); }
+function planItems(plans) {
+    return (plans || []).map(plan => `<li>${escapeHtml(plan.name || plan.type)} <code>${escapeHtml(plan.type)}</code></li>`).join('') || '<li>平台未返回已启用套餐</li>';
+}
+$('testApi').onclick = () => runDiagnostic('testApi', 'testResult', async () => {
+    const data = await diagnosticFetch('/api/admin/gpt-api/test', { base_url: $('baseUrl').value.trim() });
+    const balance = data.balance?.available_balance;
+    return {html:`<strong>连接成功 · ${checkedAt()}</strong><p>目标：<code>${escapeHtml(data.target || '')}</code></p><p>套餐读取成功：${escapeHtml((data.plans || []).length)} 项</p><ul>${planItems(data.plans)}</ul><p>账户可用余额：${balance == null ? escapeHtml(data.balance_error || '查询失败') : `${escapeHtml(balance)} USD`}</p>`,warning:balance == null};
 });
+$('loadCatalog').onclick = () => runDiagnostic('loadCatalog', 'catalog', async () => {
+    const data = await diagnosticFetch('/api/admin/gpt-api/status');
+    const balance = data.balance?.available_balance;
+    return {html:`<strong>查询完成 · ${checkedAt()}</strong><p>账户可用余额：${balance == null ? escapeHtml(data.balance_error || '查询失败') : `${escapeHtml(balance)} USD`}</p><ul>${planItems(data.gpt_plans)}</ul>`,warning:balance == null};
+});
+$('loadRegions').onclick = () => runDiagnostic('loadRegions', 'regionResult', async output => {
+    let products = [], productError = '';
+    try { products = (await diagnosticFetch('/api/admin/orbitcard/products')).products || []; }
+    catch (error) { productError = error.message; }
+    const regions = {};
+    for (const [index, plan] of Object.keys(cardPlans).entries()) {
+        output.textContent = `正在查询地区 ${index + 1}/4：${cardPlans[plan]}…`;
+        try {
+            const data = await diagnosticFetch(`/api/admin/orbitcard/payment-regions?plan=${plan}`);
+            regions[plan] = data.regions?.[plan] || {options:[],error:'平台未返回该套餐地区'};
+            appendPlatformChecks([regions[plan].trace], savedBaseUrl);
+        } catch (error) { regions[plan] = {options:[],error:error.message}; }
+    }
+    const rows = Object.entries(cardPlans).flatMap(([plan, label]) => {
+        const result = regions[plan], options = result.options?.length ? result.options : [null];
+        const references = products.flatMap(product => (product.prices || [])
+            .filter(price => price.plan_type === plan && price.currency === 'USD')
+            .map(price => `${product.product_code}: ${price.price} USD`));
+        const reference = references.length ? references.map(escapeHtml).join('<br>') : '未返回';
+        return options.map(item => `<tr><td>${escapeHtml(label)}</td><td>${escapeHtml(item?.code || '—')}</td><td>${item?.default ? '是' : '否'}</td><td>${item?.region_price ? `${escapeHtml(item.region_price)} USD` : '未返回'}</td><td>${reference}</td><td>${escapeHtml(result.error || '可用')}</td></tr>`);
+    }).join('');
+    const warning = Boolean(productError || Object.values(regions).some(result => result.error));
+    return {html:`<strong>地区与价格查询完成 · ${checkedAt()}</strong><p>地区接口未文档化地区价格；“产品推荐价”来自卡产品目录，非地区价，也不代表最终扣款。</p>${productError ? `<p>产品价格读取失败：${escapeHtml(productError)}</p>` : ''}<div class="table-wrap"><table class="region-price-table"><thead><tr><th>套餐</th><th>地区</th><th>平台默认</th><th>地区接口价格</th><th>产品推荐价（非地区价）</th><th>状态</th></tr></thead><tbody>${rows}</tbody></table></div>`,warning};
+});
+$('clearDiagnosticLog').onclick = () => { diagnosticLines.length = 0; $('diagnosticLog').textContent = '尚无调试记录。'; };
+$('refreshPrices').onclick = () => perform(loadPricePreview);
 $('refreshCardIds').onclick = () => perform(loadCardIdPreview);
 $('loadCards').onclick = () => perform(loadCards);
 $('loadTransactions').onclick = () => perform(async () => {

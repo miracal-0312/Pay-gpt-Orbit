@@ -245,16 +245,6 @@ test('abnormal card exhaustion locks the CDK before the first subscription submi
     assert.equal((await f.store.lockOrbitcardSupport(task.jobKey,'prepared','again',{cardSelectionExhausted:true})).applied,false);
 });
 
-test('payment region is selected per plan or omitted for the provider default', () => {
-    const {worker}=modules(),options=[{code:'PH',default:true},{code:'US',default:false},{code:'JP',default:false}];
-    assert.equal(worker.selectRegion({orbitcard_region:'US'},'plus',options),null);
-    assert.equal(worker.selectRegion({orbitcard_region_plus:'US'},'plus',options),'US');
-    assert.equal(worker.selectRegion({orbitcard_region_pro200:'JP'},'pro200',options),'JP');
-    assert.equal(worker.selectRegion({},'plus',[{code:'US',default:false}]),null);
-    assert.throws(()=>worker.selectRegion({},'plus',[]),/可用支付地区/);
-    assert.throws(()=>worker.selectRegion({orbitcard_region_pro100:'CL'},'pro100',options),/不支持/);
-});
-
 test('only a consistent live upstream result settles or retries an order', () => {
     const {api,domain}=modules();
     const valid={orderId:'SUB-1',client_order_no:'ORDER-1',plan_type:'gpt-plus'};
@@ -273,30 +263,17 @@ test('a mismatched create snapshot cannot redirect follow-up queries to another 
     api.fetchPlans=async()=>({success:true,plans:[{type:'gpt-plus'}]});
     api.request=async (_,operation,body)=>{
         calls.push({operation,body});
-        if(operation==='getSubscriptionPaymentRegions') return {success:true,data:{plan_type:'gpt-plus',payment_regions:[{code:'US',default:false}]}};
         if(operation==='createSubscription') return {success:true,data:{task_no:'WRONG',client_order_no:'OTHER',plan_type:'gpt-plus'}};
         return {success:false,status:404};
     };
     const previous=process.env.ORBITCARD_API_SECRET;process.env.ORBITCARD_API_SECRET='test-secret';
     try {
-        await worker.run({cfg:{},planType:'plus',cdk:'CDK',clientOrderNo:'ORDER-1',
+        await worker.run({cfg:{orbitcard_region_plus:'US'},planType:'plus',cdk:'CDK',clientOrderNo:'ORDER-1',
             session:{accessToken:'private',user:{email:'target@example.test'},account:{}},selectCard:async()=>42,
             setProgress:async()=>{},onSubmission:async()=>{},broadcast:()=>{},sleep:async()=>{},maxPolls:1});
-        assert.deepEqual(calls.map(call=>call.operation),['getSubscriptionPaymentRegions','createSubscription','getSubscription']);
-        assert.equal(Object.hasOwn(calls[1].body,'payment_region'),false);
-        assert.deepEqual(calls[2].body,{client_order_no:'ORDER-1'});
-    } finally {if(previous===undefined)delete process.env.ORBITCARD_API_SECRET;else process.env.ORBITCARD_API_SECRET=previous;}
-});
-
-test('a payment-region catalog for another plan stops before card allocation',async () => {
-    const {api,worker}=modules();let selected=false;
-    api.fetchPlans=async()=>({success:true,plans:[{type:'gpt-plus'}]});
-    api.request=async()=>({success:true,data:{plan_type:'gpt-pro-5x',payment_regions:[{code:'US',default:true}]}});
-    const previous=process.env.ORBITCARD_API_SECRET;process.env.ORBITCARD_API_SECRET='test-secret';
-    try {
-        await assert.rejects(worker.run({cfg:{},planType:'plus',cdk:'CDK',clientOrderNo:'ORDER-1',
-            session:{accessToken:'private',user:{email:'target@example.test'},account:{}},selectCard:async()=>{selected=true;return 42;}}),/套餐不一致/);
-        assert.equal(selected,false);
+        assert.deepEqual(calls.map(call=>call.operation),['createSubscription','getSubscription']);
+        assert.equal(Object.hasOwn(calls[0].body,'payment_region'),false);
+        assert.deepEqual(calls[1].body,{client_order_no:'ORDER-1'});
     } finally {if(previous===undefined)delete process.env.ORBITCARD_API_SECRET;else process.env.ORBITCARD_API_SECRET=previous;}
 });
 
@@ -310,7 +287,7 @@ test('a failed submission claim never calls createSubscription',async () => {
             session:{accessToken:'private',user:{email:'target@example.test'},account:{}},selectCard:async()=>42,
             setProgress:async (_,__,___,extra)=>{if(extra.orbitcardState==='submitting') throw Error('claim denied');},
             onSubmission:()=>{throw Error('must not submit');}}),/claim denied/);
-        assert.deepEqual(operations,['getSubscriptionPaymentRegions']);
+        assert.deepEqual(operations,[]);
     } finally {if(previous===undefined)delete process.env.ORBITCARD_API_SECRET;else process.env.ORBITCARD_API_SECRET=previous;}
 });
 
@@ -319,7 +296,6 @@ test('worker retries only after a verified terminal upstream failure',async () =
     api.fetchPlans=async()=>({success:true,plans:[{type:'gpt-plus'}]});
     api.request=async (_,operation) => {
         operations.push(operation);
-        if(operation==='getSubscriptionPaymentRegions') return {success:true,data:{payment_regions:[{code:'US',default:true}]}};
         if(operation==='createSubscription') return {success:true,data:{task_no:'SUB-1'}};
         return {success:true,data:{task_no:'SUB-1',client_order_no:'ORDER-1',plan_type:'gpt-plus',card_id:42,
             status:'failed',subscription_succeeded:false}};
@@ -331,7 +307,7 @@ test('worker retries only after a verified terminal upstream failure',async () =
             setProgress:async()=>{},onSubmission:async()=>{},broadcast:()=>{},sleep:async()=>{},maxPolls:1,
             onConfirmedFailure:failure=>{confirmed.push(failure);return {exhausted:true};}});
         assert.deepEqual(result,{exhausted:true});
-        assert.deepEqual(operations,['getSubscriptionPaymentRegions','createSubscription','getSubscription']);
+        assert.deepEqual(operations,['createSubscription','getSubscription']);
         assert.equal(confirmed.length,1);assert.equal(confirmed[0].clientOrderNo,'ORDER-1');
         assert.equal(confirmed[0].cardId,42);
     } finally {if(previous===undefined)delete process.env.ORBITCARD_API_SECRET;else process.env.ORBITCARD_API_SECRET=previous;}
@@ -340,9 +316,7 @@ test('worker retries only after a verified terminal upstream failure',async () =
 test('rejected submission during a retry locks support instead of releasing the CDK',async () => {
     const {worker,api}=modules(),states=[];
     api.fetchPlans=async()=>({success:true,plans:[{type:'gpt-plus'}]});
-    api.request=async (_,operation)=>operation==='getSubscriptionPaymentRegions'
-        ? {success:true,data:{payment_regions:[{code:'US',default:true}]}}
-        : {success:false,data:{task_no:'REJECTED-2'},requestError:{submission_outcome:'rejected'}};
+    api.request=async()=>({success:false,data:{task_no:'REJECTED-2'},requestError:{submission_outcome:'rejected'}});
     const previous=process.env.ORBITCARD_API_SECRET;process.env.ORBITCARD_API_SECRET='test-secret';
     try {
         const result=await worker.run({cfg:{},planType:'plus',cdk:'CDK-TEST',clientOrderNo:'ORDER-2',
@@ -386,26 +360,24 @@ async function runWorker(responses) {
         else process.env.ORBITCARD_API_SECRET = previous;
     }
 }
-const regions = () => ({ success: true, data: { payment_regions: [{ code: 'US', default: true }] } });
-
 test('unknown creation queries its persisted identity, never creates a replacement', async () => {
-    const out = await runWorker([regions(), { success: false }, { success: false, status: 503 }]);
+    const out = await runWorker([{ success: false }, { success: false, status: 503 }]);
     assert.equal(out.rollback, false);
-    assert.deepEqual(out.calls.map(c => c[1]), ['getSubscriptionPaymentRegions','createSubscription','getSubscription']);
-    assert.deepEqual(out.calls[2][2], { client_order_no: 'cdk-fixed-attempt' });
+    assert.deepEqual(out.calls.map(c => c[1]), ['createSubscription','getSubscription']);
+    assert.deepEqual(out.calls[1][2], { client_order_no: 'cdk-fixed-attempt' });
     assert.equal(out.states.at(-1)[3].orbitcardState, 'manual');
     assert.ok(!JSON.stringify(out.states).includes('private-token'));
 });
 
 test('explicit rejection releases CDK even when the platform allocated a task number', async () => {
-    const out = await runWorker([regions(), { success: false, data: { task_no: 'SUB-REJECTED' }, requestError: { submission_outcome: 'rejected' } }]);
+    const out = await runWorker([{ success: false, data: { task_no: 'SUB-REJECTED' }, requestError: { submission_outcome: 'rejected' } }]);
     assert.equal(out.rollback, true);
     assert.equal(out.states.at(-1)[3].orbitcardState, 'rejected');
-    assert.equal(out.calls.length, 2);
+    assert.equal(out.calls.length, 1);
 });
 
 test('fee charge failure does not reverse subscription success', async () => {
-    const out = await runWorker([regions(), { success: true, data: { task_no: 'SUB1' } },
+    const out = await runWorker([{ success: true, data: { task_no: 'SUB1' } },
         { success: true, data: { orderId: 'SUB1', client_order_no: 'cdk-fixed-attempt', plan_type: 'gpt-plus', status: 'succeeded', fee_status: 'charge_failed', session: { accessToken: 'private-result' } } }]);
     assert.equal(out.rollback, false);
     assert.equal(out.states.at(-1)[3].orbitcardState, 'success');

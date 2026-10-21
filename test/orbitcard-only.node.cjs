@@ -116,30 +116,22 @@ test('enabling requires environment Key, HTTPS root URL and server Secret; card 
     }
 });
 
-test('browser API Key is ignored while optional fields can be cleared', () => {
+test('browser API Key and retired price or region fields are ignored', () => {
     const previous = process.env.ORBITCARD_API_KEY;
     process.env.ORBITCARD_API_KEY = 'environment-key';
     try {
-        const result = config.prepareConfig({ enabled: true, api_key: 'forged-browser-key', orbitcard_region: '', orbitcard_max_fee: '' },
+        const result = config.prepareConfig({ enabled: true, api_key: 'forged-browser-key', orbitcard_region_plus: 'PH',
+            orbitcard_price_plus: '1', orbitcard_max_fee: '' },
             { api_key: 'saved-test-key', orbitcard_card_id: '42', orbitcard_region: 'US', orbitcard_max_fee: '0.15' }, true);
         assert.equal(result.api_key, 'environment-key');
-        assert.equal(result.orbitcard_region, '');
+        assert.equal(Object.hasOwn(result, 'orbitcard_region_plus'), false);
+        assert.equal(Object.hasOwn(result, 'orbitcard_price_plus'), false);
         assert.equal(result.orbitcard_max_fee, '');
         assert.equal(result.base_url, config.DEFAULT_BASE_URL);
     } finally {
         if (previous === undefined) delete process.env.ORBITCARD_API_KEY;
         else process.env.ORBITCARD_API_KEY = previous;
     }
-});
-
-test('per-plan default regions are normalized and validated independently', () => {
-    const saved={api_key:'saved-test-key',orbitcard_region_plus:'US',orbitcard_region_pro200:'JP'};
-    const result=config.prepareConfig({orbitcard_region_plus:'ph',orbitcard_region_pro100:'',orbitcard_region_pro500:'cl'},saved,true);
-    assert.equal(result.orbitcard_region_plus,'PH');
-    assert.equal(result.orbitcard_region_pro100,'');
-    assert.equal(result.orbitcard_region_pro200,'JP');
-    assert.equal(result.orbitcard_region_pro500,'CL');
-    assert.throws(()=>config.prepareConfig({orbitcard_region_pro100:'USA'},saved,true),/默认支付地区/);
 });
 
 test('enabling third-party mode dispatches Orbitcard for a CDK without any provider selector', async () => {

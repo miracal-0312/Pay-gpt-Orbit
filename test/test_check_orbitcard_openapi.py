@@ -26,7 +26,10 @@ class FakeClient:
         self.calls.append((operation, body or {}))
         payloads = {
             "getAccountBalance": {"available_balance": "50.00", "total_balance": "70.00"},
-            "getProductCode": {"list": [{"product_code": "p1", "min_initial_amount": "20.00"}]},
+            "getProductCode": {"list": [{"product_code": "p1", "min_initial_amount": "20.00",
+                                         "gpt_plan_prices": [{"id": "plus", "price": "20.00", "currency": "USD",
+                                                              "source": "transaction",
+                                                              "internal_note": "do-not-print"}]}]},
             "getSubscriptionPlans": {"enabled": True, "plans": [{"type": "gpt-plus", "name": "Plus"}]},
             "getSubscriptionCatalog": {"enabled": True, "plans": [{"type": "gpt-plus", "name": "Plus"}]},
             "getSubscriptionPaymentRegions": {"plan_type": "gpt-plus", "payment_regions": [{"code": "US", "default": True}]},
@@ -92,6 +95,11 @@ class OpenApiProbeTests(unittest.TestCase):
             self.assertNotIn(secret, dumped)
         self.assertEqual(next(item for item in report["checks"] if item["operation"] == "getSubscriptionList")["summary"]["statuses"],
                          ["succeeded"])
+        products = next(item for item in report["checks"] if item["operation"] == "getProductCode")["summary"]
+        self.assertTrue(products["price_field_present"])
+        self.assertEqual(products["products"][0]["gpt_plan_prices"],
+                         [{"id": "plus", "price": "20.00", "currency": "USD", "source": "transaction"}])
+        self.assertNotIn("do-not-print", json.dumps(products))
 
     def test_missing_balance_and_batch_card_are_reported_as_failures(self):
         class IncompleteClient(FakeClient):
@@ -108,6 +116,18 @@ class OpenApiProbeTests(unittest.TestCase):
         self.assertEqual(report["failed"], 2)
         self.assertEqual(report["checks"][0]["status"], "failed")
         self.assertTrue(any(item.get("error") == "卡片详情缺项或卡 ID 归属不一致" for item in report["checks"]))
+
+    def test_product_probe_marks_missing_price_field(self):
+        summary = probe.summarize("getProductCode", {"list": [{"product_code": "p1"}]})
+        self.assertFalse(summary["price_field_present"])
+        self.assertIsNone(summary["products"][0]["gpt_plan_prices"])
+
+    def test_products_only_probe_calls_no_other_api(self):
+        client = FakeClient()
+        result = probe.run_product_check(client, {"base_url": "https://orbitcard.cc"})
+        self.assertEqual(client.calls, [("getProductCode", {})])
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["summary"]["products"][0]["gpt_plan_prices"][0]["price"], "20.00")
 
 
 if __name__ == "__main__":

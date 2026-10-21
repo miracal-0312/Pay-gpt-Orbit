@@ -99,7 +99,7 @@ const priceAliases = {
     plus: ['plus', 'gptplus', 'chatgptplus', 'chatgptplusplan'],
     pro100: ['pro100', 'gptpro5x', 'chatgptpro100', 'pro5x', 'prolite', 'pro'],
     pro200: ['pro200', 'gptpro20x', 'chatgptpro200', 'pro20x'],
-    pro500: ['pro500', 'gptpro25x', 'chatgptpro500', 'pro25x']
+    pro500: ['pro500', 'gptpro25x', 'chatgptpro500', 'pro25x', 'promax']
 };
 function pricePlan(value) {
     const token = String(value || '').toLowerCase().replace(/[\s_-]+/g, '');
@@ -133,10 +133,12 @@ function normalizeProducts(data) {
         min_retained_balance: productAmount(row.min_retained_balance),
         remaining: productAmount(row.remaining_open_card_num),
         inventory_mode: String(row.open_card_inventory_mode || ''),
-        prices: (Array.isArray(row.gpt_plan_prices) ? row.gpt_plan_prices : []).map(price => ({
-            plan_type: pricePlan(price.name) || pricePlan(price.id), price: Number(price.price),
-            currency: String(price.currency || 'USD').toUpperCase()
-        })).filter(price => price.plan_type && Number.isFinite(price.price) && price.price > 0 && price.currency === 'USD')
+        prices: (Array.isArray(row.gpt_plan_prices) ? row.gpt_plan_prices : []).filter(price => price && typeof price === 'object').map(price => ({
+            plan_type: pricePlan(price.id) || pricePlan(price.name), price: String(price.price ?? ''),
+            currency: String(price.currency || '').toUpperCase(), source: String(price.source || '').slice(0, 32),
+            observed_at: String(price.observed_at || '').slice(0, 40), updated_at: String(price.updated_at || '').slice(0, 40)
+        })).filter(price => price.plan_type && /^\d{1,14}(?:\.\d{1,8})?$/.test(price.price)
+            && Number(price.price) > 0 && price.currency === 'USD')
     }));
 }
 
@@ -148,15 +150,14 @@ async function products(cfg) {
     return rows;
 }
 
-function planPrice(product, planType, cfg = {}) {
+function planPrice(product, planType) {
     const plan = planFor(planType);
     const fromProduct = product?.prices.find(price => price.plan_type === plan)?.price;
-    if (fromProduct) return fromProduct;
-    const configured = Number(cfg[`orbitcard_price_${plan}`]);
-    return Number.isFinite(configured) && configured > 0 ? configured : null;
+    return typeof fromProduct === 'string' && /^\d{1,14}(?:\.\d{1,8})?$/.test(fromProduct)
+        && Number(fromProduct) > 0 ? fromProduct : null;
 }
-function selection(product, planType, cfg = {}) {
-    const plan = planFor(planType), price = planPrice(product, plan, cfg);
+function selection(product, planType) {
+    const plan = planFor(planType), price = planPrice(product, plan);
     if (!price) return null;
     const opening=openingSelection(product);
     return opening ? { ...opening, plan_type:plan, price } : null;
@@ -176,12 +177,12 @@ function choose(rows, cfg, select) {
     const candidates = rows.filter(row => !cfg.orbitcard_product_code || row.product_code === cfg.orbitcard_product_code)
         .map(select).filter(Boolean).sort((a, b) => a.product_code.localeCompare(b.product_code));
     const selected = candidates[0];
-    if (!selected) throw new CardPreparationError('没有符合条件的开卡产品，请检查库存、套餐预算及产品最低首充是否不高于 20 USD');
+    if (!selected) throw new CardPreparationError('没有符合条件的开卡产品，请检查库存、当前套餐的 USD 推荐价及产品最低首充是否不高于 20 USD');
     if (cfg.orbitcard_max_initial_amount && Number(selected.amount) > Number(cfg.orbitcard_max_initial_amount)) throw new CardPreparationError('所需首充超过后台设置的单卡金额上限');
     return selected;
 }
 function chooseProduct(rows, planType, cfg = {}) {
-    return choose(rows,cfg,row => selection(row,planType,cfg));
+    return choose(rows,cfg,row => selection(row,planType));
 }
 function chooseOpeningProduct(rows,cfg = {}) {
     return choose(rows,cfg,openingSelection);

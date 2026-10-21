@@ -140,6 +140,12 @@ Body 为空或 `{}`。`data.list[]` 包含：
 - `bin`、`card_type`、`network`、`media`、`issuing_area`：卡产品属性。
 - `remaining_open_card_num`、`open_card_inventory_mode`：当前可开卡余量与库存模式。
 - `min_initial_amount`、`min_retained_balance`：最低首充与最低留存余额。
+- `gpt_plan_prices[]`：该卡产品当前匹配的 GPT 套餐参考价格。
+  - `id`：`go`、`plus`、`pro`、`pro_20x` 或 `pro_max`；其中三个 Pro 标识分别对应 Pro 100、Pro 200、Pro 500。
+  - `name`：原始套餐名称。
+  - `price`：USD 十进制定点金额字符串；`currency` 当前为 `USD`。
+  - `source`：`transaction` 表示交易参考价，`config` 表示平台配置锚点。
+  - `observed_at`：匹配付款观察时间；`updated_at`：价格锚点更新时间，首次配置时可能缺省。
 
 仅返回可用的储值卡产品。库存、最低金额和最低留存余额可能变化，申请卡前请重新查询。
 

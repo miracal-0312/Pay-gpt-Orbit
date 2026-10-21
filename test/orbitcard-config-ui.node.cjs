@@ -43,6 +43,8 @@ test('Orbitcard credentials come only from environment, never admin input or old
         assert.equal(Object.hasOwn(config, 'orbitcard_card_id'), false);
         await assert.rejects(core.saveGptApiConfig({ api_key: 'browser-key' }), /环境变量/);
         await assert.rejects(core.saveGptApiConfig({ api_secret: 'browser-secret' }), /环境变量/);
+        await assert.rejects(core.saveGptApiConfig({ orbitcard_price_plus: '1' }), /平台推荐价/);
+        await assert.rejects(core.saveGptApiConfig({ orbitcard_region_plus: 'US' }), /地区/);
         await core.saveGptApiConfig({ enabled: true, base_url: 'https://orbitcard.test' });
         assert.equal(rows.get('gpt_api_base_url'), 'https://orbitcard.test');
         await core.ensureGptApiConfigDefaults();
@@ -56,6 +58,9 @@ test('Orbitcard credentials come only from environment, never admin input or old
         assert.match(html, /ORBITCARD_API_KEY/);
         assert.match(html, /ORBITCARD_API_SECRET/);
         assert.doesNotMatch(html, /id="apiKey"|id="apiSecret"/);
+        assert.doesNotMatch(html, /id="price_plus"|id="region_plus"/);
+        assert.match(html, /id="testResult"/);
+        assert.match(html, /id="regionResult"/);
         assert.doesNotMatch(script, /api_key:\s*\$|api_secret:\s*\$/);
     } finally {
         if (oldKey === undefined) delete process.env.ORBITCARD_API_KEY;
@@ -116,4 +121,38 @@ test('card ID preview reads platform card list and returns only safe summary fie
     assert.deepEqual(output.cards[0], { card_id: 42, status: 'ACTIVE', last4: '1234' });
     assert.ok(!JSON.stringify(output).includes('4111111111111234'));
     assert.ok(!JSON.stringify(output).includes('999'));
+});
+
+test('connection diagnostics report both upstream calls without exposing credentials', async () => {
+    const previousKey = process.env.ORBITCARD_API_KEY;
+    const previousSecret = process.env.ORBITCARD_API_SECRET;
+    process.env.ORBITCARD_API_KEY = 'diagnostic-key';
+    process.env.ORBITCARD_API_SECRET = 'diagnostic-secret';
+    const calls = [];
+    const api = load('orbitcard-client.js', {
+        axios: { request: async args => {
+            calls.push(new URL(args.url).pathname);
+            const data = args.url.endsWith('/getSubscriptionPlans')
+                ? { enabled: true, plans: [{ type: 'gpt-plus', name: 'Plus' }] }
+                : { available_balance: '25.00' };
+            return { status: 200, data: { code: 0, data }, headers: {} };
+        } },
+        './runtime-log': { push() {} }
+    });
+    try {
+        const result = await api.testConnection({ base_url: 'https://orbitcard.test' });
+        assert.equal(result.success, true);
+        assert.equal(result.balance.available_balance, '25.00');
+        assert.deepEqual(calls.sort(), ['/api/open/v1/getAccountBalance', '/api/open/v1/getSubscriptionPlans']);
+        assert.deepEqual(result.checks.map(check => check.path).sort(), calls.sort());
+        assert.ok(result.checks.every(check => check.success && check.http_status === 200
+            && check.platform_code === 0 && Number.isFinite(check.elapsed_ms)));
+        assert.ok(!JSON.stringify(result.checks).includes('diagnostic-key'));
+        assert.ok(!JSON.stringify(result.checks).includes('diagnostic-secret'));
+    } finally {
+        if (previousKey === undefined) delete process.env.ORBITCARD_API_KEY;
+        else process.env.ORBITCARD_API_KEY = previousKey;
+        if (previousSecret === undefined) delete process.env.ORBITCARD_API_SECRET;
+        else process.env.ORBITCARD_API_SECRET = previousSecret;
+    }
 });

@@ -4,11 +4,11 @@
 
 ## 服务端配置
 
-在服务器环境变量中填写平台签发且配对的 `ORBITCARD_API_KEY` 和 `ORBITCARD_API_SECRET`；后台只填写 HTTPS 根域名及开卡策略，不接收或保存 API 凭据。可为 Plus、Pro 100、Pro 200、Pro 500 各设默认支付地区；留空时下单省略 `payment_region`，由平台选择默认地区。产品缺少会员 USD 单价时填写对应单次预算。新充值先查询 `available_balance`，不足套餐金额即失败并锁定 CDK；再查卡片实时 ACTIVE 状态与次数。旧卡不足自动补差额，无符合次数条件的卡时首充 20 USD 开卡并按需补款；卡 ID 从 `getCardList` 自动读取，不填写固定卡 ID。同一卡 Plus 4 次、Pro 100/200/500 各 1 次，独立计数且允许混用。历史卡需同步后确认四项历史次数，详见 [ORBITCARD-CARDS.md](ORBITCARD-CARDS.md)。
+在服务器环境变量中填写平台签发且配对的 `ORBITCARD_API_KEY` 和 `ORBITCARD_API_SECRET`；后台只填写 HTTPS 根域名及开卡策略，不接收或保存 API 凭据。四档套餐金额只采用 `getProductCode` 返回的对应 USD 推荐价；接口未返回价格时停止自动充值。订阅下单始终省略 `payment_region`，由平台选择默认地区；地区接口仅供只读调试。新充值先查询 `available_balance`，不足套餐金额即失败并锁定 CDK；再查卡片实时 ACTIVE 状态与次数。旧卡不足自动补差额，无符合次数条件的卡时首充 20 USD 开卡并按需补款；卡 ID 从 `getCardList` 自动读取，不填写固定卡 ID。同一卡 Plus 4 次、Pro 100/200/500 各 1 次，独立计数且允许混用。历史卡需同步后确认四项历史次数，详见 [ORBITCARD-CARDS.md](ORBITCARD-CARDS.md)。
 
 订阅调用需要 `subscriptions:read`、`subscriptions:create` 权限，余额查询另需 `account:read`。新增 `cards:create`、`cards:read`、`products:read`、`cards:fund`、`transactions:read`；不需要敏感卡资料。连接测试只查询套餐和余额，不创建订阅或开卡。卡片协议见 [Open API](Orbitcard-Open-API-V1.md)。
 
-开卡仅自动提交 `{product_code,amount:"20.00",quantity:1}`；产品码来自开卡前最新 `getProductCode`，不额外提交身份资料或卡号。后台产品查询返回只读 `automatic_application` 预览；单独申请卡不要求会员预算，CDK 兑换仍需明确对应套餐金额。详见 [开卡参数](ORBITCARD-CARDS.md#开卡参数自动获取与提交)。
+开卡仅自动提交 `{product_code,amount:"20.00",quantity:1}`；产品码来自开卡前最新 `getProductCode`，不额外提交身份资料或卡号。后台产品查询返回只读 `automatic_application` 预览；单独申请卡不要求会员价格，CDK 兑换需产品目录返回对应套餐金额。详见 [开卡参数](ORBITCARD-CARDS.md#开卡参数自动获取与提交)。
 
 项目向平台发送 `POST /api/open/v1/<operation>`，使用 HMAC-SHA256-V1 对精确请求字节、主机、路径、时间戳、随机数及幂等键签名，不使用旧充值 Bearer 协议。
 
@@ -42,7 +42,7 @@
 
 ## 管理入口
 
-后台继续使用 `/api/admin/gpt-api` 配置路径以兼容现有 Orbitcard 配置，四档 `orbitcard_region_<套餐>` 字段保存在 `app_config`；`GET /api/admin/orbitcard/payment-regions` 按环境变量中的凭据只读查询各套餐可用地区，`/test` 测试连接，`/status` 查询套餐、余额与最近订单。CDK 行锁保护新任务创建，卡分配使用 MySQL 命名锁，提交订阅前以任务状态和固定订单号原子认领；未知结果只查原单。
+后台继续使用 `/api/admin/gpt-api` 配置路径；旧预算和地区字段不再读取或接受。后台「接口调试」分别展示 `/test` 连接测试、`/status` 套餐与余额、`GET /api/admin/orbitcard/payment-regions` 四档地区查询结果。地区查询不参与订阅下单。CDK 行锁保护新任务创建，卡分配使用 MySQL 命名锁，提交订阅前以任务状态和固定订单号原子认领；未知结果只查原单。
 
 `POST /api/admin/orders/:jobKey/refresh` 查询已有订单；`GET /api/admin/task-logs/:jobKey/audit` 下载任务日志。均需管理员认证。管理员自身的 Bearer 登录令牌与供应商 HMAC 协议用途不同。
 

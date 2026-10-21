@@ -214,9 +214,19 @@ def summarize(operation: str, data: Any) -> Any:
         items = rows(data)
         if items is None:
             return None
-        return {"count": len(items), "products": [{key: item.get(key) for key in (
-            "product_code", "remaining_open_card_num", "min_initial_amount", "min_retained_balance"
-        ) if key in item} for item in items]}
+        products = []
+        for item in items:
+            product = {key: item.get(key) for key in (
+                "product_code", "remaining_open_card_num", "min_initial_amount", "min_retained_balance"
+            ) if key in item}
+            prices = item.get("gpt_plan_prices")
+            product["gpt_plan_prices"] = [{key: price.get(key) for key in (
+                                           "id", "name", "price", "currency", "source", "observed_at", "updated_at")
+                                           if key in price}
+                                          for price in prices if isinstance(price, dict)] if isinstance(prices, list) else None
+            products.append(product)
+        return {"count": len(items), "products": products,
+                "price_field_present": any(isinstance(item.get("gpt_plan_prices"), list) for item in items)}
     if operation in ("getSubscriptionPlans", "getSubscriptionCatalog"):
         if not isinstance(data, dict) or not isinstance(data.get("plans"), list):
             return None
@@ -348,9 +358,24 @@ def run_checks(client: OrbitcardClient, config: dict[str, Any]) -> dict[str, Any
     return report
 
 
+def run_product_check(client: OrbitcardClient, config: dict[str, Any]) -> dict[str, Any]:
+    response = client.request("getProductCode", {})
+    summary = summarize("getProductCode", response.get("data")) if response.get("ok") else None
+    result: dict[str, Any] = {"base_url": config["base_url"], "read_only": True,
+                              "operation": "getProductCode", "status": "ok" if summary else "failed"}
+    if summary:
+        result["summary"] = summary
+    else:
+        result["error"] = response.get("error") or "成功响应的数据结构与文档不符"
+        if "http_status" in response:
+            result["http_status"] = response["http_status"]
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="只读检查 Orbitcard Open API，不执行资金或订阅写操作")
     parser.add_argument("--config", type=Path, required=True, help="JSON 配置文件路径；可放在项目外")
+    parser.add_argument("--products-only", action="store_true", help="只检查 getProductCode 及套餐价格字段")
     parser.add_argument("--timeout", type=float, default=30.0, help="单次请求超时秒数，默认 30")
     args = parser.parse_args(argv)
     if not 1 <= args.timeout <= 60:
@@ -360,8 +385,11 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(f"配置错误：{exc}", file=sys.stderr)
         return 3
-    report = run_checks(OrbitcardClient(config, args.timeout), config)
+    client = OrbitcardClient(config, args.timeout)
+    report = run_product_check(client, config) if args.products_only else run_checks(client, config)
     print(json.dumps(report, ensure_ascii=False, indent=2))
+    if args.products_only:
+        return 0 if report["status"] == "ok" else 2
     return 2 if report["failed"] else 0
 
 

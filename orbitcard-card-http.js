@@ -58,11 +58,17 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
     }));
     app.get('/api/admin/orbitcard/payment-regions', handler(async (req, res) => {
         const cfg=await config(), regions={};
-        for(const plan of CANONICAL_PLAN_TYPES) {
+        const requested=String(req.query?.plan || '').trim();
+        if(requested && !CANONICAL_PLAN_TYPES.includes(requested)) throw new CardPreparationError('请选择有效的套餐查询地区');
+        for(const plan of requested ? [requested] : CANONICAL_PLAN_TYPES) {
+            const started=Date.now();
             const result=await api.request(cfg,'getSubscriptionPaymentRegions',{plan_type:api.PLAN_MAP[plan]});
             const data=result.data;
+            const trace={operation:'getSubscriptionPaymentRegions',path:'/api/open/v1/getSubscriptionPaymentRegions',
+                plan_type:api.PLAN_MAP[plan],checked_at:new Date(started).toISOString(),elapsed_ms:Date.now()-started,
+                success:result.success===true,http_status:result.status ?? null,platform_code:result.code ?? null};
             if(!result.success || (data?.plan_type && data.plan_type!==api.PLAN_MAP[plan]) || !Array.isArray(data?.payment_regions)) {
-                regions[plan]={options:[],error:result.error || '该套餐支付地区暂不可用'};
+                regions[plan]={options:[],error:result.error || '该套餐支付地区暂不可用',trace:{...trace,success:false}};
                 continue;
             }
             const seen=new Set();
@@ -70,7 +76,10 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
                 const code=String(item?.code || '').toUpperCase();
                 if(!/^[A-Z]{2}$/.test(code) || seen.has(code)) return false;
                 seen.add(code);return true;
-            }).map(item => ({code:String(item.code).toUpperCase(),default:item.default===true}))};
+            }).map(item => ({code:String(item.code).toUpperCase(),default:item.default===true,
+                region_price:typeof item.price==='string' && /^\d{1,14}(?:\.\d{1,8})?$/.test(item.price)
+                    && Number(item.price)>0 && String(item.currency || '').toUpperCase()==='USD' ? item.price : null,
+                currency:String(item.currency || '').toUpperCase().slice(0,8)})),trace};
         }
         res.json({success:true,regions});
     }));
