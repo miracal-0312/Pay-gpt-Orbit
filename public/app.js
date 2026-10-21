@@ -1,7 +1,7 @@
 'use strict';
 const $ = id => document.getElementById(id);
 let activeCdk = '', activeJob = '', generation = 0, timer, expiryTimer, trackingStarted = 0, busy = false;
-const statusNames = { success: '订阅成功', failed: '充值失败', manual: '结果待确认', running: '正在充值', processing: '正在充值', used: '卡密已使用', unused: '卡密可使用' };
+const statusNames = { success: '订阅成功', failed: '充值失败', retry: '请重新提交 Session', manual: '处理中 / 结果待确认', running: '正在充值', processing: '正在充值', used: '卡密已使用', unused: '卡密可使用' };
 function message(text, type = '') { $('statusMessage').textContent = text; $('statusMessage').className = `message ${type}`; }
 async function post(url, body) {
     const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -32,7 +32,7 @@ function display(data) {
     $('progressText').textContent = statusNames[data.status] || data.status;
     message(data.message || statusNames[data.status] || '等待查询', data.status === 'success' ? 'success' : data.status === 'failed' ? 'error' : '');
     $('orderInfo').textContent = `订单：${data.order_id || data.client_order_no || activeJob || '待分配'}`;
-    if (['success', 'failed'].includes(data.status)) { clearTimeout(timer); clearChallenge(); $('trackingHint').textContent = '结果已确认，仍可手动查询原订单。'; return false; }
+    if (['success', 'failed', 'retry'].includes(data.status)) { clearTimeout(timer); clearChallenge(); $('trackingHint').textContent = data.status === 'retry' ? '请点击“验证卡密”，再提交最新 Session 继续。' : '结果已确认，仍可手动查询原订单。'; return false; }
     return true;
 }
 async function refresh(auto = false, expected = generation) {
@@ -68,7 +68,7 @@ $('verifyForm').addEventListener('submit', async event => {
         if (current !== generation) return;
         activeCdk = cdk;
         const data = result.data; $('planInfo').textContent = `${data.plan_label || data.plan_type} · ${statusNames[data.status] || data.status}`;
-        $('redeemForm').hidden = data.status !== 'unused' || data.type !== '自助';
+        $('redeemForm').hidden = !['unused','retry'].includes(data.status) || data.type !== '自助';
         message(data.message || statusNames[data.status]);
         if (data.jobKey && data.provider === 'orbitcard') { activeJob = data.jobKey; startTracking(); }
         else if (data.provider === 'history') message(data.message || '历史充值记录需联系管理员人工核对');

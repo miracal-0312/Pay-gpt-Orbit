@@ -48,7 +48,10 @@ async function ensureLegacyColumns() {
             status: "VARCHAR(32) NOT NULL DEFAULT 'running'", message: 'VARCHAR(255) NULL', progress: 'INT NOT NULL DEFAULT 0',
             display_time: "VARCHAR(64) NOT NULL DEFAULT ''", raw_output: 'MEDIUMTEXT NULL',
             orbitcard_client_order_no: 'VARCHAR(128) NULL', orbitcard_state: 'VARCHAR(32) NULL', orbitcard_plan_type: 'VARCHAR(64) NULL',
-            orbitcard_email: 'VARCHAR(255) NULL', orbitcard_base_url: 'VARCHAR(255) NULL',
+            orbitcard_retry_root_job_key: 'VARCHAR(64) NULL', orbitcard_retry_attempt_no: 'TINYINT UNSIGNED NOT NULL DEFAULT 1',
+            orbitcard_retry_first_card_id: 'BIGINT UNSIGNED NULL', orbitcard_retry_second_card_id: 'BIGINT UNSIGNED NULL',
+            orbitcard_api_key_hash: 'CHAR(64) NULL',
+            orbitcard_email: 'VARCHAR(255) NULL', orbitcard_base_url: 'VARCHAR(255) NULL', orbitcard_card_id: 'BIGINT UNSIGNED NULL', orbitcard_issue_key: 'VARCHAR(80) NULL', orbitcard_required_balance: 'DECIMAL(22,8) NULL',
             gpt_api_order_id: 'VARCHAR(128) NULL', gpt_api_raw: 'MEDIUMTEXT NULL',
             created_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP', updated_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP' }
     };
@@ -91,15 +94,17 @@ async function createTaskLog({ tokenPreview, cdkCode, status = 'running', progre
 
 async function getTaskStatus(jobKey) {
     const rows = await runQuery(`SELECT job_key, cdk_code, status, message, progress, display_time, updated_at,
-        orbitcard_client_order_no, orbitcard_state, orbitcard_plan_type, orbitcard_email, orbitcard_base_url,
+        orbitcard_client_order_no, orbitcard_state, orbitcard_plan_type, orbitcard_email, orbitcard_base_url, orbitcard_card_id, orbitcard_issue_key, orbitcard_required_balance,
+        orbitcard_retry_root_job_key, orbitcard_retry_attempt_no, orbitcard_retry_first_card_id, orbitcard_retry_second_card_id, orbitcard_api_key_hash,
         gpt_api_order_id, gpt_api_raw FROM task_logs WHERE job_key = ? LIMIT 1`, [String(jobKey)]);
     return rows[0] || null;
 }
 
 async function getRunningTaskByCdk(cdk) {
-    const rows = await runQuery(`SELECT job_key, status, message, progress, orbitcard_client_order_no, orbitcard_state
+    const rows = await runQuery(`SELECT job_key, status, message, progress, orbitcard_client_order_no, orbitcard_state,
+        orbitcard_retry_root_job_key, orbitcard_retry_attempt_no, orbitcard_retry_first_card_id, orbitcard_retry_second_card_id, orbitcard_api_key_hash, orbitcard_email, orbitcard_base_url
         FROM task_logs WHERE cdk_code = ? AND (status IN ('running','manual')
-        OR orbitcard_state IN ('prepared','submitting','pending','manual','success')) ORDER BY id DESC LIMIT 1`, [String(cdk)]);
+        OR orbitcard_state IN ('prepared','retry_waiting','support_locked','balance_blocked','funding_pending','submitting','pending','manual','success')) ORDER BY id DESC LIMIT 1`, [String(cdk)]);
     return rows[0] || null;
 }
 
@@ -114,8 +119,9 @@ async function listCdks() {
         WHERE c.is_active = 1 ORDER BY c.id DESC LIMIT 2000`);
     return rows.map(row => ({ code: row.cdk_code, plan_type: row.plan_type, plan_label: PLAN_LABELS[row.plan_type] || row.plan_type,
         type: row.type, shipped: Boolean(row.shipped_at), created_at: row.created_at, jobKey: row.job_key,
-        orbitcard_pending_confirmation: row.task_status === 'manual',
-        status: ['running','manual'].includes(row.task_status) ? 'processing' : row.used_at ? 'used' : 'unused' }));
+        orbitcard_pending_confirmation: row.task_status === 'manual', orbitcard_balance_blocked: row.orbitcard_state==='balance_blocked',
+        orbitcard_support_locked: row.orbitcard_state==='support_locked',
+        status: ['running','manual'].includes(row.task_status) || ['balance_blocked','support_locked'].includes(row.orbitcard_state) ? 'processing' : row.used_at ? 'used' : 'unused' }));
 }
 
 async function insertCdks(cdks, options = {}) {
@@ -151,12 +157,12 @@ async function deleteCdk(cdk) {
 
 async function listAdminTaskLogs(limit = 200) {
     const rows = await runQuery(`SELECT job_key, display_time, cdk_code, token_preview, status, message, progress, updated_at,
-        orbitcard_client_order_no, orbitcard_state, orbitcard_plan_type, gpt_api_order_id, gpt_api_raw
+        orbitcard_client_order_no, orbitcard_state, orbitcard_plan_type, orbitcard_card_id, gpt_api_order_id, gpt_api_raw
         FROM task_logs ORDER BY id DESC LIMIT ?`, [Math.min(500, Math.max(1, Number(limit) || 200))]);
     return rows.map(row => ({ id: row.job_key, jobKey: row.job_key, time: row.display_time, cdk: row.cdk_code,
         token: row.token_preview, status: row.status, message: row.message, progress: Number(row.progress),
         provider: row.orbitcard_client_order_no ? 'orbitcard' : 'history', order_id: row.gpt_api_order_id,
-        client_order_no: row.orbitcard_client_order_no, orbitcard_state: row.orbitcard_state,
+        client_order_no: row.orbitcard_client_order_no, orbitcard_state: row.orbitcard_state, card_id: row.orbitcard_card_id,
         order: safeOrder(row.gpt_api_raw) }));
 }
 
@@ -173,7 +179,7 @@ async function listRecentGptApiOrders(limit = 10) {
 async function listRecoverableOrbitcardTasks(limit = 50) {
     return runQuery(`SELECT t.* FROM task_logs t JOIN cdk_codes c ON c.cdk_code = t.cdk_code AND c.is_active = 1
         WHERE t.orbitcard_client_order_no IS NOT NULL
-          AND t.orbitcard_state IN ('prepared','submitting','pending','manual','success')
+          AND t.orbitcard_state IN ('prepared','balance_blocked','funding_pending','card_pending','submitting','pending','manual','success')
           AND t.id = (SELECT MAX(id) FROM task_logs WHERE cdk_code = t.cdk_code)
           AND (t.orbitcard_state <> 'success' OR JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(t.gpt_api_raw), t.gpt_api_raw, '{}'), '$.fee_status')) = 'charge_pending')
         ORDER BY t.updated_at ASC LIMIT ?`, [Math.min(200, Math.max(1, Number(limit) || 50))]);
@@ -204,8 +210,8 @@ async function saveConfig(config = {}) {
 async function getAdminData() {
     const [[stats], [cdks], logs, maintenance, max, telegram] = await Promise.all([
         runQuery(`SELECT COUNT(*) AS total, COALESCE(SUM(orbitcard_state = 'success'),0) AS success,
-            COALESCE(SUM(orbitcard_state IN ('failed','rejected')),0) AS failed,
-            COALESCE(SUM(orbitcard_state IN ('prepared','submitting','pending','manual')),0) AS pending
+            COALESCE(SUM(orbitcard_state IN ('failed','rejected','balance_blocked','support_locked')),0) AS failed,
+            COALESCE(SUM(orbitcard_state IN ('prepared','retry_waiting','funding_pending','card_pending','submitting','pending','manual')),0) AS pending
             FROM task_logs WHERE orbitcard_client_order_no IS NOT NULL`),
         runQuery('SELECT COUNT(*) AS total, COALESCE(SUM(used_at IS NOT NULL),0) AS used FROM cdk_codes WHERE is_active = 1'),
         listAdminTaskLogs(), core.getMaintenanceModeState(), getMaxConcurrentActivations(), core.getTelegramConfig()
@@ -215,7 +221,8 @@ async function getAdminData() {
         telegram: { ...telegram, bot_token: '', bot_token_saved: Boolean(telegram.bot_token) } };
 }
 
-const orbitcardCdkStore = require('./orbitcard-cdk-store')({ withTransaction, runQuery, runExecute, createTaskLog });
-module.exports = { ...core, ...orbitcardCdkStore, ensureReady, initializeBaseData, createTaskLog, getTaskStatus,
+const cardStore = require('./orbitcard-card-store')({ withTransaction, runQuery, runExecute, getPool: core.getPool });
+const orbitcardCdkStore = require('./orbitcard-cdk-store')({ withTransaction, runQuery, runExecute, createTaskLog, settleCardUse: cardStore.settleCardUse });
+module.exports = { ...core, ...cardStore, ...orbitcardCdkStore, ensureReady, initializeBaseData, createTaskLog, getTaskStatus,
     getRunningTaskByCdk, verifyCdkDetails, listCdks, insertCdks, markCdkShipped, deleteCdk,
     listAdminTaskLogs, listRecentGptApiOrders, listRecoverableOrbitcardTasks, noteQueryAttempt, getMaxConcurrentActivations, saveConfig, getAdminData, safeOrder };

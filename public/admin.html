@@ -3,13 +3,13 @@
 <body><header><div><div class="brand">PAY-GPT-ORBIT</div><h1>订阅兑换管理</h1><small id="adminEmail"></small></div><div class="row"><a href="/">用户入口</a><button id="reload" class="secondary">刷新</button><button id="logout" class="secondary">退出登录</button></div></header>
 <main>
 <p id="notice" class="message" role="status"></p>
-<nav class="panel" id="tabs"><button data-tab="overview" class="active">订单与概览</button><button data-tab="cdks">CDK 管理</button><button data-tab="orbitcard">Orbitcard 配置</button><button data-tab="logs">运行日志</button><button data-tab="settings">接单与安全</button></nav>
+<nav class="panel" id="tabs"><button data-tab="overview" class="active">订单与概览</button><button data-tab="cdks">CDK 管理</button><button data-tab="orbitcard">Orbitcard 配置</button><button data-tab="cards">卡片与开卡</button><button data-tab="logs">运行日志</button><button data-tab="settings">接单与安全</button></nav>
+<div class="panel"><h2>二级验证</h2><form id="unlockForm" class="row"><label>二级密码<input id="secondaryPassword" type="password" autocomplete="current-password" required></label><button>验证</button><small id="unlockState">CDK 管理、手动申请卡和历史次数登记需要二级验证</small></form></div>
 <section id="overview" class="view">
 <div class="grid"><div class="panel"><small>Orbitcard 任务</small><div id="total" class="metric">—</div></div><div class="panel"><small>订阅成功</small><div id="success" class="metric">—</div></div><div class="panel"><small>订阅失败 / 拒绝</small><div id="failed" class="metric">—</div></div><div class="panel"><small>处理中 / 待确认</small><div id="pending" class="metric">—</div></div></div>
 <div class="panel"><div class="row between"><h2>任务与订单</h2><small>最近 200 条 · 充值记录保留用于核对</small></div><div class="table-wrap"><table><thead><tr><th>时间 / 卡密</th><th>账号 / 订单</th><th>订阅结果</th><th>平台服务费</th><th>支付金额快照</th><th>操作</th></tr></thead><tbody id="tasks"></tbody></table></div></div>
 </section>
 <section id="cdks" class="view" hidden>
-<div class="panel"><h2>解锁 CDK 管理</h2><form id="unlockForm" class="row"><label>二级密码<input id="secondaryPassword" type="password" autocomplete="current-password" required></label><button>验证</button><small id="unlockState">未解锁</small></form></div>
 <div class="panel"><h2>生成 / 导入卡密</h2><div class="grid"><form id="generateForm" class="stack"><label>套餐<select id="planType"><option value="plus">ChatGPT Plus</option><option value="pro100">ChatGPT Pro 100</option><option value="pro200">ChatGPT Pro 200</option><option value="pro500">ChatGPT Pro 500</option></select></label><label>数量<input id="cdkCount" type="number" value="10" min="1" max="100" required></label><button>生成卡密</button></form><form id="importForm" class="stack"><label>导入卡密（使用左侧所选套餐）<textarea id="cdkImport" placeholder="每行一个卡密，最多 1000 个" required></textarea></label><button class="secondary">导入</button></form></div><pre id="generated" hidden></pre></div>
 <div class="panel"><div class="row between"><h2>卡密列表</h2><button id="loadCdks" class="secondary">加载列表</button></div><div class="table-wrap"><table><thead><tr><th>卡密</th><th>套餐</th><th>状态</th><th>出库</th><th>操作</th></tr></thead><tbody id="cdkRows"></tbody></table></div><small>已有任务或使用记录的卡密不能删除。</small></div>
 </section>
@@ -18,12 +18,27 @@
 <label class="check span"><input id="apiEnabled" type="checkbox">开放新充值订单</label>
 <label>HTTPS 根域名<input id="baseUrl" type="url" placeholder="https://orbitcard.cc" required></label>
 <label>API Key<input id="apiKey" type="password" autocomplete="new-password" placeholder="留空保留已保存值"><small id="keyState"></small></label>
-<label>平台卡 ID<input id="cardId" inputmode="numeric" placeholder="平台的正整数卡 ID"></label>
-<label>支付地区（可选）<input id="region" maxlength="2" placeholder="留空使用上游默认地区"></label>
-<label>最高服务费（USDT，可选）<input id="maxFee" inputmode="decimal" placeholder="留空不设置上限"></label>
-<div class="row span"><button>保存配置</button><button id="testApi" type="button" class="secondary">测试连接</button><button id="loadCatalog" type="button" class="secondary">查询套餐与余额</button></div>
-</form><p class="muted">停用只暂停新兑换，已有订单继续查询。HMAC Secret 在服务端环境配置，必须与 API Key 配对。</p></div>
+<label>开卡产品代码（可选）<input id="productCode" maxlength="128" placeholder="留空选择支持 20 USD 首充的产品"></label>
+<label>单卡首充上限（USD，可选）<input id="maxInitialAmount" inputmode="decimal" placeholder="新卡固定首充 20；留空不另设上限"></label>
+<label>Plus 单次预算（USD）<input id="price_plus" inputmode="decimal" placeholder="产品无会员价格时必须填写"></label>
+<label>Pro 100 单次预算（USD）<input id="price_pro100" inputmode="decimal" placeholder="产品无会员价格时必须填写"></label>
+<label>Pro 200 单次预算（USD）<input id="price_pro200" inputmode="decimal" placeholder="产品无会员价格时必须填写"></label>
+<label>Pro 500 单次预算（USD）<input id="price_pro500" inputmode="decimal" placeholder="产品无会员价格时必须填写"></label>
+<label>Plus 默认支付地区<select id="region_plus"><option value="">平台默认</option></select></label>
+<label>Pro 100 默认支付地区<select id="region_pro100"><option value="">平台默认</option></select></label>
+<label>Pro 200 默认支付地区<select id="region_pro200"><option value="">平台默认</option></select></label>
+<label>Pro 500 默认支付地区<select id="region_pro500"><option value="">平台默认</option></select></label>
+<label>下单服务费上限（USDT，可选）<input id="maxFee" inputmode="decimal" placeholder="由平台下单时校验；留空不设上限"></label>
+<div class="row span"><button>保存配置</button><button id="testApi" type="button" class="secondary">测试连接</button><button id="loadCatalog" type="button" class="secondary">查询套餐与余额</button><button id="loadRegions" type="button" class="secondary">读取各套餐可用地区</button></div>
+</form><p class="muted">每个套餐可单独选支付地区；留空时使用平台为该套餐标记的默认地区。请先保存 API Key 和域名，再读取可用地区。旧全局支付地区配置不再参与新订单。先检查账户可用余额，不足套餐金额则停止、锁定 CDK 并提醒联系管理员。次数可用的卡余额不足时自动补足差额；有剩余次数的卡异常或占用时锁定 CDK 并提示人工售后。无卡或当前套餐次数全满时自动申请新卡，首充固定 20 USD；管理员也可手动申请。Plus 4 次、Pro 100/200/500 各 1 次独立计数。预算不能填写平台服务费。</p></div>
 <div class="panel"><h2>套餐与平台余额</h2><pre id="catalog">点击“查询套餐与余额”获取当前信息。</pre></div>
+</section>
+<section id="cards" class="view" hidden>
+<div class="panel"><h2>平台卡片</h2><div class="row"><button id="syncCards" class="secondary">同步平台卡片</button><button id="loadCards" class="secondary">刷新本地记录</button><button id="loadProducts" class="secondary">查询开卡产品与参数</button></div><p class="muted">只读取卡片 ID、尾号、状态和余额，不获取完整卡号或 CVV。历史卡片首次登记需分别填写四种套餐的已有成功次数，确认后不能清零。每卡同一时间只处理一笔充值，四种套餐可混用。</p><div class="table-wrap"><table><thead><tr><th>卡 ID / 尾号</th><th>平台状态 / 余额</th><th>各套餐成功次数</th><th>任务占用</th><th>历史次数 / 对账</th></tr></thead><tbody id="cardRows"></tbody></table></div></div>
+<div class="panel"><h2>卡片消费交易（只读对账）</h2><p class="muted">选择卡片后查询脱敏交易摘要；交易记录用于排查，不据此自动核销 CDK 或退款。需要 API Key 的 transactions:read 权限。</p><div class="row"><label>卡 ID<input id="transactionCardId" type="number" min="1" inputmode="numeric"></label><label>页码<input id="transactionPage" type="number" min="1" value="1" inputmode="numeric"></label><button id="loadTransactions" class="secondary">查询交易</button></div><pre id="cardTransactions">尚未查询。</pre></div>
+<div class="panel"><h2>申请卡片</h2><p>每张新卡固定首充 20 USD，只选择最低首充不高于 20 的可用产品。充值任务会优先复用有次数额度的旧卡，并只补足至当前套餐预算 + 产品最低留存余额。提前手动申请的卡片在实际兑换时按需补款。</p><form id="applyCardForm" class="row"><label>申请关联套餐<select id="applyPlan"><option value="plus">Plus（该项最多 4 次）</option><option value="pro100">Pro 100（该项最多 1 次）</option><option value="pro200">Pro 200（该项最多 1 次）</option><option value="pro500">Pro 500（该项最多 1 次）</option></select></label><button>首充 20 USD 申请一张卡</button></form><pre id="products">点击“查询开卡产品与参数”可查看自动获取的产品码与开卡正文。产品码留空会自动选择；首充 20.00 USD、数量 1 自动填写，实际开卡前重新校验。单独开卡无需会员预算；CDK 兑换的套餐金额仍需明确配置。</pre></div>
+<div class="panel"><div class="row between"><h2>开卡申请记录</h2><button id="refreshIssues" class="secondary">确认原开卡 / 补款</button></div><p class="muted">结果待确认时保留同一申请身份，不更换产品或幂等键重开。</p><div class="table-wrap"><table><thead><tr><th>时间 / 申请标识</th><th>产品 / 首充 USD</th><th>本次套餐 / 状态</th><th>平台订单 / 卡 ID</th></tr></thead><tbody id="issueRows"></tbody></table></div></div>
+<div class="panel"><h2>卡片补款流水</h2><p class="muted">补款成功后还会核对卡片可用余额。未知结果保留原补款、卡片占用及 CDK；已知订单号只匹配原充值流水，不按金额或时间猜测。</p><div class="table-wrap"><table><thead><tr><th>时间 / 任务</th><th>卡 ID / 本次补款 USD</th><th>状态 / 平台订单</th><th>资金快照</th></tr></thead><tbody id="fundingRows"></tbody></table></div></div>
 </section>
 <section id="logs" class="view" hidden><div class="panel"><div class="row between"><h2>运行日志</h2><div class="row"><button id="loadLogs" class="secondary">刷新日志</button><button id="clearLogs" class="secondary">清空显示缓存</button></div></div><p class="muted">磁盘历史继续保留。逐笔订单日志请在订单列表下载。</p><pre id="runtimeLogs"></pre></div></section>
 <section id="settings" class="view" hidden>

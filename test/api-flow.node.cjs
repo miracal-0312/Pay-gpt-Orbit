@@ -53,6 +53,24 @@ test('existing Orbitcard or historical reservations resume even when new orders 
         const res = await f.request(); assert.equal(res.data.provider,provider); assert.equal(res.data.jobKey,'original-job'); assert.deepEqual(f.events,[]);
     }
 });
+test('a waiting payment retry resumes only with the same account and API Key',async () => {
+    const old=process.env.ORBITCARD_API_SECRET;process.env.ORBITCARD_API_SECRET='test-secret';
+    try {
+        const keyHash=require('node:crypto').createHash('sha256').update('key').digest('hex');
+        const f=fixture({verifyCdkDetails:async()=>({type:'自助',plan_type:'plus',used_at:'reserved'}),
+            getRunningTaskByCdk:async()=>({job_key:'attempt-2',status:'running',orbitcard_state:'retry_waiting',
+                orbitcard_client_order_no:'ORDER-2',orbitcard_retry_root_job_key:'attempt-1',orbitcard_retry_attempt_no:2,
+                orbitcard_retry_first_card_id:42,orbitcard_api_key_hash:keyHash,orbitcard_email:session.user.email,
+                orbitcard_base_url:'https://orbitcard.test'}),
+            claimOrbitcardRetryTask:async (...args)=>{f.events.push(['retry-claim',...args]);return true;},
+            createOrbitcardTask:async()=>{throw Error('must keep existing CDK chain');}});
+        assert.equal((await f.request({cdk:'CDK-TEST',session:JSON.stringify({...session,user:{email:'other@example.test'}})})).code,409);
+        const accepted=await f.request();assert.equal(accepted.code,200);
+        assert.equal(accepted.data.jobKey,'attempt-1');
+        assert.equal(f.events.filter(event=>event[0]==='retry-claim').length,1);
+        assert.equal(f.events.filter(event=>event[0]==='worker').length,1);
+    } finally {if(old===undefined)delete process.env.ORBITCARD_API_SECRET;else process.env.ORBITCARD_API_SECRET=old;}
+});
 test('admission capacity is reserved before an asynchronous task insert', async () => {
     const old = process.env.ORBITCARD_API_SECRET; process.env.ORBITCARD_API_SECRET = 'test-secret';
     let release, entered;
@@ -161,6 +179,7 @@ test('API-only HTTP server serves the new UI, protects management and has no ret
     const base = `http://127.0.0.1:${server.address().port}`;
     const home = await fetch(base); assert.equal(home.status,200); assert.ok((await home.text()).includes('/app.js'));
     assert.equal((await fetch(base+'/api/admin/data')).status,401);
+    assert.equal((await fetch(base+'/api/admin/orbitcard/cards')).status,401);
     const token = require('../admin-auth').issueAdminToken(1,'admin@example.test').token;
     const headers = { Authorization: `Bearer ${token}` };
     for (const route of ['/api/admin/browser-pool','/api/admin/cards','/api/admin/addresses','/api/admin/proxies','/api/admin/hcaptcha','/api/admin/checkout/plans','/api/admin/billing']) assert.equal((await fetch(base+route,{ headers })).status,404,route);

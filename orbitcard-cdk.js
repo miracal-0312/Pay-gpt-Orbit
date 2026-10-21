@@ -7,12 +7,16 @@ function clientOrderNo(cdk, attemptKey) {
     return `cdk-${crypto.createHash('sha256').update(JSON.stringify([String(cdk), String(attemptKey)])).digest('hex')}`;
 }
 
-function validOrder(data, { orderId, clientOrderNo: identity, planType, email }) {
+function validOrder(data, { orderId, clientOrderNo: identity, planType, email, cardId }) {
     const id = data?.orderId || data?.task_no;
-    if (!id || (data.orderId && data.task_no && data.orderId !== data.task_no)) return false;
+    if (typeof id !== 'string' || !id || id.length > 128
+        || (data.orderId && data.task_no && data.orderId !== data.task_no)) return false;
     if (orderId && id !== orderId) return false;
-    if (data.client_order_no && data.client_order_no !== identity) return false;
-    if (data.plan_type && data.plan_type !== planType) return false;
+    // Both fields are part of the documented subscription order. Missing values
+    // cannot establish ownership when a task number came from an uncertain POST.
+    if (!identity || data.client_order_no !== identity) return false;
+    if (planType && data.plan_type !== planType) return false;
+    if (data.card_id != null && cardId && Number(data.card_id) !== Number(cardId)) return false;
     if (data.targetEmail && email && String(data.targetEmail).toLowerCase() !== String(email).toLowerCase()) return false;
     return true;
 }

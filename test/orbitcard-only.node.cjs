@@ -29,6 +29,7 @@ test('third-party client always uses the signed Orbitcard routes, ignoring obsol
         const result = await client.testConnection({ provider: 'legacy', api_key: 'test-key' });
         assert.equal(result.success, true);
         assert.equal(result.plans[0].type, 'gpt-plus');
+        assert.equal(result.plans[0].service_fee, undefined);
         assert.deepEqual(calls.map(c => c.url), [
             'https://orbitcard.cc/api/open/v1/getSubscriptionPlans', 'https://orbitcard.cc/api/open/v1/getAccountBalance'
         ]);
@@ -93,11 +94,11 @@ test('new installs default to Orbitcard and remain disabled until configured', a
     assert.equal(values.gpt_api_protocol_version, config.PROTOCOL_VERSION);
 });
 
-test('enabling requires Key, platform card ID, HTTPS root URL and server secret', () => {
+test('enabling requires Key, HTTPS root URL and server secret; card selection is automatic', () => {
     const valid = { enabled: true, api_key: 'test-key', orbitcard_card_id: '42', base_url: 'https://orbitcard.test/' };
     assert.throws(() => config.prepareConfig(valid, {}, false));
     assert.throws(() => config.prepareConfig({ ...valid, api_key: '' }, {}, true));
-    assert.throws(() => config.prepareConfig({ ...valid, orbitcard_card_id: '' }, {}, true));
+    assert.equal(config.prepareConfig({ ...valid, orbitcard_card_id: '' }, {}, true).enabled, true);
     assert.throws(() => config.prepareConfig({ ...valid, base_url: 'https://orbitcard.test/api/v1' }, {}, true));
     assert.throws(() => config.prepareConfig({ ...valid, base_url: 'http://orbitcard.test' }, {}, true));
     assert.throws(() => config.prepareConfig({ ...valid, provider: 'legacy' }, {}, true));
@@ -111,6 +112,16 @@ test('saving an unchanged key and clearing optional fields works without protoco
     assert.equal(result.orbitcard_region, '');
     assert.equal(result.orbitcard_max_fee, '');
     assert.equal(result.base_url, config.DEFAULT_BASE_URL);
+});
+
+test('per-plan default regions are normalized and validated independently', () => {
+    const saved={api_key:'saved-test-key',orbitcard_region_plus:'US',orbitcard_region_pro200:'JP'};
+    const result=config.prepareConfig({orbitcard_region_plus:'ph',orbitcard_region_pro100:'',orbitcard_region_pro500:'cl'},saved,true);
+    assert.equal(result.orbitcard_region_plus,'PH');
+    assert.equal(result.orbitcard_region_pro100,'');
+    assert.equal(result.orbitcard_region_pro200,'JP');
+    assert.equal(result.orbitcard_region_pro500,'CL');
+    assert.throws(()=>config.prepareConfig({orbitcard_region_pro100:'USA'},saved,true),/默认支付地区/);
 });
 
 test('enabling third-party mode dispatches Orbitcard for a CDK without any provider selector', async () => {

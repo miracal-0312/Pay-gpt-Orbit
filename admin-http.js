@@ -9,7 +9,7 @@ const gptApi = require('./orbitcard-client');
 const runtimeLog = require('./runtime-log');
 const { buildAdminLoginUrl, buildAdminPanelUrl } = require('./admin-paths');
 const { notifyAdminSecurityEvent, sendTelegramLoginCode, sendTelegramTest } = require('./telegram-notify');
-module.exports = function registerAdmin(app, { store, ensureStoreReady, getTotalActiveJobs }) {
+module.exports = function registerAdmin(app, { store, ensureStoreReady, getTotalActiveJobs, cardService }) {
     let cachedAdminPaths = null;
     const ADMIN_REFRESH_AFTER_MS = adminAuth.ADMIN_REFRESH_AFTER_MS;
     const verifyPassword = adminAuth.verifyPassword;
@@ -386,6 +386,7 @@ app.get('/api/public/admin-paths', async (req, res) => {
     }
 });
 app.use('/api/admin', authenticateAdmin);
+require('./orbitcard-card-http')(app, { store, cardService, requireSecondaryAuth, audit: entry => runtimeLog.push(entry) });
 app.get('/api/admin/runtime-logs', authenticateAdmin, (req, res) => {
     try {
         const wantTail = String(req.query.tail || '') === '1' || String(req.query.tail || '') === 'true';
@@ -692,6 +693,13 @@ app.get('/api/admin/gpt-api', async (req, res) => {
                 orbitcard_card_id: cfg.orbitcard_card_id,
                 orbitcard_region: cfg.orbitcard_region,
                 orbitcard_max_fee: cfg.orbitcard_max_fee,
+                orbitcard_product_code: cfg.orbitcard_product_code,
+                orbitcard_safety_margin: cfg.orbitcard_safety_margin,
+                orbitcard_max_initial_amount: cfg.orbitcard_max_initial_amount,
+                ...Object.fromEntries(['plus','pro100','pro200','pro500'].flatMap(plan => [
+                    [`orbitcard_price_${plan}`, cfg[`orbitcard_price_${plan}`]],
+                    [`orbitcard_region_${plan}`, cfg[`orbitcard_region_${plan}`]]
+                ])),
                 orbitcard_secret_saved: Boolean(process.env.ORBITCARD_API_SECRET),
                 enabled: cfg.enabled,
                 base_url: cfg.base_url,

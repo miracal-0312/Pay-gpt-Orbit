@@ -25,8 +25,11 @@ function broadcast(jobKey, data) {
     for (const ws of clients.get(jobKey) || []) if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ jobKey, ...data }));
 }
 function publicOrder(task) {
-    return { provider: task.orbitcard_client_order_no ? 'orbitcard' : 'history', jobKey: task.job_key,
-        status: task.status, message: task.message, progress: Number(task.progress || 0),
+    return { provider: task.orbitcard_client_order_no ? 'orbitcard' : 'history',
+        jobKey: task.orbitcard_retry_root_job_key || task.job_key,
+        attemptJobKey: task.job_key, attempt: Number(task.orbitcard_retry_attempt_no || 1),
+        status: task.orbitcard_state === 'retry_waiting' ? 'retry' : task.status,
+        message: task.message, progress: Number(task.progress || 0),
         order_id: task.gpt_api_order_id || null, client_order_no: task.orbitcard_client_order_no || null,
         cdk_state: task.orbitcard_state === 'success' ? 'redeemed' : ['failed','rejected'].includes(task.orbitcard_state) ? 'available' : 'reserved',
         order: store.safeOrder(task.gpt_api_raw) };
@@ -37,38 +40,128 @@ async function notify(task) {
         email: task.orbitcard_email || '', cdk: task.cdk_code, jobKey: task.job_key, message: task.message
     });
 }
+const cardService = require('./orbitcard-card-service')({ store, audit: entry => runtimeLog.push(entry) });
 const recovery = require('./order-recovery')({ store, query: require('./orbitcard-query'), activeJobs,
-    audit: entry => runtimeLog.push(entry), notify });
+    audit: entry => runtimeLog.push(entry), notify,
+    reconcileCards: async () => cardService.recover(await store.getGptApiConfig()),
+    checkBalance: task => store.getGptApiConfig().then(cfg => cardService.canResumeBalance(cfg,task)) });
+let cardRecoveryAt = 0;
 
 async function runWorker({ task, session, cdk, planType }) {
-    const jobKey = task.jobKey;
+    let jobKey = task.jobKey;
+    const rootJobKey = task.orbitcardRetryRootJobKey || task.jobKey;
     let submitted = false;
     const setProgress = async (status, progress, message, extra = {}) => {
         const saved = await store.settleOrbitcardTask(jobKey, { status, progress, message, ...extra });
         if (!saved.applied) throw new Error('任务已结束或被替换');
         runtimeLog.push({ jobKey, source: 'orbitcard', event: 'task_state', text: message,
             data: { status, progress, orbitcard_state: extra.orbitcardState } });
-        broadcast(jobKey, { type: 'status', status, progress, message });
+        broadcast(rootJobKey, { type: 'status', status, progress, message });
     };
     try {
-        // Admission reserves the service config for this attempt; editing the setting cannot redirect it.
-        await require('./orbitcard-worker').run({ cfg: task.apiConfig, planType, session, cdk,
-            clientOrderNo: task.orbitcardClientOrderNo, attemptKey: jobKey, setProgress,
-            onSubmission: () => { submitted = true; }, sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
-            broadcast: captcha => {
-                if (captcha) activeChallenges.set(jobKey, captcha); else activeChallenges.delete(jobKey);
-                broadcast(jobKey, { type: 'orbitcard-captcha', captcha });
-            } });
+        while (true) {
+            submitted = false;
+            const attempt = Number(task.orbitcardRetryAttemptNo || 1);
+            if (!Number.isInteger(attempt) || attempt < 1 || attempt > 3) throw new Error('支付重试序号无效');
+            const selection = attempt === 2 ? { excludedCardIds: [task.orbitcardRetryFirstCardId] }
+                : attempt === 3 ? { excludedCardIds: [task.orbitcardRetryFirstCardId,task.orbitcardRetrySecondCardId] } : {};
+            if ((attempt >= 2 && !task.orbitcardRetryFirstCardId) || (attempt === 3 && !task.orbitcardRetrySecondCardId))
+                throw new Error('支付重试缺少已失败卡片记录');
+            // Each attempt has a new durable order identity; the service configuration stays fixed.
+            const result = await require('./orbitcard-worker').run({ cfg: task.apiConfig, planType, session, cdk,
+                clientOrderNo: task.orbitcardClientOrderNo, attemptKey: jobKey, setProgress,
+                selectCard: async () => {
+                    await setProgress('running', 10, `正在准备第 ${attempt}/3 次支付尝试...`, {
+                        orbitcardState: 'prepared', expectedState: 'prepared', expectedClientOrderNo: task.orbitcardClientOrderNo
+                    });
+                    return cardService.allocate(task.apiConfig, jobKey, planType, selection);
+                },
+                onSubmission: () => { submitted = true; }, sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
+                onConfirmedFailure: async failure => {
+                    const recorded = await store.recordOrbitcardPaymentFailure(jobKey, failure);
+                    if (!recorded.applied) throw new Error('支付失败记录已被其他执行者处理，保留原订单核对');
+                    try { log(jobKey, `第 ${attempt}/3 次支付已明确失败，卡 ID ${failure.cardId}`, 'payment_attempt_failed'); }
+                    catch (_) { /* durable retry state is already committed */ }
+                    if (recorded.nextTask) activeJobs.add(recorded.nextTask.jobKey);
+                    return recorded;
+                },
+                onRejectedSubmission: attempt > 1 ? async rejection => {
+                    const message = '支付重试订单被平台明确拒绝，CDK 已锁定；请联系人工售后';
+                    const locked = await store.lockOrbitcardSupport(jobKey, 'submitting', message, rejection);
+                    if (!locked.applied) throw new Error('支付重试拒绝结果待核对，保留原订单和 CDK');
+                    log(jobKey, message, 'payment_retry_rejected');
+                    broadcast(rootJobKey, { type: 'status', status: 'failed', message });
+                    return { supportLocked: true };
+                } : undefined,
+                broadcast: captcha => {
+                    if (captcha) activeChallenges.set(jobKey, captcha); else activeChallenges.delete(jobKey);
+                    broadcast(rootJobKey, { type: 'orbitcard-captcha', captcha });
+                } });
+            if (!result?.nextTask) break;
+            activeChallenges.delete(jobKey);
+            activeJobs.delete(jobKey);
+            task = { ...result.nextTask, apiConfig: task.apiConfig };
+            jobKey = task.jobKey;
+            submitted = false;
+            activeJobs.add(jobKey);
+            if (!await store.claimOrbitcardRetryTask(jobKey, task.orbitcardClientOrderNo)) {
+                throw new Error('下一次支付尝试尚未取得执行权，保留 CDK 并等待重新提交 Session');
+            }
+        }
         const settled = await store.getTaskStatus(jobKey);
         if (settled) await notify(settled).catch(() => log(jobKey, '任务已结算，通知发送失败', 'notification_failed'));
-    } catch (_) {
-        const message = submitted ? 'Orbitcard 提交结果待确认，请查询原订单，勿重复充值' : 'Orbitcard 提交前异常，请检查配置或查询原订单';
+        if (settled?.status === 'success' && settled.orbitcard_card_id) {
+            await cardService.reconcile(task.apiConfig,settled.orbitcard_card_id,jobKey)
+                .catch(() => log(jobKey,'订阅已成功，卡片资金只读核对暂不可用，请稍后在后台查询','payment_reconciliation_pending'));
+        }
+    } catch (error) {
+        if (!submitted && error instanceof require('./orbitcard-card-policy').CardSwitchExhaustedError) {
+            try {
+                const locked=await store.lockOrbitcardSupport(jobKey,'prepared',error.message,{cardSelectionExhausted:true});
+                if(locked.applied) {
+                    runtimeLog.push({jobKey,source:'orbitcard',event:'card_selection_support_locked',text:error.message});
+                    broadcast(rootJobKey,{type:'status',status:'failed',message:error.message});
+                    const latest=await store.getTaskStatus(jobKey);
+                    if(latest) await notify(latest).catch(()=>{});
+                }
+            } catch(lockError) {
+                log(jobKey,'异常卡片售后锁定待数据库恢复确认','card_selection_lock_pending');
+            }
+            return;
+        }
+        if (!submitted && error instanceof require('./orbitcard-card-policy').AccountBalanceError) {
+            // The allocator persisted the locked state before raising this error.
+            broadcast(rootJobKey,{type:'status',status:'failed',message:error.message});
+            const latest=await store.getTaskStatus(jobKey).catch(() => null);
+            if(latest) await notify(latest).catch(() => {});
+            log(jobKey,error.message,'account_balance_blocked');
+            return;
+        }
+        let cardPending = false, fundingPending = false;
+        if (!submitted) {
+            try {
+                const issue = await store.getCardIssueForTask(jobKey);
+                cardPending = Boolean(issue && !['ready','failed'].includes(issue.state));
+                const funding=await store.getCardFundingForTask(jobKey);
+                fundingPending=Boolean(funding && !['ready','failed'].includes(funding.state));
+            } catch (_) { /* settlement itself will preserve the reservation if the database is unavailable */ }
+        }
+        const retryAttempt = Number(task.orbitcardRetryAttemptNo || 1);
+        const message = submitted ? 'Orbitcard 提交结果待确认，请查询原订单，勿重复充值' : fundingPending
+            ? '原支付卡补款仍在处理中或待核对；会员充值尚未提交，已锁定卡片和 CDK，请继续查询原任务' : cardPending
+            ? '支付卡申请仍在处理中或待核对；会员充值尚未提交，已保留 CDK，请继续查询原任务'
+            : retryAttempt > 1 ? '支付重试未能安全完成，CDK 已锁定；请联系人工售后'
+            : error instanceof require('./orbitcard-card-policy').CardPreparationError
+                ? `${error.message}；本次会员充值未提交，CDK 已释放` : 'Orbitcard 提交前异常，请检查配置或查询原订单';
         // Persist before logging: a logging error must not prevent preservation of order ownership.
         try {
-            const result = await store.settleOrbitcardTask(jobKey, { status: submitted ? 'manual' : 'failed', progress: 0,
-                message, orbitcardState: submitted ? 'manual' : 'rejected', ...(submitted ? {} : { expectedState: 'prepared' }) });
+            const nextStatus = submitted || cardPending || fundingPending ? 'manual' : 'failed';
+            const result = !submitted && !cardPending && !fundingPending && retryAttempt > 1
+                ? await store.lockOrbitcardSupport(jobKey, 'prepared', message)
+                : await store.settleOrbitcardTask(jobKey, { status: nextStatus, progress: 0,
+                    message, orbitcardState: submitted ? 'manual' : fundingPending ? 'funding_pending' : cardPending ? 'card_pending' : 'rejected', ...(submitted ? {} : { expectedState: 'prepared' }) });
             if (result.applied) {
-                broadcast(jobKey, { type: 'status', status: submitted ? 'manual' : 'failed', message });
+                broadcast(rootJobKey, { type: 'status', status: nextStatus, message });
                 const latest = await store.getTaskStatus(jobKey);
                 if (latest) await notify(latest).catch(() => {});
             }
@@ -80,7 +173,7 @@ async function runWorker({ task, session, cdk, planType }) {
 app.disable('x-powered-by');
 app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '256kb' }));
 app.use((req, res, next) => { if (req.path.startsWith('/api/')) res.set('Cache-Control', 'no-store'); next(); });
-require('./admin-http')(app, { store, ensureStoreReady, getTotalActiveJobs: () => activeJobs.size });
+require('./admin-http')(app, { store, ensureStoreReady, getTotalActiveJobs: () => activeJobs.size, cardService });
 
 app.get('/api/public/runtime', async (req, res, next) => {
     try {
@@ -130,9 +223,9 @@ async function describeCdk(cdk) {
     if (!code) return null;
     const task = await store.getRunningTaskByCdk(cdk);
     return { type: code.type, plan_type: code.plan_type, plan_label: PLAN_LABELS[code.plan_type] || code.plan_type,
-        status: task ? task.status === 'running' ? 'processing' : task.status : code.used_at ? 'used' : 'unused',
+        status: task ? task.orbitcard_state === 'retry_waiting' ? 'retry' : task.status === 'running' ? 'processing' : task.status : code.used_at ? 'used' : 'unused',
         provider: task ? task.orbitcard_client_order_no ? 'orbitcard' : 'history' : 'orbitcard',
-        jobKey: task?.job_key, message: task?.message || (code.used_at ? 'CDK 已使用' : 'CDK 可兑换'),
+        jobKey: task?.orbitcard_retry_root_job_key || task?.job_key, message: task?.message || (code.used_at ? 'CDK 已使用' : 'CDK 可兑换'),
         shipped: Boolean(code.shipped_at), usedAt: code.used_at };
 }
 app.post('/api/verify-cdk', async (req, res, next) => {
@@ -182,7 +275,14 @@ async function start() {
         ws.on('close', unsubscribe);
         ws.on('error', unsubscribe);
     });
-    const tick = () => recovery.recover().catch(() => log('', '后台查单暂不可用，下次继续', 'recovery_error'));
+    const tick = () => {
+        recovery.recover().catch(() => log('', '后台查单暂不可用，下次继续', 'recovery_error'));
+        if (Date.now() >= cardRecoveryAt) {
+            cardRecoveryAt = Date.now() + 60000;
+            store.getGptApiConfig().then(cfg => cardService.recover(cfg))
+                .catch(() => log('', '原开卡申请恢复暂不可用，下次继续', 'card_recovery_error'));
+        }
+    };
     tick();
     recoveryTimer = setInterval(tick, 5000);
     recoveryTimer.unref();
