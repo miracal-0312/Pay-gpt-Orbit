@@ -27,8 +27,7 @@ module.exports = function createActivationHandler({ store, ensureStoreReady, act
             if (isDraining() || maintenance.enabled) return res.status(503).json({ success: false, message: '系统暂停接单，请稍后再试' });
             const cfg = await store.getGptApiConfig();
             if (!cfg.enabled) return res.status(503).json({ success: false, message: 'Orbitcard 充值暂未开放，请联系管理员' });
-            if (cfg.orbitcard_secret_error) throw new Error('已保存的 Orbitcard API Secret 无法解密');
-            config.prepareConfig({}, cfg, Boolean(cfg.api_secret || process.env.ORBITCARD_API_SECRET));
+            config.prepareConfig({}, cfg, Boolean(String(process.env.ORBITCARD_API_SECRET || '').trim()));
             const apiKeyHash = crypto.createHash('sha256').update(String(cfg.api_key || '')).digest('hex');
             if (resume && (!existing.orbitcard_api_key_hash || existing.orbitcard_api_key_hash !== apiKeyHash
                 || String(existing.orbitcard_email || '').toLowerCase() !== session.user.email.toLowerCase()

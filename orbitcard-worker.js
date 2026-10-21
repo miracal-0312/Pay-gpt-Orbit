@@ -24,8 +24,7 @@ async function run({ cfg, planType, session, cdk, setProgress, onSubmission, bro
     if (!session || typeof session !== 'object' || !(session.accessToken || session.access_token) || !session.user || !session.account) {
         throw new Error('Orbitcard 需要目标账号完整 Session JSON（含 user、account、accessToken）');
     }
-    if (cfg.orbitcard_secret_error) throw new Error('已保存的 Orbitcard API Secret 无法解密');
-    if (!cfg.api_secret && !process.env.ORBITCARD_API_SECRET) throw new Error('尚未配置 Orbitcard API Secret');
+    if (!String(process.env.ORBITCARD_API_SECRET || '').trim()) throw new Error('服务端尚未配置 ORBITCARD_API_SECRET');
     const plans = await api.fetchPlans(cfg);
     if (!plans.success) throw new CardPreparationError(plans.error || 'Orbitcard 套餐查询失败，请稍后重试');
     if (!plans.plans.some(p => p.type === plan)) throw new CardPreparationError('Orbitcard 当前未开放此套餐');

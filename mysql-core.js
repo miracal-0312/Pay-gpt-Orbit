@@ -3,7 +3,6 @@
 const crypto = require('node:crypto');
 const mysql = require('mysql2/promise');
 const orbitcardConfig = require('./orbitcard-config');
-const orbitcardSecret = require('./orbitcard-secret');
 const { normalizeAdminPaths } = require('./admin-paths');
 let pool = null;
 const DB_HOST = process.env.DB_HOST || '127.0.0.1';
@@ -15,7 +14,7 @@ const DEFAULT_ADMIN_EMAIL = String(process.env.ADMIN_EMAIL || 'admin@vru.cc').tr
 const DEFAULT_ADMIN_LOGIN_PATH = String(process.env.ADMIN_LOGIN_PATH || 'admin-login').trim().toLowerCase();
 const DEFAULT_ADMIN_PANEL_PATH = String(process.env.ADMIN_PANEL_PATH || 'admin').trim().toLowerCase();
 const GPT_API_CONFIG_KEYS = [
-    'gpt_api_enabled', 'gpt_api_base_url', 'gpt_api_key', 'gpt_api_protocol_version', 'orbitcard_api_secret_ciphertext',
+    'gpt_api_enabled', 'gpt_api_base_url', 'gpt_api_protocol_version',
     'orbitcard_region', 'orbitcard_max_fee', 'orbitcard_product_code', 'orbitcard_safety_margin', 'orbitcard_max_initial_amount',
     'orbitcard_price_plus', 'orbitcard_price_pro100', 'orbitcard_price_pro200', 'orbitcard_price_pro500',
     'orbitcard_region_plus', 'orbitcard_region_pro100', 'orbitcard_region_pro200', 'orbitcard_region_pro500'
@@ -95,7 +94,7 @@ async function ensureGptApiConfigDefaults() {
         const rows = await runQuery(`SELECT config_key, config_value FROM app_config WHERE config_key IN (${keys.map(() => '?').join(', ')}) FOR UPDATE`, keys, options);
         const saved = Object.fromEntries(rows.map(row => [row.config_key, row.config_value]));
         const defaults = { gpt_api_enabled: '0', gpt_api_base_url: orbitcardConfig.DEFAULT_BASE_URL,
-            gpt_api_key: '', orbitcard_region: '', orbitcard_max_fee: '',
+            orbitcard_region: '', orbitcard_max_fee: '',
             orbitcard_product_code: '', orbitcard_safety_margin: '1', orbitcard_max_initial_amount: '',
             orbitcard_price_plus: '', orbitcard_price_pro100: '', orbitcard_price_pro200: '', orbitcard_price_pro500: '',
             orbitcard_region_plus: '', orbitcard_region_pro100: '', orbitcard_region_pro200: '', orbitcard_region_pro500: '' };
@@ -108,6 +107,12 @@ async function ensureGptApiConfigDefaults() {
         }
         const retired = orbitcardConfig.RETIRED_CONFIG_KEYS;
         await runExecute(`DELETE FROM app_config WHERE config_key IN (${retired.map(() => '?').join(', ')})`, retired, options);
+        // Keep legacy credentials until both environment values are present, then remove
+        // them from the database. They are never used for requests in either case.
+        if (String(process.env.ORBITCARD_API_KEY || '').trim() && String(process.env.ORBITCARD_API_SECRET || '').trim()) {
+            await runExecute('DELETE FROM app_config WHERE config_key IN (?, ?)',
+                ['gpt_api_key', 'orbitcard_api_secret_ciphertext'], options);
+        }
     });
 }
 
@@ -115,18 +120,11 @@ async function getGptApiConfig() {
     const rows = await runQuery(`SELECT config_key, config_value FROM app_config
         WHERE config_key IN (${GPT_API_CONFIG_KEYS.map(() => '?').join(', ')})`, GPT_API_CONFIG_KEYS);
     const map = Object.fromEntries(rows.map(row => [row.config_key, row.config_value]));
-    let apiSecret = '', secretError = false;
-    if (map.orbitcard_api_secret_ciphertext) {
-        try { apiSecret = orbitcardSecret.open(map.orbitcard_api_secret_ciphertext); }
-        catch (_) { secretError = true; }
-    } else apiSecret = String(process.env.ORBITCARD_API_SECRET || '');
     return {
         provider: 'orbitcard',
         enabled: map.gpt_api_enabled === '1',
         base_url: String(map.gpt_api_base_url || orbitcardConfig.DEFAULT_BASE_URL).trim(),
-        api_key: String(map.gpt_api_key || '').trim(),
-        api_secret: apiSecret,
-        orbitcard_secret_error: secretError,
+        api_key: String(process.env.ORBITCARD_API_KEY || '').trim(),
         orbitcard_region: String(map.orbitcard_region || ''),
         orbitcard_max_fee: String(map.orbitcard_max_fee || ''),
         orbitcard_product_code: String(map.orbitcard_product_code || ''),
@@ -140,18 +138,13 @@ async function getGptApiConfig() {
 }
 
 async function saveGptApiConfig(input = {}) {
+    if (Object.hasOwn(input, 'api_key') || Object.hasOwn(input, 'api_secret')) {
+        throw new Error('API Key 和 API Secret 只能在服务器环境变量中配置');
+    }
     const existing = await getGptApiConfig();
-    const newSecret = String(input.api_secret || '').trim();
-    const nextSecret = newSecret || existing.api_secret;
-    if (existing.orbitcard_secret_error && !newSecret && input.enabled !== false) {
-        throw new Error('已保存的 API Secret 无法解密，请重新填写配对的 Secret');
-    }
-    if (input.api_key && String(input.api_key).trim() !== existing.api_key && !newSecret) {
-        throw new Error('更换 API Key 时请同时填写配对的 API Secret');
-    }
-    const cfg = orbitcardConfig.prepareConfig(input, existing, Boolean(nextSecret));
+    const cfg = orbitcardConfig.prepareConfig(input, existing, Boolean(String(process.env.ORBITCARD_API_SECRET || '').trim()));
     const values = { gpt_api_enabled: cfg.enabled ? '1' : '0', gpt_api_base_url: cfg.base_url,
-        gpt_api_key: cfg.api_key, gpt_api_protocol_version: orbitcardConfig.PROTOCOL_VERSION,
+        gpt_api_protocol_version: orbitcardConfig.PROTOCOL_VERSION,
         orbitcard_region: cfg.orbitcard_region, orbitcard_max_fee: cfg.orbitcard_max_fee,
         orbitcard_product_code: cfg.orbitcard_product_code, orbitcard_safety_margin: cfg.orbitcard_safety_margin,
         orbitcard_max_initial_amount: cfg.orbitcard_max_initial_amount,
@@ -159,7 +152,6 @@ async function saveGptApiConfig(input = {}) {
             [`orbitcard_price_${plan}`, cfg[`orbitcard_price_${plan}`]],
             [`orbitcard_region_${plan}`, cfg[`orbitcard_region_${plan}`]]
         ])) };
-    if (newSecret) values.orbitcard_api_secret_ciphertext = orbitcardSecret.seal(newSecret);
     await withTransaction(async connection => {
         for (const [key, value] of Object.entries(values)) {
             await runExecute(`INSERT INTO app_config (config_key, config_value) VALUES (?, ?)

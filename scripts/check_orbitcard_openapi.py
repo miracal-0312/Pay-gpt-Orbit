@@ -79,15 +79,14 @@ def load_config(path: Path) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("配置文件顶层必须是 JSON 对象")
     base_url = validate_base_url(raw.get("base_url", "https://orbitcard.cc"))
-    api_key = str(raw.get("api_key") or os.environ.get("ORBITCARD_API_KEY") or "").strip()
-    env_name = str(raw.get("api_secret_env") or "ORBITCARD_API_SECRET").strip()
-    if not env_name.isidentifier():
-        raise ValueError("api_secret_env 必须是环境变量名")
-    api_secret = str(raw.get("api_secret") or os.environ.get(env_name) or "").strip()
+    if any(key in raw for key in ("api_key", "api_secret", "api_secret_env")):
+        raise ValueError("API Key 和 API Secret 只能通过环境变量配置，不能写入 JSON 文件")
+    api_key = str(os.environ.get("ORBITCARD_API_KEY") or "").strip()
+    api_secret = str(os.environ.get("ORBITCARD_API_SECRET") or "").strip()
     if not api_key or api_key.upper().startswith("REPLACE"):
-        raise ValueError("请在配置中填写 api_key，或设置 ORBITCARD_API_KEY")
+        raise ValueError("请设置环境变量 ORBITCARD_API_KEY")
     if not api_secret or api_secret.upper().startswith("REPLACE"):
-        raise ValueError(f"请设置 {env_name}，或在配置中填写 api_secret")
+        raise ValueError("请设置环境变量 ORBITCARD_API_SECRET")
     max_cards = raw.get("max_cards", 20)
     if type(max_cards) is not int or not 1 <= max_cards <= 1000:
         raise ValueError("max_cards 必须是 1–1000 的整数")

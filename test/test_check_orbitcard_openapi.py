@@ -5,6 +5,7 @@ import hmac
 import importlib.util
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -44,6 +45,20 @@ class FakeClient:
 
 
 class OpenApiProbeTests(unittest.TestCase):
+    def test_config_reads_credentials_only_from_environment(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "probe.json"
+            path.write_text('{"base_url":"https://orbitcard.cc"}', encoding="utf-8")
+            with mock.patch.dict(probe.os.environ, {
+                    "ORBITCARD_API_KEY": "environment-key",
+                    "ORBITCARD_API_SECRET": "environment-secret"}):
+                loaded = probe.load_config(path)
+                self.assertEqual(loaded["api_key"], "environment-key")
+                self.assertEqual(loaded["api_secret"], "environment-secret")
+                path.write_text('{"api_key":"browser-key"}', encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "只能通过环境变量"):
+                    probe.load_config(path)
+
     def test_signature_uses_exact_ten_line_canonical_request(self):
         config = {"base_url": "https://orbitcard.cc", "api_key": "example-key", "api_secret": "example-secret"}
         client = probe.OrbitcardClient(config)

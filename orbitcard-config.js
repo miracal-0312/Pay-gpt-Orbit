@@ -17,7 +17,7 @@ function migrationValues(saved) {
     const changes = { gpt_api_protocol_version: PROTOCOL_VERSION };
     if (saved.gpt_api_provider !== 'orbitcard') {
         // A credential for the retired service must never be forwarded to Orbitcard.
-        Object.assign(changes, { gpt_api_enabled: '0', gpt_api_key: '', gpt_api_base_url: DEFAULT_BASE_URL });
+        Object.assign(changes, { gpt_api_enabled: '0', gpt_api_base_url: DEFAULT_BASE_URL });
     }
     return changes;
 }
@@ -28,7 +28,7 @@ function prepareConfig(input, existing = {}, secretAvailable = false) {
     const cfg = {
         enabled: input.enabled == null ? Boolean(existing.enabled) : Boolean(input.enabled),
         base_url: normalizeBaseUrl(input.base_url || existing.base_url || DEFAULT_BASE_URL),
-        api_key: String(input.api_key || existing.api_key || '').trim(),
+        api_key: String(process.env.ORBITCARD_API_KEY || '').trim(),
         orbitcard_region: String(input.orbitcard_region ?? existing.orbitcard_region ?? '').trim().toUpperCase(),
         orbitcard_max_fee: String(input.orbitcard_max_fee ?? existing.orbitcard_max_fee ?? '').trim(),
         orbitcard_product_code: String(input.orbitcard_product_code ?? existing.orbitcard_product_code ?? '').trim(),
@@ -49,7 +49,7 @@ function prepareConfig(input, existing = {}, secretAvailable = false) {
     if (!/^\d+(?:\.\d{1,2})?$/.test(cfg.orbitcard_safety_margin) || Number(cfg.orbitcard_safety_margin) > 100) throw new Error('开卡安全余量必须为 0–100 USD，最多两位小数');
     if (cfg.orbitcard_max_initial_amount && (!/^\d+(?:\.\d{1,2})?$/.test(cfg.orbitcard_max_initial_amount) || Number(cfg.orbitcard_max_initial_amount) <= 0 || Number(cfg.orbitcard_max_initial_amount) > 99999999)) throw new Error('单卡首充上限必须为正数，最多两位小数');
     if (cfg.enabled && (!cfg.api_key || !secretAvailable)) {
-        throw new Error('启用 Orbitcard 前必须配置配对的 API Key 和 API Secret');
+        throw new Error('启用 Orbitcard 前请在服务器环境变量配置 ORBITCARD_API_KEY 和 ORBITCARD_API_SECRET');
     }
     return cfg;
 }

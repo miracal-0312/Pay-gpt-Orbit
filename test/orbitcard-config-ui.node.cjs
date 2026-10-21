@@ -15,49 +15,60 @@ function load(name, mocks = {}) {
     return module.exports;
 }
 
-test('UI-saved API Secret is encrypted, reused, and never returned as a browser config field', async () => {
-    const previous = process.env.ADMIN_TOKEN_SECRET;
-    process.env.ADMIN_TOKEN_SECRET = 'fixture-admin-signing-key-with-at-least-32-bytes';
-    const rows = new Map();
+test('Orbitcard credentials come only from environment, never admin input or old database rows', async () => {
+    const oldKey = process.env.ORBITCARD_API_KEY, oldSecret = process.env.ORBITCARD_API_SECRET;
+    process.env.ORBITCARD_API_KEY = 'environment-key';
+    process.env.ORBITCARD_API_SECRET = 'environment-secret';
+    const rows = new Map([['gpt_api_enabled', '1'], ['gpt_api_key', 'obsolete-database-key'],
+        ['orbitcard_api_secret_ciphertext', 'obsolete-ciphertext']]);
     const connection = {
         async beginTransaction() {}, async commit() {}, async rollback() {}, release() {},
-        async execute(_sql, [key, value]) { rows.set(key, value); return [{}]; }
+        async query() { return [[...rows].map(([config_key, config_value]) => ({ config_key, config_value }))]; },
+        async execute(sql, params) {
+            if (sql.startsWith('DELETE')) params.forEach(key => rows.delete(key));
+            else rows.set(params[0], params[1]);
+            return [{}];
+        }
     };
     const mysql = { createPool: () => ({
         async query() { return [[...rows].map(([config_key, config_value]) => ({ config_key, config_value }))]; },
-        async execute(_sql, [key, value]) { rows.set(key, value); return [{}]; },
+        async execute(sql, params) { return connection.execute(sql, params); },
         async getConnection() { return connection; }
     }) };
     try {
         const core = load('mysql-core.js', { 'mysql2/promise': mysql });
-        await core.saveGptApiConfig({ enabled: true, base_url: 'https://orbitcard.test',
-            api_key: 'key-one', api_secret: 'private-secret-one' });
-        const ciphertext = rows.get('orbitcard_api_secret_ciphertext');
-        assert.match(ciphertext, /^v1:/);
-        assert.ok(!JSON.stringify([...rows]).includes('private-secret-one'));
-        assert.equal((await core.getGptApiConfig()).api_secret, 'private-secret-one');
-        assert.equal(Object.hasOwn(await core.getGptApiConfig(), 'orbitcard_card_id'), false);
-        await core.saveGptApiConfig({ enabled: true, api_key: '', api_secret: '' });
-        assert.equal(rows.get('orbitcard_api_secret_ciphertext'), ciphertext);
-        await assert.rejects(core.saveGptApiConfig({ api_key: 'key-two' }), /配对的 API Secret/);
-        await core.saveGptApiConfig({ api_key: 'key-two', api_secret: 'private-secret-two' });
-        assert.equal((await core.getGptApiConfig()).api_secret, 'private-secret-two');
+        const config = await core.getGptApiConfig();
+        assert.equal(config.api_key, 'environment-key');
+        assert.equal(Object.hasOwn(config, 'api_secret'), false);
+        assert.equal(Object.hasOwn(config, 'orbitcard_card_id'), false);
+        await assert.rejects(core.saveGptApiConfig({ api_key: 'browser-key' }), /环境变量/);
+        await assert.rejects(core.saveGptApiConfig({ api_secret: 'browser-secret' }), /环境变量/);
+        await core.saveGptApiConfig({ enabled: true, base_url: 'https://orbitcard.test' });
+        assert.equal(rows.get('gpt_api_base_url'), 'https://orbitcard.test');
+        await core.ensureGptApiConfigDefaults();
+        assert.equal(rows.has('gpt_api_key'), false);
+        assert.equal(rows.has('orbitcard_api_secret_ciphertext'), false);
 
+        delete process.env.ORBITCARD_API_KEY;
+        await assert.rejects(core.saveGptApiConfig({ enabled: true }), /ORBITCARD_API_KEY/);
         const html = fs.readFileSync(path.resolve(__dirname, '../public/admin.html'), 'utf8');
-        const adminRoute = fs.readFileSync(path.resolve(__dirname, '../admin-http.js'), 'utf8');
-        assert.match(html, /id="apiSecret"/);
-        assert.match(html, /id="cardIdPreview"/);
-        assert.doesNotMatch(html, /id="orbitcardCardId"|id="transactionCardId" type="number"/);
-        assert.doesNotMatch(adminRoute, /orbitcard_card_id: cfg\.orbitcard_card_id/);
+        const script = fs.readFileSync(path.resolve(__dirname, '../public/admin.js'), 'utf8');
+        assert.match(html, /ORBITCARD_API_KEY/);
+        assert.match(html, /ORBITCARD_API_SECRET/);
+        assert.doesNotMatch(html, /id="apiKey"|id="apiSecret"/);
+        assert.doesNotMatch(script, /api_key:\s*\$|api_secret:\s*\$/);
     } finally {
-        if (previous === undefined) delete process.env.ADMIN_TOKEN_SECRET;
-        else process.env.ADMIN_TOKEN_SECRET = previous;
+        if (oldKey === undefined) delete process.env.ORBITCARD_API_KEY;
+        else process.env.ORBITCARD_API_KEY = oldKey;
+        if (oldSecret === undefined) delete process.env.ORBITCARD_API_SECRET;
+        else process.env.ORBITCARD_API_SECRET = oldSecret;
     }
 });
 
-test('client signs with the UI-managed Secret when an old environment Secret also exists', async () => {
-    const previous = process.env.ORBITCARD_API_SECRET;
-    process.env.ORBITCARD_API_SECRET = 'old-environment-secret';
+test('client signs with environment Secret even if config contains an obsolete Secret', async () => {
+    const previous = process.env.ORBITCARD_API_SECRET, previousKey = process.env.ORBITCARD_API_KEY;
+    process.env.ORBITCARD_API_SECRET = 'environment-secret';
+    process.env.ORBITCARD_API_KEY = 'environment-key';
     let outgoing;
     const api = load('orbitcard-client.js', {
         axios: { request: async args => { outgoing = args; return { status: 200,
@@ -65,37 +76,20 @@ test('client signs with the UI-managed Secret when an old environment Secret als
         './runtime-log': { push() {} }
     });
     try {
-        assert.equal((await api.request({ api_key: 'key', api_secret: 'ui-secret', base_url: 'https://orbitcard.test' }, 'getAccountBalance')).success, true);
-        const bodyHash = crypto.createHash('sha256').update(outgoing.data).digest('hex');
+        assert.equal((await api.request({ api_key: 'forged-config-key', api_secret: 'obsolete-secret',
+            base_url: 'https://orbitcard.test' }, 'getAccountBalance')).success, true);
         const h = outgoing.headers;
-        const canonical = ['ORBITCARD-HMAC-SHA256-V1', 'key', h['X-Timestamp'], h['X-Nonce'],
-            'POST', 'orbitcard.test', '/api/open/v1/getAccountBalance', '', bodyHash, ''].join('\n');
-        assert.equal(h['X-Signature'], crypto.createHmac('sha256', 'ui-secret').update(canonical).digest('hex'));
-        assert.ok(!JSON.stringify(outgoing).includes('ui-secret'));
-        outgoing = null;
-        const invalid = await api.request({ api_key: 'key', orbitcard_secret_error: true,
-            base_url: 'https://orbitcard.test' }, 'getAccountBalance');
-        assert.equal(invalid.success, false);
-        assert.equal(outgoing, null);
+        const canonical = ['ORBITCARD-HMAC-SHA256-V1', 'environment-key', h['X-Timestamp'], h['X-Nonce'],
+            'POST', 'orbitcard.test', '/api/open/v1/getAccountBalance', '',
+            crypto.createHash('sha256').update(outgoing.data).digest('hex'), ''].join('\n');
+        assert.equal(h['X-Signature'], crypto.createHmac('sha256', 'environment-secret').update(canonical).digest('hex'));
+        assert.equal(h['X-API-Key'], 'environment-key');
+        assert.ok(!JSON.stringify(outgoing).includes('environment-secret'));
     } finally {
         if (previous === undefined) delete process.env.ORBITCARD_API_SECRET;
         else process.env.ORBITCARD_API_SECRET = previous;
-    }
-});
-
-test('encrypted Secret rejects tampering and a changed administrator signing key', () => {
-    const previous = process.env.ADMIN_TOKEN_SECRET;
-    const secret = load('orbitcard-secret.js');
-    try {
-        process.env.ADMIN_TOKEN_SECRET = 'first-signing-key-with-at-least-32-bytes';
-        const encrypted = secret.seal('fixture-secret');
-        assert.equal(secret.open(encrypted), 'fixture-secret');
-        assert.throws(() => secret.open(`${encrypted}x`), /无法解密/);
-        process.env.ADMIN_TOKEN_SECRET = 'second-signing-key-with-at-least-32-bytes';
-        assert.throws(() => secret.open(encrypted), /无法解密/);
-    } finally {
-        if (previous === undefined) delete process.env.ADMIN_TOKEN_SECRET;
-        else process.env.ADMIN_TOKEN_SECRET = previous;
+        if (previousKey === undefined) delete process.env.ORBITCARD_API_KEY;
+        else process.env.ORBITCARD_API_KEY = previousKey;
     }
 });
 

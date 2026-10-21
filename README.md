@@ -12,14 +12,14 @@
 
 ```bash
 cp .env.example .env
-# 填写数据库密码、管理员密码和随机签名密钥
+# 填写数据库密码、管理员密码、随机签名密钥，以及配对的 ORBITCARD_API_KEY / ORBITCARD_API_SECRET
 docker compose up -d --build
 docker compose logs -f app
 ```
 
 默认用户入口 `http://localhost:3000/`，管理员入口 `http://localhost:3000/admin-login`。首次创建管理员需要至少 8 位的登录密码、二级密码；`ADMIN_TOKEN_SECRET` 每次启动都必须为至少 32 字节的随机值。
 
-后台配置配对的 Orbitcard API Key、API Secret 和 HTTPS 根域名，可选开卡产品及单卡首充上限，填写四档套餐 USD 单次预算。Secret 只在服务端用 `ADMIN_TOKEN_SECRET` 派生的密钥加密保存，不回显给浏览器；已有 `ORBITCARD_API_SECRET` 环境变量仍可作为旧部署的后备配置。更换 `ADMIN_TOKEN_SECRET` 后必须在后台重新填写 Orbitcard Secret。每档套餐可单独指定支付地区；留空时下单不传 `payment_region`，由平台选择默认地区，即使地区目录没有 `default=true` 标记也可正常提交。保存 API 配置后可读取各套餐可用地区，也会显示从平台卡列表自动读取的卡 ID 摘要；兑换时会重新从平台取卡，不使用后台展示的快照。API Key 需要申请卡、卡片读取、产品读取、卡资金和交易读取权限。开卡产品码留空时会从 Open API 自动获取和选择，首充 20.00 USD、数量 1 由服务端自动组装；可在“查询开卡产品与参数”预览。测试连接后开放接单；账户余额不足时锁定 CDK，旧卡不足补差额，无符合次数条件的卡时首充 20 USD 开新卡。关闭开关会拒绝新兑换，已有原单继续确认。
+在服务器 `.env` 中配置平台签发且配对的 `ORBITCARD_API_KEY` 和 `ORBITCARD_API_SECRET`，然后重建应用容器。后台只显示凭据是否配置，不接收、回显或保存凭据；之前存于数据库的凭据不再用于请求，两项环境变量齐全后启动时会清除旧记录。后台继续配置 HTTPS 根域名、可选开卡产品及单卡首充上限，以及四档套餐 USD 单次预算。每档套餐可单独指定支付地区；留空时下单不传 `payment_region`，由平台选择默认地区。配置页会显示从平台卡列表自动读取的卡 ID 摘要；兑换时会重新从平台取卡。API Key 需要申请卡、卡片读取、产品读取、卡资金和交易读取权限。开卡产品码留空时会自动选择，首充 20.00 USD、数量 1 由服务端组装。测试连接后开放接单；账户余额不足时锁定 CDK，旧卡不足补差额，无符合次数条件的卡时首充 20 USD 开新卡。
 
 裸机部署：
 
@@ -63,7 +63,7 @@ npm start
 
 ## 验证
 
-可先用 Python 3.10+ 标准库脚本检查真实 Orbitcard **读取权限与响应字段**。复制 [配置示例](scripts/orbitcard-openapi-check.example.json) 到仓库外的私有路径，填写 `api_key`；设置环境变量 `ORBITCARD_API_SECRET`，或在私有 JSON 中填写 `api_secret`。`card_id` 留空时自动选列表中的首张卡；有原订单时可填写 `task_no` 或 `client_order_no` 其中一个。运行：
+可先用 Python 3.10+ 标准库脚本检查真实 Orbitcard **读取权限与响应字段**。在执行脚本的环境中设置 `ORBITCARD_API_KEY` 和 `ORBITCARD_API_SECRET`，再复制 [配置示例](scripts/orbitcard-openapi-check.example.json) 到仓库外的路径；JSON 只保存非敏感检查参数。`card_id` 留空时自动选列表中的首张卡；有原订单时可填写 `task_no` 或 `client_order_no` 其中一个。运行：
 
 ```bash
 python -X utf8 scripts/check_orbitcard_openapi.py --config /path/to/private-orbitcard-check.json

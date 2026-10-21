@@ -29,7 +29,9 @@ test('audit files survive reload and cache clearing, preserve long lines and red
     assert.equal(safety.sanitize({ nested: { accessToken: 'private' } }).nested.accessToken, '[REDACTED]');
 });
 test('HMAC signs the exact request bytes, host, path and stable idempotency identity', async () => {
-    const old = process.env.ORBITCARD_API_SECRET; process.env.ORBITCARD_API_SECRET = 'signature-test-secret';
+    const old = process.env.ORBITCARD_API_SECRET, oldKey = process.env.ORBITCARD_API_KEY;
+    process.env.ORBITCARD_API_SECRET = 'signature-test-secret';
+    process.env.ORBITCARD_API_KEY = 'test-key';
     const calls = [], events = [];
     try {
         const api = load('orbitcard-client.js', { './runtime-log': { push: event => events.push(event) }, axios: { request: async request => {
@@ -41,10 +43,15 @@ test('HMAC signs the exact request bytes, host, path and stable idempotency iden
         assert.equal(h['X-Signature'], crypto.createHmac('sha256', 'signature-test-secret').update(canonical).digest('hex'));
         assert.equal(h['Idempotency-Key'], 'stable-id'); assert.equal(request.maxRedirects, 0);
         assert.equal(JSON.parse(request.data).text, '中文'); assert.ok(!JSON.stringify(events).includes('private'));
-    } finally { if (old === undefined) delete process.env.ORBITCARD_API_SECRET; else process.env.ORBITCARD_API_SECRET = old; }
+    } finally {
+        if (old === undefined) delete process.env.ORBITCARD_API_SECRET; else process.env.ORBITCARD_API_SECRET = old;
+        if (oldKey === undefined) delete process.env.ORBITCARD_API_KEY; else process.env.ORBITCARD_API_KEY = oldKey;
+    }
 });
 test('HTTP and network errors generate safe history; nested fields cannot smuggle credentials', async () => {
-    const old = process.env.ORBITCARD_API_SECRET; process.env.ORBITCARD_API_SECRET = 'test-secret';
+    const old = process.env.ORBITCARD_API_SECRET, oldKey = process.env.ORBITCARD_API_KEY;
+    process.env.ORBITCARD_API_SECRET = 'test-secret';
+    process.env.ORBITCARD_API_KEY = 'test-key';
     const events = []; let throws = false;
     try {
         const api = load('orbitcard-client.js', { './runtime-log': { push: event => events.push(event) }, axios: { request: async () => {
@@ -58,7 +65,10 @@ test('HTTP and network errors generate safe history; nested fields cannot smuggl
         assert.deepEqual(api.summary({ payment: { amount: 20, currency: 'USD', card_number: 'private' } }).payment, { amount: 20, currency: 'USD' });
         throws = true; await api.request(cfg, 'getSubscription'); assert.equal(events.at(-1).event, 'request_failed');
         assert.ok(!JSON.stringify(events).includes('private'));
-    } finally { if (old === undefined) delete process.env.ORBITCARD_API_SECRET; else process.env.ORBITCARD_API_SECRET = old; }
+    } finally {
+        if (old === undefined) delete process.env.ORBITCARD_API_SECRET; else process.env.ORBITCARD_API_SECRET = old;
+        if (oldKey === undefined) delete process.env.ORBITCARD_API_KEY; else process.env.ORBITCARD_API_KEY = oldKey;
+    }
 });
 test('sequential original-order requests honor cooldown and Retry-After', async () => {
     let calls = 0;

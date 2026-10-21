@@ -60,11 +60,10 @@ async function loadApi() {
         $(`price_${plan}`).value = config[`orbitcard_price_${plan}`] || '';
         fillRegionOptions(plan,config[`orbitcard_region_${plan}`] || '');
     }
-    $('apiKey').value = ''; $('keyState').textContent = config.api_key_saved ? `已保存：${config.api_key_preview}` : '尚未配置';
-    $('apiSecret').value = '';
-    $('secretState').textContent = config.orbitcard_secret_error ? '原 Secret 无法解密，请重新填写' : config.orbitcard_secret_saved ? '已保存，留空保留原值' : '尚未配置';
-    if (config.api_key_saved && config.orbitcard_secret_saved) await loadCardIdPreview();
-    else $('cardIdPreview').textContent = '请先保存配对的 API Key 和 API Secret。';
+    $('keyState').textContent = config.api_key_configured ? '环境变量已配置' : '缺少 ORBITCARD_API_KEY';
+    $('secretState').textContent = config.orbitcard_secret_configured ? '环境变量已配置' : '缺少 ORBITCARD_API_SECRET';
+    if (config.api_key_configured && config.orbitcard_secret_configured) await loadCardIdPreview();
+    else $('cardIdPreview').textContent = '请先在服务器环境变量中配置配对的 API Key 和 API Secret。';
 }
 async function loadCardIdPreview() {
     $('cardIdPreview').textContent = '正在从 Orbitcard 读取卡片 ID…';
@@ -74,7 +73,7 @@ async function loadCardIdPreview() {
         $('cardIdPreview').textContent = `平台共 ${data.total} 张卡，可用 ${data.active} 张。${ids.length ? `前 ${ids.length} 张：${ids.join('、')}` : '当前没有卡片，支付时会按规则自动开卡。'}`;
     } catch (error) { $('cardIdPreview').textContent = `卡片 ID 读取失败：${error.message}`; }
 }
-function apiInput() { return { enabled: $('apiEnabled').checked, base_url: $('baseUrl').value.trim(), api_key: $('apiKey').value.trim(), api_secret: $('apiSecret').value.trim(), orbitcard_product_code: $('productCode').value.trim(), orbitcard_max_initial_amount: $('maxInitialAmount').value.trim(), orbitcard_max_fee: $('maxFee').value.trim(), ...Object.fromEntries(Object.keys(cardPlans).flatMap(plan => [
+function apiInput() { return { enabled: $('apiEnabled').checked, base_url: $('baseUrl').value.trim(), orbitcard_product_code: $('productCode').value.trim(), orbitcard_max_initial_amount: $('maxInitialAmount').value.trim(), orbitcard_max_fee: $('maxFee').value.trim(), ...Object.fromEntries(Object.keys(cardPlans).flatMap(plan => [
     [`orbitcard_price_${plan}`, $(`price_${plan}`).value.trim()], [`orbitcard_region_${plan}`, $(`region_${plan}`).value.trim()]
 ])) }; }
 async function loadCards() {

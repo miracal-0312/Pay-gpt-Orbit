@@ -23,8 +23,9 @@ test('third-party client always uses the signed Orbitcard routes, ignoring obsol
             ? { enabled: true, plans: [{ type: 'gpt-plus', name: 'Plus', service_fee: '0.15' }] } : { balance: '10.00' } } };
     } } });
     const client = load('gpt-api-client.js', { './orbitcard-client': api });
-    const original = process.env.ORBITCARD_API_SECRET;
+    const original = process.env.ORBITCARD_API_SECRET, originalKey = process.env.ORBITCARD_API_KEY;
     process.env.ORBITCARD_API_SECRET = 'test-secret';
+    process.env.ORBITCARD_API_KEY = 'test-key';
     try {
         const result = await client.testConnection({ provider: 'legacy', api_key: 'test-key' });
         assert.equal(result.success, true);
@@ -42,6 +43,8 @@ test('third-party client always uses the signed Orbitcard routes, ignoring obsol
     } finally {
         if (original === undefined) delete process.env.ORBITCARD_API_SECRET;
         else process.env.ORBITCARD_API_SECRET = original;
+        if (originalKey === undefined) delete process.env.ORBITCARD_API_KEY;
+        else process.env.ORBITCARD_API_KEY = originalKey;
     }
 });
 
@@ -66,11 +69,11 @@ async function migrate(saved) {
     return saved;
 }
 
-test('migration disables the retired service and clears its credential before adopting Orbitcard', async () => {
+test('migration disables the retired service and never uses its stored credential', async () => {
     const values = await migrate({ gpt_api_enabled: '1', gpt_api_key: 'old-test-key',
         gpt_api_base_url: 'https://retired.example.test', gpt_api_plan_key: 'plus', gpt_api_country: 'PH', gpt_api_currency: 'PHP' });
     assert.equal(values.gpt_api_enabled, '0');
-    assert.equal(values.gpt_api_key, '');
+    assert.equal(values.gpt_api_key, 'old-test-key');
     assert.equal(values.gpt_api_base_url, 'https://orbitcard.cc');
     assert.equal(values.gpt_api_protocol_version, config.PROTOCOL_VERSION);
     for (const key of config.RETIRED_CONFIG_KEYS) assert.equal(values[key], undefined);
@@ -94,24 +97,39 @@ test('new installs default to Orbitcard and remain disabled until configured', a
     assert.equal(values.gpt_api_protocol_version, config.PROTOCOL_VERSION);
 });
 
-test('enabling requires Key, HTTPS root URL and server secret; card selection is automatic', () => {
-    const valid = { enabled: true, api_key: 'test-key', orbitcard_card_id: '42', base_url: 'https://orbitcard.test/' };
-    assert.throws(() => config.prepareConfig(valid, {}, false));
-    assert.throws(() => config.prepareConfig({ ...valid, api_key: '' }, {}, true));
-    assert.equal(config.prepareConfig({ ...valid, orbitcard_card_id: '' }, {}, true).enabled, true);
-    assert.throws(() => config.prepareConfig({ ...valid, base_url: 'https://orbitcard.test/api/v1' }, {}, true));
-    assert.throws(() => config.prepareConfig({ ...valid, base_url: 'http://orbitcard.test' }, {}, true));
-    assert.throws(() => config.prepareConfig({ ...valid, provider: 'legacy' }, {}, true));
-    assert.equal(config.prepareConfig(valid, {}, true).base_url, 'https://orbitcard.test');
+test('enabling requires environment Key, HTTPS root URL and server Secret; card selection is automatic', () => {
+    const previous = process.env.ORBITCARD_API_KEY;
+    process.env.ORBITCARD_API_KEY = 'test-key';
+    try {
+        const valid = { enabled: true, orbitcard_card_id: '42', base_url: 'https://orbitcard.test/' };
+        assert.throws(() => config.prepareConfig(valid, {}, false));
+        assert.equal(config.prepareConfig({ ...valid, orbitcard_card_id: '' }, {}, true).enabled, true);
+        assert.throws(() => config.prepareConfig({ ...valid, base_url: 'https://orbitcard.test/api/v1' }, {}, true));
+        assert.throws(() => config.prepareConfig({ ...valid, base_url: 'http://orbitcard.test' }, {}, true));
+        assert.throws(() => config.prepareConfig({ ...valid, provider: 'legacy' }, {}, true));
+        assert.equal(config.prepareConfig(valid, {}, true).base_url, 'https://orbitcard.test');
+        delete process.env.ORBITCARD_API_KEY;
+        assert.throws(() => config.prepareConfig(valid, {}, true), /ORBITCARD_API_KEY/);
+    } finally {
+        if (previous === undefined) delete process.env.ORBITCARD_API_KEY;
+        else process.env.ORBITCARD_API_KEY = previous;
+    }
 });
 
-test('saving an unchanged key and clearing optional fields works without protocol selection', () => {
-    const result = config.prepareConfig({ enabled: true, api_key: '', orbitcard_region: '', orbitcard_max_fee: '' },
-        { api_key: 'saved-test-key', orbitcard_card_id: '42', orbitcard_region: 'US', orbitcard_max_fee: '0.15' }, true);
-    assert.equal(result.api_key, 'saved-test-key');
-    assert.equal(result.orbitcard_region, '');
-    assert.equal(result.orbitcard_max_fee, '');
-    assert.equal(result.base_url, config.DEFAULT_BASE_URL);
+test('browser API Key is ignored while optional fields can be cleared', () => {
+    const previous = process.env.ORBITCARD_API_KEY;
+    process.env.ORBITCARD_API_KEY = 'environment-key';
+    try {
+        const result = config.prepareConfig({ enabled: true, api_key: 'forged-browser-key', orbitcard_region: '', orbitcard_max_fee: '' },
+            { api_key: 'saved-test-key', orbitcard_card_id: '42', orbitcard_region: 'US', orbitcard_max_fee: '0.15' }, true);
+        assert.equal(result.api_key, 'environment-key');
+        assert.equal(result.orbitcard_region, '');
+        assert.equal(result.orbitcard_max_fee, '');
+        assert.equal(result.base_url, config.DEFAULT_BASE_URL);
+    } finally {
+        if (previous === undefined) delete process.env.ORBITCARD_API_KEY;
+        else process.env.ORBITCARD_API_KEY = previous;
+    }
 });
 
 test('per-plan default regions are normalized and validated independently', () => {
@@ -140,10 +158,14 @@ test('enabling third-party mode dispatches Orbitcard for a CDK without any provi
     const handler = require('../activation-service')(deps);
     let payload;
     const res = { status() { return this; }, json(data) { payload = data; return data; } };
-    const old = process.env.ORBITCARD_API_SECRET;
+    const old = process.env.ORBITCARD_API_SECRET, oldKey = process.env.ORBITCARD_API_KEY;
     process.env.ORBITCARD_API_SECRET = 'test-secret';
+    process.env.ORBITCARD_API_KEY = 'test-key';
     try { await handler({ body: { cdk: 'CDK-TEST', session: JSON.stringify(session) } }, res); }
-    finally { if (old === undefined) delete process.env.ORBITCARD_API_SECRET; else process.env.ORBITCARD_API_SECRET = old; }
+    finally {
+        if (old === undefined) delete process.env.ORBITCARD_API_SECRET; else process.env.ORBITCARD_API_SECRET = old;
+        if (oldKey === undefined) delete process.env.ORBITCARD_API_KEY; else process.env.ORBITCARD_API_KEY = oldKey;
+    }
     assert.equal(payload.success, true);
     assert.equal(payload.provider, 'orbitcard');
     assert.equal(claims, 1);

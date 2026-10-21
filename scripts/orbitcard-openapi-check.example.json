@@ -1,7 +1,5 @@
 {
   "base_url": "https://orbitcard.cc",
-  "api_key": "REPLACE_WITH_YOUR_API_KEY",
-  "api_secret_env": "ORBITCARD_API_SECRET",
   "max_cards": 20,
   "card_id": null,
   "task_no": "",

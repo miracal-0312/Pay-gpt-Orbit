@@ -14,12 +14,12 @@
 <div class="panel"><div class="row between"><h2>卡密列表</h2><button id="loadCdks" class="secondary">加载列表</button></div><div class="table-wrap"><table><thead><tr><th>卡密</th><th>套餐</th><th>状态</th><th>出库</th><th>操作</th></tr></thead><tbody id="cdkRows"></tbody></table></div><small>已有任务或使用记录的卡密不能删除。</small></div>
 </section>
 <section id="orbitcard" class="view" hidden>
-<div class="panel"><h2>Orbitcard 接单配置</h2><p class="muted">先填写连接凭据并保存，再测试接口和读取支付地区。API Key 需有 subscriptions:read/create、account:read、cards:read/create/fund、products:read、transactions:read 权限。</p><form id="apiForm" class="grid">
-<h3 class="span config-heading">连接凭据</h3>
+<div class="panel"><h2>Orbitcard 接单配置</h2><p class="muted">在服务器环境变量中设置配对的 API Key 和 API Secret，重建应用容器后再测试接口。API Key 需有 subscriptions:read/create、account:read、cards:read/create/fund、products:read、transactions:read 权限。</p><form id="apiForm" class="grid">
+<h3 class="span config-heading">连接与环境变量状态</h3>
 <label>HTTPS 根域名（必填）<input id="baseUrl" type="url" placeholder="https://orbitcard.cc" required></label>
-<label>API Key（必填）<input id="apiKey" type="password" autocomplete="new-password" placeholder="留空保留已保存值"><small id="keyState"></small></label>
-<label>API Secret（必填）<input id="apiSecret" type="password" autocomplete="new-password" placeholder="留空保留已保存值"><small id="secretState"></small></label>
-<div class="span config-note">Secret 只在提交时发送到服务端，以 AES-256-GCM 加密保存；页面不会回显。更换 API Key 时必须同时填写配对的 Secret。已有 ORBITCARD_API_SECRET 环境变量仍可使用。</div>
+<div class="span config-note">在服务器 <code>.env</code> 中填写 <code>ORBITCARD_API_KEY</code> 和 <code>ORBITCARD_API_SECRET</code>。本页面只显示配置状态，不接收或保存凭据。修改环境变量后需重建应用容器。</div>
+<div>API Key：<span id="keyState" role="status">正在检查…</span></div>
+<div>API Secret：<span id="secretState" role="status">正在检查…</span></div>
 <h3 class="span config-heading">套餐预算与支付地区</h3>
 <label>Plus 单次预算（USD）<input id="price_plus" inputmode="decimal" placeholder="产品未返回价格时必填"></label>
 <label>Plus 默认支付地区<select id="region_plus"><option value="">平台默认</option></select></label>
@@ -32,7 +32,7 @@
 <div class="span config-note">预算是会员支付金额，不能填写平台服务费；每档留空时，开卡产品必须返回该档 USD 价格。支付地区留空由 Orbitcard 选择默认地区。</div>
 <h3 class="span config-heading">自动选卡与开卡策略</h3>
 <div class="span config-note">卡片 ID 无需填写。支付前会实时调用 getCardList 取得卡 ID，再按卡状态、次数和余额自动选卡；无符合次数条件的卡时自动开卡并首充 20 USD。</div>
-<div class="span"><div class="row"><strong>平台卡片 ID（自动读取）</strong><button id="refreshCardIds" type="button" class="secondary">重新读取</button></div><p id="cardIdPreview" class="muted" role="status">保存连接凭据后自动读取。</p></div>
+<div class="span"><div class="row"><strong>平台卡片 ID（自动读取）</strong><button id="refreshCardIds" type="button" class="secondary">重新读取</button></div><p id="cardIdPreview" class="muted" role="status">配置环境变量后自动读取。</p></div>
 <label>开卡产品代码（可选）<input id="productCode" maxlength="128" placeholder="留空自动选择支持 20 USD 首充的产品"></label>
 <label>单卡首充上限（USD，可选）<input id="maxInitialAmount" inputmode="decimal" placeholder="固定首充 20；留空不另设上限"></label>
 <label>下单服务费上限（USDT，可选）<input id="maxFee" inputmode="decimal" placeholder="留空不设上限"></label>

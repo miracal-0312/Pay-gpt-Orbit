@@ -544,7 +544,8 @@ test('transaction query filters sensitive fields, rejects foreign ownership and 
 });
 
 test('HTTP 429 cooldown is shared by API operations for one account but does not block another key',async () => {
-    const previous=process.env.ORBITCARD_API_SECRET;process.env.ORBITCARD_API_SECRET='fixture';
+    const previous=process.env.ORBITCARD_API_SECRET,previousKey=process.env.ORBITCARD_API_KEY;
+    process.env.ORBITCARD_API_SECRET='fixture';process.env.ORBITCARD_API_KEY='fixture';
     const sent=[];
     try {
         const client=load('orbitcard-client.js',{
@@ -553,10 +554,14 @@ test('HTTP 429 cooldown is shared by API operations for one account but does not
         });
         const first=await client.request(cfg,'getAccountBalance');
         const second=await client.request(cfg,'getCardList',{page:1});
-        const third=await client.request({...cfg,api_key:'another-account'},'getCardList',{page:1});
+        process.env.ORBITCARD_API_KEY='another-account';
+        const third=await client.request({...cfg,api_key:'fixture'},'getCardList',{page:1});
         assert.equal(first.status,429);assert.equal(second.status,429);assert.ok(second.retryAfterMs>0);
         assert.equal(third.status,429);assert.equal(sent.length,2);
-    } finally {if(previous===undefined)delete process.env.ORBITCARD_API_SECRET;else process.env.ORBITCARD_API_SECRET=previous;}
+    } finally {
+        if(previous===undefined)delete process.env.ORBITCARD_API_SECRET;else process.env.ORBITCARD_API_SECRET=previous;
+        if(previousKey===undefined)delete process.env.ORBITCARD_API_KEY;else process.env.ORBITCARD_API_KEY=previousKey;
+    }
 });
 
 test('batch selection uses one platform snapshot and never rereads candidates before subscription',async () => {

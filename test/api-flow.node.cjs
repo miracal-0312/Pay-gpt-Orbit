@@ -1,10 +1,16 @@
 'use strict';
-const { test } = require('node:test');
+const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { createRequire } = require('node:module');
 const { once } = require('node:events');
+const previousOrbitcardKey = process.env.ORBITCARD_API_KEY;
+process.env.ORBITCARD_API_KEY = 'key';
+after(() => {
+    if (previousOrbitcardKey === undefined) delete process.env.ORBITCARD_API_KEY;
+    else process.env.ORBITCARD_API_KEY = previousOrbitcardKey;
+});
 function load(name, mocks = {}) {
     const filename = path.resolve(__dirname, '..', name), module = { exports: {} }, real = createRequire(filename);
     new Function('require','module','exports','__dirname',fs.readFileSync(filename,'utf8'))(

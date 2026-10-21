@@ -4,7 +4,7 @@
 
 ## 服务端配置
 
-后台填写平台签发且配对的 API Key、API Secret、HTTPS 根域名及开卡策略。Secret 由服务端加密保存；旧部署的 `.env` 中 `ORBITCARD_API_SECRET` 仍可作为后备。可为 Plus、Pro 100、Pro 200、Pro 500 各设默认支付地区；留空时下单省略 `payment_region`，由平台选择默认地区，不要求地区目录带默认标记。先保存 API 配置，再读取可选地区；旧全局地区配置不参与新单。产品缺少会员 USD 单价时填写对应单次预算。新充值先查询 `available_balance`，不足套餐金额即失败并锁定 CDK；再查卡片实时 ACTIVE 状态与次数。旧卡不足自动补差额，无符合次数条件的卡时首充 20 USD 开卡并按需补款；卡 ID 从 `getCardList` 自动读取，不填写固定卡 ID。同一卡 Plus 4 次、Pro 100/200/500 各 1 次，独立计数且允许混用。历史卡需同步后确认四项历史次数，详见 [ORBITCARD-CARDS.md](ORBITCARD-CARDS.md)。
+在服务器环境变量中填写平台签发且配对的 `ORBITCARD_API_KEY` 和 `ORBITCARD_API_SECRET`；后台只填写 HTTPS 根域名及开卡策略，不接收或保存 API 凭据。可为 Plus、Pro 100、Pro 200、Pro 500 各设默认支付地区；留空时下单省略 `payment_region`，由平台选择默认地区。产品缺少会员 USD 单价时填写对应单次预算。新充值先查询 `available_balance`，不足套餐金额即失败并锁定 CDK；再查卡片实时 ACTIVE 状态与次数。旧卡不足自动补差额，无符合次数条件的卡时首充 20 USD 开卡并按需补款；卡 ID 从 `getCardList` 自动读取，不填写固定卡 ID。同一卡 Plus 4 次、Pro 100/200/500 各 1 次，独立计数且允许混用。历史卡需同步后确认四项历史次数，详见 [ORBITCARD-CARDS.md](ORBITCARD-CARDS.md)。
 
 订阅调用需要 `subscriptions:read`、`subscriptions:create` 权限，余额查询另需 `account:read`。新增 `cards:create`、`cards:read`、`products:read`、`cards:fund`、`transactions:read`；不需要敏感卡资料。连接测试只查询套餐和余额，不创建订阅或开卡。卡片协议见 [Open API](Orbitcard-Open-API-V1.md)。
 
@@ -42,7 +42,7 @@
 
 ## 管理入口
 
-后台继续使用 `/api/admin/gpt-api` 配置路径以兼容现有 Orbitcard 配置，四档 `orbitcard_region_<套餐>` 字段保存在 `app_config`；`GET /api/admin/orbitcard/payment-regions` 按已保存凭据只读查询各套餐可用地区，`/test` 测试连接，`/status` 查询套餐、余额与最近订单。CDK 行锁保护新任务创建，卡分配使用 MySQL 命名锁，提交订阅前以任务状态和固定订单号原子认领；未知结果只查原单。
+后台继续使用 `/api/admin/gpt-api` 配置路径以兼容现有 Orbitcard 配置，四档 `orbitcard_region_<套餐>` 字段保存在 `app_config`；`GET /api/admin/orbitcard/payment-regions` 按环境变量中的凭据只读查询各套餐可用地区，`/test` 测试连接，`/status` 查询套餐、余额与最近订单。CDK 行锁保护新任务创建，卡分配使用 MySQL 命名锁，提交订阅前以任务状态和固定订单号原子认领；未知结果只查原单。
 
 `POST /api/admin/orders/:jobKey/refresh` 查询已有订单；`GET /api/admin/task-logs/:jobKey/audit` 下载任务日志。均需管理员认证。管理员自身的 Bearer 登录令牌与供应商 HMAC 协议用途不同。
 
