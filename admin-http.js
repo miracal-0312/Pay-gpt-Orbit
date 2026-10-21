@@ -8,15 +8,16 @@ const adminAuth = require('./admin-auth');
 const gptApi = require('./orbitcard-client');
 const runtimeLog = require('./runtime-log');
 const { buildAdminLoginUrl, buildAdminPanelUrl } = require('./admin-paths');
+const { PLAN_TYPES, normalizePlanType } = require('./plan-registry');
 const { notifyAdminSecurityEvent, sendTelegramLoginCode, sendTelegramTest } = require('./telegram-notify');
-module.exports = function registerAdmin(app, { store, ensureStoreReady, getTotalActiveJobs, cardService }) {
+module.exports = function registerAdmin(app, { store, ensureStoreReady, getTotalActiveJobs, cardService, manualService }) {
     let cachedAdminPaths = null;
     const ADMIN_REFRESH_AFTER_MS = adminAuth.ADMIN_REFRESH_AFTER_MS;
     const verifyPassword = adminAuth.verifyPassword;
     const issueAdminToken = adminAuth.issueAdminToken;
     const verifyAdminToken = adminAuth.verifyAdminToken;
     const requireSecondaryAuth = adminAuth.createRequireSecondaryAuth(store, ensureStoreReady);
-    const CDK_PREFIX = 'KC-', CDK_RANDOM_LENGTH = 15, CDK_CHARSET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    const CDK_PREFIX = 'YZW-', CDK_RANDOM_LENGTH = 12, CDK_CHARSET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 async function getCachedAdminPaths() {
     if (cachedAdminPaths) {
         return cachedAdminPaths;
@@ -105,12 +106,11 @@ function randomCdkSuffix(length = CDK_RANDOM_LENGTH) {
     return out;
 }
 
-function createCdks(count) {
+function createCdks(count, planType) {
     const results = new Set();
     const target = Math.max(1, Math.min(Number(count) || 1, 100));
-
     while (results.size < target) {
-        results.add(`${CDK_PREFIX}${randomCdkSuffix()}`);
+        results.add(`${CDK_PREFIX}${randomCdkSuffix()}-${planType.toUpperCase()}`);
     }
 
     return [...results];
@@ -387,6 +387,7 @@ app.get('/api/public/admin-paths', async (req, res) => {
 });
 app.use('/api/admin', authenticateAdmin);
 require('./orbitcard-card-http')(app, { store, cardService, requireSecondaryAuth, audit: entry => runtimeLog.push(entry) });
+require('./orbitcard-manual-http')(app, { service: manualService, requireSecondaryAuth });
 app.get('/api/admin/runtime-logs', authenticateAdmin, (req, res) => {
     try {
         const wantTail = String(req.query.tail || '') === '1' || String(req.query.tail || '') === 'true';
@@ -863,20 +864,101 @@ app.post('/api/admin/change-email', async (req, res) => {
         return res.status(400).json({ success: false, message: error.message });
     }
 });
+function cdkPlanFilter(req, res) {
+    const planType = req.query.plan_type || '';
+    if (typeof planType !== 'string' || (planType && !PLAN_TYPES.includes(planType))) {
+        res.status(400).json({ success: false, message: '无效的 CDK 套餐筛选条件' });
+        return null;
+    }
+    return planType;
+}
+
+async function liveCdkPlans() {
+    const result = await gptApi.fetchPlans(await store.getGptApiConfig());
+    if (!result.success || !Array.isArray(result.plans)) throw new Error(result.error || 'Orbitcard 套餐目录读取失败');
+    return PLAN_TYPES.map(type => {
+        const plan = result.plans.find(item => item.type === gptApi.PLAN_MAP[type]);
+        return plan ? { type, name: String(plan.name || type).slice(0, 128) } : null;
+    }).filter(Boolean);
+}
+
+async function verifyLiveCdkPlan(value) {
+    const type = normalizePlanType(value, { allowLegacy: false });
+    if (!(await liveCdkPlans()).some(plan => plan.type === type)) {
+        throw new Error('Orbitcard 当前未开放所选套餐，无法生成或导入 CDK');
+    }
+    return type;
+}
+
+app.get('/api/admin/cdks/plans', requireSecondaryAuth, async (req, res) => {
+    try { await ensureStoreReady(); res.set('Cache-Control', 'no-store'); res.json({ success: true, plans: await liveCdkPlans() }); }
+    catch (error) { res.status(503).json({ success: false, message: error.message }); }
+});
+
+function csvCell(value) {
+    const text = String(value ?? '');
+    const safe = /^[\s\x00-\x1f]*[=+\-@]/.test(text) ? `'${text}` : text;
+    return `"${safe.replace(/"/g, '""')}"`;
+}
+
+function cdkCsvLine(code) {
+    const state = code.orbitcard_support_locked ? '人工售后锁定' : code.orbitcard_balance_blocked ? '余额不足锁定'
+        : code.orbitcard_pending_confirmation ? '结果待确认' : ({ unused: '未使用', redeemed: '已核销', processing: '处理中' }[code.status] || code.status);
+    const created = code.created_at instanceof Date ? code.created_at.toISOString() : code.created_at;
+    return [code.code, code.plan_label, state, code.shipped ? '已出库' : '未出库', created].map(csvCell).join(',') + '\r\n';
+}
+
 app.get('/api/admin/cdks', requireSecondaryAuth, async (req, res) => {
+    const planType = cdkPlanFilter(req, res);
+    if (planType === null) return;
     try {
         await ensureStoreReady();
-        res.json(await store.listCdks());
+        res.set('Cache-Control', 'no-store');
+        res.json(await store.listCdks(planType));
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
+    }
+});
+app.post('/api/admin/cdks/export', requireSecondaryAuth, async (req, res) => {
+    const planType = cdkPlanFilter(req, res);
+    if (planType === null) return;
+    try {
+        await ensureStoreReady();
+        let beforeId = null;
+        const exportedIds = [];
+        let page = await store.listCdksExportPage(planType, beforeId);
+        const name = `cdks-${planType || 'all'}-${new Date().toISOString().slice(0, 10)}.csv`;
+        res.set({ 'Cache-Control': 'no-store', 'Content-Type': 'text/csv; charset=utf-8',
+            'Content-Disposition': `attachment; filename="${name}"` });
+        res.write('\uFEFF' + ['卡密', '套餐', '状态', '出库', '创建时间'].map(csvCell).join(',') + '\r\n');
+        while (page.length && !res.destroyed) {
+            exportedIds.push(...page.map(code => code.id));
+            const chunk = page.map(code => cdkCsvLine({ ...code, shipped: true })).join('');
+            if (!res.write(chunk)) {
+                await new Promise(resolve => {
+                    const done = () => { res.off('drain', done); res.off('close', done); resolve(); };
+                    res.once('drain', done); res.once('close', done);
+                });
+            }
+            if (res.destroyed || page.length < 500) break;
+            beforeId = page.at(-1).id;
+            page = await store.listCdksExportPage(planType, beforeId);
+        }
+        if (!res.destroyed) {
+            await store.markCdksShipped(exportedIds);
+            res.end();
+        }
+    } catch (error) {
+        if (res.headersSent) res.destroy(error);
+        else res.status(500).json({ success: false, message: error.message });
     }
 });
 app.post('/api/admin/cdks/generate', requireSecondaryAuth, async (req, res) => {
     try {
         await ensureStoreReady();
         const count = req.body?.count;
-        const planType = req.body?.plan_type || 'plus';
-        const newCdks = createCdks(count);
+        const planType = await verifyLiveCdkPlan(req.body?.plan_type || 'plus');
+        const newCdks = createCdks(count, planType);
         const result = await store.insertCdks(newCdks, { type: '自助', plan_type: planType });
         res.json({
             success: true,
@@ -897,25 +979,13 @@ app.post('/api/admin/cdks/import', requireSecondaryAuth, async (req, res) => {
 
     try {
         await ensureStoreReady();
-        const planType = req.body?.plan_type || 'plus';
+        const planType = await verifyLiveCdkPlan(req.body?.plan_type || 'plus');
         const summary = await store.insertCdks(cdks, { plan_type: planType });
         res.json({
             success: true,
             message: `导入完成，新增 ${summary.insertedCount} 个，重复 ${summary.duplicateCount} 个`,
             ...summary
         });
-    } catch (error) {
-        res.status(500).json({ success: false, message: error.message });
-    }
-});
-app.post('/api/admin/cdks/:cdk/ship', requireSecondaryAuth, async (req, res) => {
-    try {
-        await ensureStoreReady();
-        const updated = await store.markCdkShipped(req.params.cdk);
-        if (!updated) {
-            return res.status(404).json({ success: false, message: 'CDK 不存在' });
-        }
-        res.json({ success: true, message: 'CDK 已标记出库' });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
     }

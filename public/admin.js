@@ -2,7 +2,10 @@
 const $ = id => document.getElementById(id);
 const TOKEN_KEY = 'plus_admin_token', SECONDARY_KEY = 'plus_admin_secondary_token';
 const cardPlans = { plus: 'Plus', pro100: 'Pro 100', pro200: 'Pro 200', pro500: 'Pro 500' };
+let cdkPlans = {};
 let loginUrl = '/admin-login', selected = 'overview', savedBaseUrl = '';
+let cdkPlanFilter = '', cdkLoadSequence = 0, cdkLoadedFilter = null;
+let manualCatalog = { plans: [], cards: [] }, manualRequestId = null;
 function notice(text, type = '') { $('notice').textContent = text; $('notice').className = `message ${type}`; }
 function escapeHtml(value) { return String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch])); }
 function logout() { localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(SECONDARY_KEY); location.assign(loginUrl); }
@@ -31,7 +34,7 @@ async function perform(action, success) {
     try { const result = await action(); if (success) notice(success, 'success'); return result; }
     catch (error) { notice(error.message, 'error'); return null; }
 }
-function status(value) { const text = { success: '成功', failed: '失败', retry: '待重新提交 Session', running: '处理中', manual: '待确认', pending: '待确认', unused: '未使用', used: '已使用', processing: '占用中' }[value] || value; return `<span class="pill ${escapeHtml(value)}">${escapeHtml(text)}</span>`; }
+function status(value) { const text = { success: '成功', failed: '失败', retry: '待重新提交 Session', running: '处理中', prepared: '已保存', submitting: '提交中', manual: '待确认', pending: '待确认', unused: '未使用', used: '已使用', redeemed: '已核销', processing: '占用中' }[value] || value; return `<span class="pill ${escapeHtml(value)}">${escapeHtml(text)}</span>`; }
 function renderTasks(tasks) {
     $('tasks').innerHTML = tasks.map(task => {
         const order = task.order || {}, fee = order.fee_status ? `${order.service_fee ?? '—'} ${order.currency || 'USDT'} / ${order.fee_status}` : '—';
@@ -95,19 +98,90 @@ async function loadCardIdPreview() {
 function apiInput() { return { enabled: $('apiEnabled').checked, base_url: $('baseUrl').value.trim(),
     orbitcard_product_code: $('productCode').value.trim(), orbitcard_max_initial_amount: $('maxInitialAmount').value.trim(),
     orbitcard_max_fee: $('maxFee').value.trim() }; }
+function renderCardRow(card) {
+    const id = escapeHtml(card.card_id);
+    const usage = Object.entries(cardPlans).map(([plan, label]) => {
+        const count = card.usage[plan];
+        return `<span class="card-usage-item${count.successful >= count.limit ? ' is-full' : ''}"><span>${escapeHtml(label)}</span><strong>${escapeHtml(count.successful)} / ${escapeHtml(count.limit)}</strong>${count.reserved ? '<small>处理中</small>' : ''}</span>`;
+    }).join('');
+    const history = card.history_confirmed
+        ? '<span class="card-history-confirmed">历史次数已确认</span>'
+        : `<details class="card-history-editor"><summary>登记历史次数</summary><p class="muted">填写这张卡已成功开通的次数，确认后不能清零。</p><div class="card-history-grid">${Object.entries(cardPlans).map(([plan, label]) => `<label>${escapeHtml(label)}<input data-card-uses="${id}-${plan}" type="number" inputmode="numeric" min="0" max="${plan === 'plus' ? 4 : 1}" step="1" required placeholder="0–${plan === 'plus' ? 4 : 1}"></label>`).join('')}</div><button type="button" data-bind-card="${id}" class="secondary">确认历史次数</button></details>`;
+    const last4 = card.last4 ? `****${escapeHtml(card.last4)}` : '尾号未提供';
+    const active = card.provider_status === 'ACTIVE';
+    return `<tr><td><strong class="card-id">${id}</strong><span class="card-meta">${last4}</span><span class="card-meta">${escapeHtml(card.product_code || '产品未知')}</span></td><td><span class="card-provider-status${active ? ' active' : ''}">${escapeHtml(card.provider_status || '未知状态')}</span><span class="card-balance">${escapeHtml(card.balance ?? '未知')} ${escapeHtml(card.currency || '')}</span></td><td><div class="card-usage-list">${usage}</div></td><td>${card.active_job ? `<code>${escapeHtml(card.active_job)}</code>` : '<span class="card-idle">空闲</span>'}</td><td><div class="card-row-actions">${history}<button type="button" data-card-transactions="${id}" class="secondary">查看交易</button></div></td></tr>`;
+}
 async function loadCards() {
     const data = await request('/api/admin/orbitcard/cards');
     const currentCardId = $('transactionCardId').value;
     $('transactionCardId').replaceChildren(new Option('请选择平台卡片', ''));
-    for (const card of data.cards) $('transactionCardId').add(new Option(`${card.card_id} / ****${card.last4 || '—'}`, card.card_id));
+    for (const card of data.cards) $('transactionCardId').add(new Option(`${card.card_id} / ${card.last4 ? `****${card.last4}` : '尾号未提供'}`, card.card_id));
     if (data.cards.some(card => String(card.card_id) === currentCardId)) $('transactionCardId').value = currentCardId;
-    $('cardRows').innerHTML = data.cards.map(card => `<tr><td>${escapeHtml(card.card_id)} / ****${escapeHtml(card.last4 || '—')}<br>${escapeHtml(card.product_code)}</td><td>${escapeHtml(card.provider_status)}<br>${escapeHtml(card.balance ?? '未知')} ${escapeHtml(card.currency)}</td><td>${Object.entries(cardPlans).map(([plan,label]) => `${label}：${escapeHtml(card.usage[plan].successful)} / ${card.usage[plan].limit}${card.usage[plan].reserved ? '（处理中）' : ''}`).join('<br>')}</td><td>${escapeHtml(card.active_job || '空闲')}</td><td>${card.history_confirmed ? '历史已确认，四种套餐独立计数' : `${Object.entries(cardPlans).map(([plan,label]) => `<label>${label}<input data-card-uses="${card.card_id}-${plan}" type="number" min="0" max="${plan === 'plus' ? 4 : 1}" required placeholder="历史成功次数"></label>`).join('')}<button data-bind-card="${card.card_id}" class="secondary">确认历史次数</button>`}<br><button data-card-transactions="${card.card_id}" class="secondary">查看交易</button></td></tr>`).join('') || '<tr><td colspan="5">尚无卡片，请同步或申请。</td></tr>';
+    $('cardRows').innerHTML = data.cards.map(renderCardRow).join('') || '<tr><td colspan="5">尚无卡片，请同步或申请。</td></tr>';
     $('issueRows').innerHTML = data.issues.map(issue => `<tr><td>${escapeHtml(issue.created_at)}<br><code>${escapeHtml(issue.issue_key)}</code></td><td>${escapeHtml(issue.product_code)}<br>${escapeHtml(issue.amount)}</td><td>${escapeHtml(cardPlans[issue.plan_type] || issue.plan_type)} / ${escapeHtml(issue.state)}<br>${escapeHtml(issue.provider_status || '')}<br>${escapeHtml(issue.message)}</td><td>${escapeHtml(issue.order_no || '待返回')}<br>${escapeHtml(issue.card_id || '待返回')}</td></tr>`).join('') || '<tr><td colspan="4">暂无开卡申请</td></tr>';
     $('fundingRows').innerHTML=(data.fundings || []).map(funding => `<tr><td>${escapeHtml(funding.created_at)}<br><code>${escapeHtml(funding.job_key)}</code></td><td>${escapeHtml(funding.card_id)}<br>${escapeHtml(funding.amount)} USD</td><td>${escapeHtml(funding.state)} / ${escapeHtml(funding.provider_status)}<br>${escapeHtml(funding.order_no || funding.funding_key)}<br>${escapeHtml(funding.message)}</td><td>${escapeHtml(funding.fee_snapshot || '待确认')}<br>目标余额：${escapeHtml(funding.target_balance)}</td></tr>`).join('') || '<tr><td colspan="4">暂无卡片补款</td></tr>';
 }
+async function loadCdkPlans() {
+    const data = await request('/api/admin/cdks/plans');
+    const plans = Array.isArray(data.plans) ? data.plans : [];
+    cdkPlans = Object.fromEntries(plans.map(plan => [plan.type, plan.name]));
+    const current = $('planType').value;
+    $('planType').innerHTML = plans.length
+        ? plans.map(plan => `<option value="${escapeHtml(plan.type)}">${escapeHtml(plan.name)} (${escapeHtml(plan.type)})</option>`).join('')
+        : '<option value="">卡台未开放可兑换套餐</option>';
+    if (cdkPlans[current]) $('planType').value = current;
+    $('generateForm').querySelector('button').disabled = !plans.length;
+    $('importForm').querySelector('button').disabled = !plans.length;
+    const filters = Object.entries(cardPlans).map(([type, name]) => [type, cdkPlans[type] || name]);
+    $('cdkFilters').innerHTML = `<button type="button" data-cdk-plan="" aria-pressed="${cdkPlanFilter === ''}">全部</button>`
+        + filters.map(([type, name]) => `<button type="button" data-cdk-plan="${escapeHtml(type)}" aria-pressed="${cdkPlanFilter === type}">${escapeHtml(name)}</button>`).join('');
+    for (const button of $('cdkFilters').querySelectorAll('button')) button.classList.toggle('active', button.dataset.cdkPlan === cdkPlanFilter);
+}
 async function loadCdks() {
-    const codes = await request('/api/admin/cdks');
-    $('cdkRows').innerHTML = codes.map(code => `<tr><td><code>${escapeHtml(code.code)}</code></td><td>${escapeHtml(code.plan_label || code.plan_type)}</td><td>${status(code.status)}${code.orbitcard_support_locked ? '<br>支付失败，已锁定；请人工售后' : code.orbitcard_balance_blocked ? '<br>账户余额不足，CDK 已锁定' : code.orbitcard_pending_confirmation ? '<br>结果待确认' : ''}</td><td>${code.shipped ? '已出库' : '未出库'}</td><td>${!code.shipped ? `<button class="secondary" data-ship="${escapeHtml(code.code)}">标记出库</button>` : ''}${code.status === 'unused' ? ` <button class="danger" data-delete-cdk="${escapeHtml(code.code)}">删除</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="5">暂无卡密</td></tr>';
+    const filter = cdkPlanFilter, sequence = ++cdkLoadSequence;
+    cdkLoadedFilter = null;
+    $('exportCdks').disabled = true;
+    $('cdkListSummary').textContent = '正在加载卡密…';
+    const codes = await request(`/api/admin/cdks${filter ? `?plan_type=${encodeURIComponent(filter)}` : ''}`);
+    if (sequence !== cdkLoadSequence) return;
+    $('cdkRows').innerHTML = codes.map(code => `<tr><td><code>${escapeHtml(code.code)}</code></td><td>${escapeHtml(code.plan_label || code.plan_type)}</td><td>${status(code.status)}${code.orbitcard_support_locked ? '<br>支付失败，已锁定；请人工售后' : code.orbitcard_balance_blocked ? '<br>账户余额不足，CDK 已锁定' : code.orbitcard_pending_confirmation ? '<br>结果待确认' : ''}</td><td>${code.shipped ? '已出库' : '未出库'}</td><td>${!code.shipped && code.status === 'unused' ? `<button class="danger" data-delete-cdk="${escapeHtml(code.code)}">删除</button>` : '—'}</td></tr>`).join('') || '<tr><td colspan="5">暂无卡密</td></tr>';
+    $('cdkListSummary').textContent = `${filter ? (cdkPlans[filter] || cardPlans[filter] || filter) : '全部套餐'}：显示最近 ${codes.length} 条${codes.length === 2000 ? '（已达页面上限）' : ''}`;
+    cdkLoadedFilter = filter;
+    $('exportCdks').disabled = false;
+}
+async function exportCdks() {
+    const button = $('exportCdks'), filter = cdkPlanFilter;
+    const token = localStorage.getItem(TOKEN_KEY), secondary = localStorage.getItem(SECONDARY_KEY);
+    if (!token) { logout(); throw new Error('请先登录'); }
+    if (!secondary) throw new Error('请先通过二级验证');
+    button.disabled = true;
+    try {
+        const response = await fetch(`/api/admin/cdks/export${filter ? `?plan_type=${encodeURIComponent(filter)}` : ''}`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}`, 'x-admin-secondary-token': secondary }
+        });
+        if (response.status === 401) { logout(); throw new Error('登录已失效'); }
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            if (data.secondaryRequired) {
+                localStorage.removeItem(SECONDARY_KEY);
+                $('unlockState').textContent = '请重新验证二级密码';
+            }
+            throw new Error(data.message || `导出失败（HTTP ${response.status}）`);
+        }
+        const url = URL.createObjectURL(await response.blob());
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `cdks-${filter || 'all'}-${new Date().toISOString().slice(0, 10)}.csv`;
+        document.body.append(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+        if (filter === cdkPlanFilter) await loadCdks();
+        notice(`${filter ? (cdkPlans[filter] || cardPlans[filter] || filter) : '全部套餐'}的 CDK 已导出并标记出库`, 'success');
+    } finally {
+        button.disabled = !localStorage.getItem(SECONDARY_KEY) || cdkLoadedFilter !== cdkPlanFilter;
+    }
 }
 async function loadLogs() {
     const data = await request('/api/admin/runtime-logs?tail=1&limit=500');
@@ -126,7 +200,10 @@ async function loadSelected() {
     if (selected === 'cards') await loadCards();
     if (selected === 'logs') await loadLogs();
     if (selected === 'settings') await Promise.all([loadOverview(), loadSecurity()]);
-    if (selected === 'cdks' && localStorage.getItem(SECONDARY_KEY)) await loadCdks();
+    if (selected === 'cdks' && localStorage.getItem(SECONDARY_KEY)) { await loadCdkPlans().catch(error => { cdkPlans = {}; notice(`套餐目录读取失败：${error.message}`, 'error'); }); await loadCdks(); }
+    if (selected === 'manual' && localStorage.getItem(SECONDARY_KEY)) {
+        await Promise.all([loadManualCatalog(), loadManualOrders()]);
+    }
 }
 $('tabs').addEventListener('click', event => {
     const button = event.target.closest('[data-tab]'); if (!button) return;
@@ -158,6 +235,82 @@ form('generateForm', async () => {
 form('importForm', async () => {
     const data = await request('/api/admin/cdks/import', { cdks: $('cdkImport').value.split(/[\s,;]+/).filter(Boolean), plan_type: $('planType').value });
     $('cdkImport').value = ''; notice(data.message, 'success'); await loadCdks();
+});
+function manualMode() { return document.querySelector('input[name="manualMode"]:checked')?.value || 'test'; }
+function renderManualCardOptions() {
+    const previous = $('manualCard').value, plan = $('manualPlan').value;
+    const quota = { 'gpt-plus': ['plus', 4], 'gpt-pro-5x': ['pro100', 1],
+        'gpt-pro-20x': ['pro200', 1], 'gpt-pro-25x': ['pro500', 1] }[plan];
+    const available = manualCatalog.cards.filter(card => card.provider_status === 'ACTIVE'
+        && card.currency === 'USD' && Number(card.balance) > 0
+        && card.history_confirmed && !card.busy
+        && (!quota || Number(card.usage?.[quota[0]] || 0) < quota[1]));
+    $('manualCard').innerHTML = `<option value="">${available.length ? '请选择可用卡片' : '没有符合条件的已登记卡片'}</option>`
+        + available.map(card => `<option value="${escapeHtml(card.card_id)}">卡 ${escapeHtml(card.card_id)} · ****${escapeHtml(card.last4 || '—')} · ${escapeHtml(card.balance)} USD</option>`).join('');
+    if (available.some(card => String(card.card_id) === previous)) $('manualCard').value = previous;
+    $('manualCatalogState').textContent = `实时套餐 ${manualCatalog.plans.length} 项；当前可选卡 ${available.length} 张。卡片需为 ACTIVE、USD、已核对历史次数且未被其他任务占用。`;
+}
+async function loadManualCatalog() {
+    $('manualCatalogState').textContent = '正在读取 Orbitcard 套餐与卡片…';
+    const current = $('manualPlan').value;
+    manualCatalog = { plans: [], cards: [] };
+    $('manualPlan').innerHTML = '<option value="">正在读取平台套餐</option>';
+    $('manualCard').innerHTML = '<option value="">正在读取平台卡片</option>';
+    let data;
+    try { data = await request('/api/admin/manual/catalog'); }
+    catch (error) { $('manualCatalogState').textContent = `套餐或卡片读取失败：${error.message}`; throw error; }
+    manualCatalog = { plans: data.plans || [], cards: data.cards || [] };
+    $('manualPlan').innerHTML = '<option value="">请选择平台已开放套餐</option>'
+        + manualCatalog.plans.map(plan => `<option value="${escapeHtml(plan.type)}">${escapeHtml(plan.name)}（${escapeHtml(plan.type)}）</option>`).join('');
+    if (manualCatalog.plans.some(plan => plan.type === current)) $('manualPlan').value = current;
+    renderManualCardOptions();
+}
+function renderManualOrders(orders) {
+    $('manualOrderRows').innerHTML = orders.map(order => {
+        const outcome = status(order.state);
+        const captcha = order.captcha?.url ? `<br><a href="${escapeHtml(order.captcha.url)}" target="_blank" rel="noopener noreferrer">打开平台验证链接</a>` : '';
+        const action = `${['submitting','pending','manual'].includes(order.state)
+            ? `<button type="button" class="secondary" data-refresh-manual="${escapeHtml(order.request_id)}">查询原订单</button>` : ''}
+            <button type="button" class="secondary" data-download-manual="${escapeHtml(order.client_order_no)}">下载日志</button>`;
+        return `<tr><td>${escapeHtml(new Date(order.created_at).toLocaleString('zh-CN'))}<br>${escapeHtml(order.target_email)}</td>
+            <td>${order.mode === 'fulfillment' ? '人工交付' : '测试开通'}<br>${escapeHtml(order.plan_name || order.plan_type)}<br>卡 ${escapeHtml(order.card_id)}${order.cdk_code ? `<br><code>${escapeHtml(order.cdk_code)}</code>` : ''}</td>
+            <td><code>${escapeHtml(order.client_order_no)}</code>${order.task_no ? `<br><code>${escapeHtml(order.task_no)}</code>` : ''}</td>
+            <td>${outcome}<br>${escapeHtml(order.message || '')}${captcha}</td><td>${action}</td></tr>`;
+    }).join('') || '<tr><td colspan="5">暂无管理员订单</td></tr>';
+}
+async function loadManualOrders() {
+    const data = await request('/api/admin/manual/orders');
+    renderManualOrders(data.orders || []);
+}
+function updateManualMode() {
+    const fulfillment = manualMode() === 'fulfillment';
+    $('manualCdkControls').hidden = !fulfillment;
+    $('manualCdk').required = fulfillment;
+    if (!fulfillment) $('manualCdk').value = '';
+}
+document.querySelectorAll('input[name="manualMode"]').forEach(input => input.addEventListener('change', updateManualMode));
+$('manualPlan').addEventListener('change', renderManualCardOptions);
+$('refreshManualCatalog').onclick = () => perform(loadManualCatalog);
+$('refreshManualOrders').onclick = () => perform(loadManualOrders);
+$('manualSessionFile').addEventListener('change', async event => {
+    const file = event.target.files?.[0]; if (!file) return;
+    if (file.size > 200 * 1024) { notice('Session JSON 文件过大（上限 200 KB）', 'error'); return; }
+    try { $('manualSession').value = await file.text(); JSON.parse($('manualSession').value); }
+    catch (_) { $('manualSession').value = ''; notice('文件不是有效的 JSON', 'error'); }
+});
+form('manualForm', async () => {
+    if (!manualCatalog.plans.some(plan => plan.type === $('manualPlan').value)) throw new Error('请选择当前开放的套餐');
+    try { JSON.parse($('manualSession').value); } catch (_) { throw new Error('Session 必须是完整 JSON'); }
+    manualRequestId ||= crypto.randomUUID();
+    const data = await request('/api/admin/manual/orders', {
+        request_id: manualRequestId, mode: manualMode(), plan_type: $('manualPlan').value,
+        card_id: Number($('manualCard').value), cdk_code: manualMode() === 'fulfillment' ? $('manualCdk').value.trim() : '',
+        session: $('manualSession').value, authorized: $('manualAuthorized').checked
+    });
+    manualRequestId = null;
+    $('manualSession').value = ''; $('manualSessionFile').value = ''; $('manualAuthorized').checked = false;
+    notice(`订单 ${data.order.client_order_no} 已受理；请在下方查询原订单确认结果。`, 'success');
+    await loadManualOrders();
 });
 form('apiForm', async () => { const result = await request('/api/admin/gpt-api', apiInput()); notice(result.message, 'success'); await loadApi(); });
 const diagnosticLines = [];
@@ -263,17 +416,53 @@ form('telegramForm', async () => { const data = await request('/api/admin/telegr
 $('testTelegram').onclick = () => perform(async () => notice((await request('/api/admin/telegram/test', {})).message, 'success'));
 $('loadLoginLogs').onclick = () => perform(async () => { const data = await request('/api/admin/login-logs?limit=100'); $('loginLogs').textContent = JSON.stringify(data.logs, null, 2); });
 $('loadCdks').onclick = () => perform(loadCdks); $('loadLogs').onclick = () => perform(loadLogs);
+$('exportCdks').onclick = () => perform(exportCdks);
+$('cdkFilters').addEventListener('click', event => {
+    const button = event.target.closest('[data-cdk-plan]');
+    if (!button || !(button.dataset.cdkPlan === '' || Object.hasOwn(cdkPlans, button.dataset.cdkPlan) || Object.hasOwn(cardPlans, button.dataset.cdkPlan))) return;
+    cdkPlanFilter = button.dataset.cdkPlan;
+    for (const item of $('cdkFilters').querySelectorAll('button')) {
+        const active = item === button;
+        item.classList.toggle('active', active);
+        item.setAttribute('aria-pressed', String(active));
+    }
+    $('exportCdks').disabled = true;
+    perform(loadCdks);
+});
 $('clearLogs').onclick = () => perform(async () => { await request('/api/admin/runtime-logs/clear', {}); await loadLogs(); notice('显示缓存已清空，磁盘历史保留', 'success'); });
 document.addEventListener('click', event => {
+    const downloadManual = event.target.closest('[data-download-manual]');
+    if (downloadManual) perform(async () => {
+        const job = downloadManual.dataset.downloadManual;
+        const response = await fetch(`/api/admin/task-logs/${encodeURIComponent(job)}/audit`, {
+            headers: { Authorization: `Bearer ${localStorage.getItem(TOKEN_KEY) || ''}` }
+        });
+        if (response.status === 401) { logout(); return; }
+        if (!response.ok) throw new Error((await response.json()).message || '日志下载失败');
+        const url = URL.createObjectURL(await response.blob()), link = document.createElement('a');
+        link.href = url; link.download = `manual-${job}.jsonl`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+    });
+    const refreshManual = event.target.closest('[data-refresh-manual]');
+    if (refreshManual) perform(async () => {
+        refreshManual.disabled = true;
+        try {
+            await request(`/api/admin/manual/orders/${encodeURIComponent(refreshManual.dataset.refreshManual)}/refresh`, {});
+            await loadManualOrders();
+            notice('已查询管理员原订单', 'success');
+        } finally { refreshManual.disabled = false; }
+    });
     const transactions = event.target.closest('[data-card-transactions]');
     if (transactions) { $('transactionCardId').value = transactions.dataset.cardTransactions; $('transactionPage').value = '1'; $('loadTransactions').click(); }
     const bind = event.target.closest('[data-bind-card]');
     if (bind) perform(async () => {
         const id = bind.dataset.bindCard, usage = {};
         for (const plan of Object.keys(cardPlans)) {
-            const count = document.querySelector(`[data-card-uses="${id}-${plan}"]`).value;
-            if (count === '') throw new Error('请分别填写四种套餐的历史成功次数，不能默认当作新卡');
-            usage[plan] = Number(count);
+            const input = document.querySelector(`[data-card-uses="${id}-${plan}"]`);
+            if (!input || !input.checkValidity()) {
+                input?.reportValidity();
+                throw new Error('请分别填写四种套餐的有效历史成功次数，不能默认当作新卡');
+            }
+            usage[plan] = Number(input.value);
         }
         bind.disabled = true;
         try { await request(`/api/admin/orbitcard/cards/${id}/bind`, { usage }); await loadCards(); notice('历史次数已确认', 'success'); }
@@ -289,8 +478,6 @@ document.addEventListener('click', event => {
         if (!response.ok) throw new Error((await response.json()).message || '日志下载失败');
         const url = URL.createObjectURL(await response.blob()), link = document.createElement('a'); link.href = url; link.download = `task-${job}.jsonl`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
     });
-    const ship = event.target.closest('[data-ship]');
-    if (ship) perform(async () => { await request(`/api/admin/cdks/${encodeURIComponent(ship.dataset.ship)}/ship`, {}); await loadCdks(); });
     const remove = event.target.closest('[data-delete-cdk]');
     if (remove && confirm(`确定删除未使用的卡密 ${remove.dataset.deleteCdk}？`)) perform(async () => { await request(`/api/admin/cdks/${encodeURIComponent(remove.dataset.deleteCdk)}`, undefined, 'DELETE'); await loadCdks(); });
 });

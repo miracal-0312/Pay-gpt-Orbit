@@ -59,5 +59,43 @@ input,textarea,select{min-width:0}pre,code{overflow-wrap:anywhere}.panel{box-sha
 .redeem-panel #verifyForm{max-width:540px}.redeem-panel #verifyForm button{min-width:180px}
 .redeem-panel textarea{min-height:180px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px}
 .recharge details>summary{list-style-position:inside}
+
+/* Keep card rows scannable; open the history form only for the card being reviewed. */
+.card-table{min-width:840px;table-layout:fixed}
+.card-table th:nth-child(1){width:19%}.card-table th:nth-child(2){width:17%}.card-table th:nth-child(3){width:29%}.card-table th:nth-child(4){width:12%}.card-table th:nth-child(5){width:23%}
+.card-table td{overflow-wrap:anywhere}.card-id{display:block;font-size:15px}.card-meta{display:block;color:var(--muted);font-size:12px;line-height:1.45;margin-top:4px}
+.card-provider-status{display:inline-block;padding:2px 8px;border-radius:20px;background:#fff2d6;color:#805715;font-size:12px;font-weight:700}
+.card-provider-status.active{background:#e7f6ef;color:var(--success)}.card-balance{display:block;margin-top:8px;font-weight:700;font-variant-numeric:tabular-nums}
+.card-usage-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+.card-usage-item{display:flex;justify-content:space-between;flex-wrap:wrap;gap:2px 6px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:#f8fbff;font-size:12px}
+.card-usage-item strong{white-space:nowrap;font-variant-numeric:tabular-nums}.card-usage-item.is-full{background:#fff8e6;color:#6e4b0b}
+.card-usage-item small{flex-basis:100%;color:#805715}.card-idle{color:var(--muted)}
+.card-row-actions{display:grid;justify-items:start;gap:8px}.card-row-actions button{padding:7px 10px;font-size:12px}
+.card-history-confirmed{color:var(--success);font-size:12px;font-weight:700}
+.card-history-editor{width:100%}.card-history-editor summary{width:max-content;max-width:100%;padding:7px 10px;border-radius:8px;background:#e8eef8;color:#233a65;font-size:12px;font-weight:700;cursor:pointer}
+.card-history-editor[open] summary{margin-bottom:10px}.card-history-editor p{font-size:12px;margin:0 0 10px}
+.card-history-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.card-history-grid label{font-size:12px}.card-history-grid input{padding:7px 8px;font-size:13px}
+.card-history-editor>button{margin-top:10px}
 @media(max-width:900px){.plan-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:640px){header:not(.recharge-hero){align-items:flex-start;flex-direction:column;gap:12px}.admin-tabs{padding:12px}.diagnostic-grid{grid-template-columns:1fr}.diagnostic-region-card{grid-column:auto}.recharge-hero{margin:16px;padding:22px;display:block}.hero-badge{display:inline-block;margin-top:10px}.plan-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.plan{padding:14px}.plan h3{font-size:14px}.credential-status span{min-width:100%}}
+
+/* CDK list controls stay compact above the table and wrap on small screens. */
+.cdk-list-actions,.cdk-filters{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.cdk-list-actions button{white-space:nowrap}
+.cdk-filters{margin:16px 0 12px;padding-bottom:14px;border-bottom:1px solid var(--line)}
+.cdk-filters button{padding:8px 14px;border:1px solid var(--line);border-radius:20px;background:#f3f6fb;color:#365071;font-size:13px}
+.cdk-filters button.active{background:var(--primary);border-color:var(--primary);color:#fff}
+.pill.redeemed{background:#e7f6ef;color:var(--success)}
+#cdkListSummary{margin:4px 0 0;font-size:13px}
+@media(max-width:640px){.cdk-list-actions{width:100%}.cdk-list-actions button{flex:1 1 auto}}
+
+.manual-form{gap:16px}.manual-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.manual-form textarea{min-height:170px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px}
+.manual-modes{display:flex;gap:14px;flex-wrap:wrap;margin:0;padding:14px;border:1px solid var(--line);border-radius:10px}
+.manual-modes legend{font-weight:700;padding:0 6px}.manual-modes label{display:flex;align-items:center;gap:7px;min-width:220px;flex:1}
+.manual-cdk-controls{display:flex;align-items:end;gap:12px;flex-wrap:wrap;padding:16px;background:#f8fbff;border:1px solid var(--line);border-radius:10px}
+.manual-cdk-controls[hidden]{display:none}.manual-cdk-controls label{min-width:240px;max-width:440px;flex:1}
+.manual-cdk-controls small{flex-basis:100%;color:var(--muted)}
+#manualOrderRows td{overflow-wrap:anywhere;vertical-align:top}#manualOrderRows code{font-size:12px}
+@media(max-width:640px){.manual-grid{grid-template-columns:1fr}.manual-cdk-controls label,.manual-cdk-controls button{width:100%;max-width:none}}

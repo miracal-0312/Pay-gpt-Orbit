@@ -41,6 +41,7 @@ async function notify(task) {
     });
 }
 const cardService = require('./orbitcard-card-service')({ store, audit: entry => runtimeLog.push(entry) });
+const manualService = require('./orbitcard-manual-service')({ store, activeJobs, audit: entry => runtimeLog.push(entry) });
 const recovery = require('./order-recovery')({ store, query: require('./orbitcard-query'), activeJobs,
     audit: entry => runtimeLog.push(entry), notify,
     reconcileCards: async () => cardService.recover(await store.getGptApiConfig()),
@@ -173,7 +174,7 @@ async function runWorker({ task, session, cdk, planType }) {
 app.disable('x-powered-by');
 app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '256kb' }));
 app.use((req, res, next) => { if (req.path.startsWith('/api/')) res.set('Cache-Control', 'no-store'); next(); });
-require('./admin-http')(app, { store, ensureStoreReady, getTotalActiveJobs: () => activeJobs.size, cardService });
+require('./admin-http')(app, { store, ensureStoreReady, getTotalActiveJobs: () => activeJobs.size, cardService, manualService });
 
 app.get('/api/public/runtime', async (req, res, next) => {
     try {
@@ -220,7 +221,7 @@ app.post('/api/admin/orders/:jobKey/refresh', async (req, res, next) => {
 
 async function describeCdk(cdk) {
     const code = await store.verifyCdkDetails(cdk);
-    if (!code) return null;
+    if (!code || code.type !== '自助') return null;
     const task = await store.getRunningTaskByCdk(cdk);
     return { type: code.type, plan_type: code.plan_type, plan_label: PLAN_LABELS[code.plan_type] || code.plan_type,
         status: task ? task.orbitcard_state === 'retry_waiting' ? 'retry' : task.status === 'running' ? 'processing' : task.status : code.used_at ? 'used' : 'unused',
@@ -277,6 +278,7 @@ async function start() {
     });
     const tick = () => {
         recovery.recover().catch(() => log('', '后台查单暂不可用，下次继续', 'recovery_error'));
+        manualService.recover().catch(() => log('', '管理员订单查单暂不可用，下次继续', 'manual_recovery_error'));
         if (Date.now() >= cardRecoveryAt) {
             cardRecoveryAt = Date.now() + 60000;
             store.getGptApiConfig().then(cfg => cardService.recover(cfg))

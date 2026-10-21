@@ -56,6 +56,11 @@ async function ensureLegacyColumns() {
             created_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP', updated_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP' }
     };
     for (const [table, fields] of Object.entries(columns)) for (const [name, definition] of Object.entries(fields)) await ensureColumn(table, name, definition);
+    const [cdkPlan] = await runQuery(`SELECT CHARACTER_MAXIMUM_LENGTH AS length FROM information_schema.columns
+        WHERE table_schema = DATABASE() AND table_name = 'cdk_codes' AND column_name = 'plan_type'`);
+    if (cdkPlan && Number(cdkPlan.length) < 64) {
+        await runQuery("ALTER TABLE cdk_codes MODIFY plan_type VARCHAR(64) NOT NULL DEFAULT 'plus' COMMENT 'Self-service canonical type or manual Orbitcard plan ID'");
+    }
     for (const [name, fields] of [['idx_task_cdk_id', 'cdk_code, id'], ['idx_task_orbit_recovery', 'orbitcard_state, updated_at']]) {
         const [index] = await runQuery('SELECT COUNT(*) AS total FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?', ['task_logs', name]);
         if (!Number(index?.total)) await runQuery(`ALTER TABLE task_logs ADD INDEX ${name} (${fields})`);
@@ -113,15 +118,34 @@ async function verifyCdkDetails(cdk) {
     return rows[0] || null;
 }
 
-async function listCdks() {
-    const rows = await runQuery(`SELECT c.*, t.job_key, t.status AS task_status, t.orbitcard_state, t.orbitcard_client_order_no
-        FROM cdk_codes c LEFT JOIN task_logs t ON t.id = (SELECT MAX(id) FROM task_logs WHERE cdk_code = c.cdk_code)
-        WHERE c.is_active = 1 ORDER BY c.id DESC LIMIT 2000`);
-    return rows.map(row => ({ code: row.cdk_code, plan_type: row.plan_type, plan_label: PLAN_LABELS[row.plan_type] || row.plan_type,
+function mapCdkRow(row) {
+    const redeemed = row.manual_state === 'success' || (row.task_status === 'success' && (row.orbitcard_state === 'success' || !row.orbitcard_state));
+    const occupied = Boolean(row.used_at) || ['running', 'manual'].includes(row.task_status)
+        || ['balance_blocked', 'support_locked'].includes(row.orbitcard_state);
+    return { code: row.cdk_code, plan_type: row.plan_type, plan_label: PLAN_LABELS[row.plan_type] || row.plan_type,
         type: row.type, shipped: Boolean(row.shipped_at), created_at: row.created_at, jobKey: row.job_key,
         orbitcard_pending_confirmation: row.task_status === 'manual', orbitcard_balance_blocked: row.orbitcard_state==='balance_blocked',
         orbitcard_support_locked: row.orbitcard_state==='support_locked',
-        status: ['running','manual'].includes(row.task_status) || ['balance_blocked','support_locked'].includes(row.orbitcard_state) ? 'processing' : row.used_at ? 'used' : 'unused' }));
+        status: redeemed ? 'redeemed' : occupied ? 'processing' : 'unused' };
+}
+
+const CDK_LIST_SELECT = `SELECT c.*, t.job_key, t.status AS task_status, t.orbitcard_state, t.orbitcard_client_order_no,
+        (SELECT m.state FROM orbitcard_admin_orders m WHERE m.cdk_code = c.cdk_code ORDER BY m.created_at DESC LIMIT 1) AS manual_state
+    FROM cdk_codes c LEFT JOIN task_logs t ON t.id = (SELECT MAX(id) FROM task_logs WHERE cdk_code = c.cdk_code)
+    WHERE c.is_active = 1`;
+
+async function listCdks(planType = '') {
+    const filtered = planType ? ' AND c.plan_type = ?' : '';
+    const rows = await runQuery(`${CDK_LIST_SELECT}${filtered} ORDER BY c.id DESC LIMIT 2000`, planType ? [planType] : []);
+    return rows.map(mapCdkRow);
+}
+
+async function listCdksExportPage(planType = '', beforeId = null) {
+    const params = [], clauses = [];
+    if (planType) { clauses.push('c.plan_type = ?'); params.push(planType); }
+    if (beforeId !== null) { clauses.push('c.id < ?'); params.push(beforeId); }
+    const rows = await runQuery(`${CDK_LIST_SELECT}${clauses.length ? ` AND ${clauses.join(' AND ')}` : ''} ORDER BY c.id DESC LIMIT 500`, params);
+    return rows.map(row => ({ id: Number(row.id), ...mapCdkRow(row) }));
 }
 
 async function insertCdks(cdks, options = {}) {
@@ -139,9 +163,20 @@ async function insertCdks(cdks, options = {}) {
     return { insertedCount, duplicateCount: values.length - insertedCount, totalCount: values.length };
 }
 
-async function markCdkShipped(cdk) {
-    const result = await runExecute('UPDATE cdk_codes SET shipped_at = COALESCE(shipped_at, CURRENT_TIMESTAMP) WHERE cdk_code = ? AND is_active = 1', [String(cdk)]);
-    return result.affectedRows > 0;
+async function markCdksShipped(ids) {
+    if (!Array.isArray(ids) || ids.some(id => !Number.isSafeInteger(id) || id < 1) || new Set(ids).size !== ids.length) {
+        throw new Error('导出卡密 ID 无效');
+    }
+    if (!ids.length) return;
+    await withTransaction(async connection => {
+        for (let offset = 0; offset < ids.length; offset += 500) {
+            const batch = ids.slice(offset, offset + 500);
+            const placeholders = batch.map(() => '?').join(',');
+            const rows = await runQuery(`SELECT id FROM cdk_codes WHERE id IN (${placeholders}) AND is_active = 1 FOR UPDATE`, batch, { connection });
+            if (rows.length !== batch.length) throw new Error('导出期间卡密状态发生变化，请重新导出');
+            await runExecute(`UPDATE cdk_codes SET shipped_at = COALESCE(shipped_at, CURRENT_TIMESTAMP) WHERE id IN (${placeholders}) AND is_active = 1`, batch, { connection });
+        }
+    });
 }
 
 async function deleteCdk(cdk) {
@@ -150,8 +185,9 @@ async function deleteCdk(cdk) {
         const [code] = await runQuery('SELECT * FROM cdk_codes WHERE cdk_code = ? FOR UPDATE', [String(cdk)], options);
         if (!code) return;
         const tasks = await runQuery('SELECT job_key FROM task_logs WHERE cdk_code = ? LIMIT 1', [String(cdk)], options);
-        if (code.used_at || tasks.length) throw new Error('已有使用或任务记录的 CDK 不允许删除');
-        await runExecute('DELETE FROM cdk_codes WHERE cdk_code = ? AND used_at IS NULL', [String(cdk)], options);
+        const manualOrders = await runQuery('SELECT request_id FROM orbitcard_admin_orders WHERE cdk_code = ? LIMIT 1', [String(cdk)], options);
+        if (code.shipped_at || code.used_at || tasks.length || manualOrders.length) throw new Error('已出库或有使用记录的 CDK 不允许删除');
+        await runExecute('DELETE FROM cdk_codes WHERE cdk_code = ? AND shipped_at IS NULL AND used_at IS NULL', [String(cdk)], options);
     });
 }
 
@@ -223,6 +259,7 @@ async function getAdminData() {
 
 const cardStore = require('./orbitcard-card-store')({ withTransaction, runQuery, runExecute, getPool: core.getPool });
 const orbitcardCdkStore = require('./orbitcard-cdk-store')({ withTransaction, runQuery, runExecute, createTaskLog, settleCardUse: cardStore.settleCardUse });
-module.exports = { ...core, ...cardStore, ...orbitcardCdkStore, ensureReady, initializeBaseData, createTaskLog, getTaskStatus,
-    getRunningTaskByCdk, verifyCdkDetails, listCdks, insertCdks, markCdkShipped, deleteCdk,
+const manualStore = require('./orbitcard-manual-store')({ runQuery, runExecute, withTransaction });
+module.exports = { ...core, ...cardStore, ...orbitcardCdkStore, ...manualStore, ensureReady, initializeBaseData, createTaskLog, getTaskStatus,
+    getRunningTaskByCdk, verifyCdkDetails, listCdks, listCdksExportPage, insertCdks, markCdksShipped, deleteCdk,
     listAdminTaskLogs, listRecentGptApiOrders, listRecoverableOrbitcardTasks, noteQueryAttempt, getMaxConcurrentActivations, saveConfig, getAdminData, safeOrder };

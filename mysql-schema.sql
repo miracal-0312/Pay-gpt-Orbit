@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS cdk_codes (
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     type VARCHAR(16) NOT NULL DEFAULT '自助',
-    plan_type VARCHAR(16) NOT NULL DEFAULT 'plus' COMMENT 'plus/pro100/pro200/pro500 (legacy: pro_5x/pro_20x)',
+    plan_type VARCHAR(64) NOT NULL DEFAULT 'plus' COMMENT 'Self-service canonical type or manual Orbitcard plan ID',
     fail_count INT DEFAULT 0,
     cooldown_until TIMESTAMP NULL DEFAULT NULL,
     UNIQUE KEY uniq_cdk_codes_code (cdk_code)
@@ -118,6 +118,30 @@ CREATE TABLE IF NOT EXISTS orbitcard_card_uses (
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     KEY idx_oc_card_uses (scope, card_id, state)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS orbitcard_admin_orders (
+    request_id CHAR(36) NOT NULL PRIMARY KEY,
+    client_order_no VARCHAR(128) NOT NULL,
+    scope CHAR(64) NOT NULL,
+    api_key_hash CHAR(64) NOT NULL,
+    mode VARCHAR(16) NOT NULL DEFAULT 'test',
+    cdk_code VARCHAR(32) NULL,
+    plan_type VARCHAR(64) NOT NULL,
+    plan_name VARCHAR(128) NOT NULL,
+    target_email VARCHAR(255) NOT NULL,
+    card_id BIGINT UNSIGNED NOT NULL,
+    admin_email VARCHAR(128) NOT NULL,
+    state VARCHAR(16) NOT NULL DEFAULT 'prepared',
+    task_no VARCHAR(128) NULL,
+    snapshot TEXT NULL,
+    message VARCHAR(255) NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_orbitcard_admin_client_order (client_order_no),
+    KEY idx_orbitcard_admin_recovery (state, updated_at),
+    KEY idx_orbitcard_admin_cdk (cdk_code, created_at),
+    KEY idx_orbitcard_admin_target (scope, target_email, plan_type, state)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS orbitcard_card_issues (
