@@ -10,9 +10,10 @@ const accountCooldowns = new Map();
 
 async function request(cfg, operation, body = {}, idempotencyKey = '') {
     const key = String(cfg.api_key || '').trim();
-    // Secret is intentionally never stored in app_config or returned to the browser.
-    const secret = process.env.ORBITCARD_API_SECRET;
-    if (!key || !secret) return { success: false, error: '请配置 API Key 和服务端 ORBITCARD_API_SECRET' };
+    if (cfg.orbitcard_secret_error) return { success: false, error: '已保存的 Orbitcard API Secret 无法解密，请管理员重新填写' };
+    // The UI-managed secret is decrypted server-side; legacy environment settings remain supported.
+    const secret = cfg.api_secret || process.env.ORBITCARD_API_SECRET;
+    if (!key || !secret) return { success: false, error: '请在后台配置配对的 API Key 和 API Secret' };
     let url;
     try {
         url = new URL(normalizeBaseUrl(cfg.base_url));

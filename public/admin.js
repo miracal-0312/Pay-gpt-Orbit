@@ -61,13 +61,28 @@ async function loadApi() {
         fillRegionOptions(plan,config[`orbitcard_region_${plan}`] || '');
     }
     $('apiKey').value = ''; $('keyState').textContent = config.api_key_saved ? `已保存：${config.api_key_preview}` : '尚未配置';
-    $('secretState').textContent = config.orbitcard_secret_saved ? '服务端 HMAC Secret 已配置。' : '服务端缺少 ORBITCARD_API_SECRET，尚不能启用充值。';
+    $('apiSecret').value = '';
+    $('secretState').textContent = config.orbitcard_secret_error ? '原 Secret 无法解密，请重新填写' : config.orbitcard_secret_saved ? '已保存，留空保留原值' : '尚未配置';
+    if (config.api_key_saved && config.orbitcard_secret_saved) await loadCardIdPreview();
+    else $('cardIdPreview').textContent = '请先保存配对的 API Key 和 API Secret。';
 }
-function apiInput() { return { enabled: $('apiEnabled').checked, base_url: $('baseUrl').value.trim(), api_key: $('apiKey').value.trim(), orbitcard_product_code: $('productCode').value.trim(), orbitcard_max_initial_amount: $('maxInitialAmount').value.trim(), orbitcard_max_fee: $('maxFee').value.trim(), ...Object.fromEntries(Object.keys(cardPlans).flatMap(plan => [
+async function loadCardIdPreview() {
+    $('cardIdPreview').textContent = '正在从 Orbitcard 读取卡片 ID…';
+    try {
+        const data = await request('/api/admin/orbitcard/cards/preview');
+        const ids = (data.cards || []).map(card => `${card.card_id}${card.status === 'ACTIVE' ? '（可用）' : `（${card.status || '未知状态'}）`}`);
+        $('cardIdPreview').textContent = `平台共 ${data.total} 张卡，可用 ${data.active} 张。${ids.length ? `前 ${ids.length} 张：${ids.join('、')}` : '当前没有卡片，支付时会按规则自动开卡。'}`;
+    } catch (error) { $('cardIdPreview').textContent = `卡片 ID 读取失败：${error.message}`; }
+}
+function apiInput() { return { enabled: $('apiEnabled').checked, base_url: $('baseUrl').value.trim(), api_key: $('apiKey').value.trim(), api_secret: $('apiSecret').value.trim(), orbitcard_product_code: $('productCode').value.trim(), orbitcard_max_initial_amount: $('maxInitialAmount').value.trim(), orbitcard_max_fee: $('maxFee').value.trim(), ...Object.fromEntries(Object.keys(cardPlans).flatMap(plan => [
     [`orbitcard_price_${plan}`, $(`price_${plan}`).value.trim()], [`orbitcard_region_${plan}`, $(`region_${plan}`).value.trim()]
 ])) }; }
 async function loadCards() {
     const data = await request('/api/admin/orbitcard/cards');
+    const currentCardId = $('transactionCardId').value;
+    $('transactionCardId').replaceChildren(new Option('请选择平台卡片', ''));
+    for (const card of data.cards) $('transactionCardId').add(new Option(`${card.card_id} / ****${card.last4 || '—'}`, card.card_id));
+    if (data.cards.some(card => String(card.card_id) === currentCardId)) $('transactionCardId').value = currentCardId;
     $('cardRows').innerHTML = data.cards.map(card => `<tr><td>${escapeHtml(card.card_id)} / ****${escapeHtml(card.last4 || '—')}<br>${escapeHtml(card.product_code)}</td><td>${escapeHtml(card.provider_status)}<br>${escapeHtml(card.balance ?? '未知')} ${escapeHtml(card.currency)}</td><td>${Object.entries(cardPlans).map(([plan,label]) => `${label}：${escapeHtml(card.usage[plan].successful)} / ${card.usage[plan].limit}${card.usage[plan].reserved ? '（处理中）' : ''}`).join('<br>')}</td><td>${escapeHtml(card.active_job || '空闲')}</td><td>${card.history_confirmed ? '历史已确认，四种套餐独立计数' : `${Object.entries(cardPlans).map(([plan,label]) => `<label>${label}<input data-card-uses="${card.card_id}-${plan}" type="number" min="0" max="${plan === 'plus' ? 4 : 1}" required placeholder="历史成功次数"></label>`).join('')}<button data-bind-card="${card.card_id}" class="secondary">确认历史次数</button>`}<br><button data-card-transactions="${card.card_id}" class="secondary">查看交易</button></td></tr>`).join('') || '<tr><td colspan="5">尚无卡片，请同步或申请。</td></tr>';
     $('issueRows').innerHTML = data.issues.map(issue => `<tr><td>${escapeHtml(issue.created_at)}<br><code>${escapeHtml(issue.issue_key)}</code></td><td>${escapeHtml(issue.product_code)}<br>${escapeHtml(issue.amount)}</td><td>${escapeHtml(cardPlans[issue.plan_type] || issue.plan_type)} / ${escapeHtml(issue.state)}<br>${escapeHtml(issue.provider_status || '')}<br>${escapeHtml(issue.message)}</td><td>${escapeHtml(issue.order_no || '待返回')}<br>${escapeHtml(issue.card_id || '待返回')}</td></tr>`).join('') || '<tr><td colspan="4">暂无开卡申请</td></tr>';
     $('fundingRows').innerHTML=(data.fundings || []).map(funding => `<tr><td>${escapeHtml(funding.created_at)}<br><code>${escapeHtml(funding.job_key)}</code></td><td>${escapeHtml(funding.card_id)}<br>${escapeHtml(funding.amount)} USD</td><td>${escapeHtml(funding.state)} / ${escapeHtml(funding.provider_status)}<br>${escapeHtml(funding.order_no || funding.funding_key)}<br>${escapeHtml(funding.message)}</td><td>${escapeHtml(funding.fee_snapshot || '待确认')}<br>目标余额：${escapeHtml(funding.target_balance)}</td></tr>`).join('') || '<tr><td colspan="4">暂无卡片补款</td></tr>';
@@ -134,6 +149,7 @@ $('loadRegions').onclick = () => perform(async () => {
     const unavailable = Object.entries(data.regions).filter(([,row]) => row.error).map(([plan]) => cardPlans[plan]);
     notice(unavailable.length ? `已读取可用地区；${unavailable.join('、')} 查询失败，请稍后重试` : '已读取四种套餐的可用支付地区', unavailable.length ? 'error' : 'success');
 });
+$('refreshCardIds').onclick = () => perform(loadCardIdPreview);
 $('loadCards').onclick = () => perform(loadCards);
 $('loadTransactions').onclick = () => perform(async () => {
     const id = Number($('transactionCardId').value), page = Number($('transactionPage').value);

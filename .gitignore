@@ -4,11 +4,16 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
+# Python probe
+__pycache__/
+*.py[cod]
+
 # Local env / secrets
 .env
 .env.*
 !.env.example
 *.env
+/scripts/orbitcard-openapi-check.local.json
 
 # Runtime artefacts
 _server.out.log

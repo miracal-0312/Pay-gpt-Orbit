@@ -690,7 +690,6 @@ app.get('/api/admin/gpt-api', async (req, res) => {
             success: true,
             config: {
                 provider: cfg.provider,
-                orbitcard_card_id: cfg.orbitcard_card_id,
                 orbitcard_region: cfg.orbitcard_region,
                 orbitcard_max_fee: cfg.orbitcard_max_fee,
                 orbitcard_product_code: cfg.orbitcard_product_code,
@@ -700,7 +699,8 @@ app.get('/api/admin/gpt-api', async (req, res) => {
                     [`orbitcard_price_${plan}`, cfg[`orbitcard_price_${plan}`]],
                     [`orbitcard_region_${plan}`, cfg[`orbitcard_region_${plan}`]]
                 ])),
-                orbitcard_secret_saved: Boolean(process.env.ORBITCARD_API_SECRET),
+                orbitcard_secret_saved: Boolean(cfg.api_secret),
+                orbitcard_secret_error: Boolean(cfg.orbitcard_secret_error),
                 enabled: cfg.enabled,
                 base_url: cfg.base_url,
                 api_key_saved: Boolean(cfg.api_key),
@@ -728,7 +728,9 @@ app.post('/api/admin/gpt-api/test', async (req, res) => {
         const merged = {
             ...saved,
             base_url: String(body.base_url || '').trim() || saved.base_url,
-            api_key: String(body.api_key || '').trim() || saved.api_key
+            api_key: String(body.api_key || '').trim() || saved.api_key,
+            api_secret: String(body.api_secret || '').trim() || saved.api_secret,
+            orbitcard_secret_error: saved.orbitcard_secret_error && !String(body.api_secret || '').trim()
         };
         const result = await gptApi.testConnection(merged);
         if (!result.success) {

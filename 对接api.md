@@ -4,7 +4,7 @@
 
 ## 服务端配置
 
-在 `.env` 设置平台签发的 `ORBITCARD_API_SECRET`，后台设置配对 API Key、HTTPS 根域名及开卡策略。可为 Plus、Pro 100、Pro 200、Pro 500 各设默认支付地区；留空时下单省略 `payment_region`，由平台选择默认地区，不要求地区目录带默认标记。先保存 API 配置，再读取可选地区；旧全局地区配置不参与新单。产品缺少会员 USD 单价时填写对应单次预算。新充值先查询 `available_balance`，不足套餐金额即失败并锁定 CDK；再查卡片实时 ACTIVE 状态与次数。旧卡不足自动补差额，无符合次数条件的卡时首充 20 USD 开卡并按需补款；不再填写固定卡 ID。同一卡 Plus 4 次、Pro 100/200/500 各 1 次，独立计数且允许混用。历史卡需同步后确认四项历史次数，详见 [ORBITCARD-CARDS.md](ORBITCARD-CARDS.md)。
+后台填写平台签发且配对的 API Key、API Secret、HTTPS 根域名及开卡策略。Secret 由服务端加密保存；旧部署的 `.env` 中 `ORBITCARD_API_SECRET` 仍可作为后备。可为 Plus、Pro 100、Pro 200、Pro 500 各设默认支付地区；留空时下单省略 `payment_region`，由平台选择默认地区，不要求地区目录带默认标记。先保存 API 配置，再读取可选地区；旧全局地区配置不参与新单。产品缺少会员 USD 单价时填写对应单次预算。新充值先查询 `available_balance`，不足套餐金额即失败并锁定 CDK；再查卡片实时 ACTIVE 状态与次数。旧卡不足自动补差额，无符合次数条件的卡时首充 20 USD 开卡并按需补款；卡 ID 从 `getCardList` 自动读取，不填写固定卡 ID。同一卡 Plus 4 次、Pro 100/200/500 各 1 次，独立计数且允许混用。历史卡需同步后确认四项历史次数，详见 [ORBITCARD-CARDS.md](ORBITCARD-CARDS.md)。
 
 订阅调用需要 `subscriptions:read`、`subscriptions:create` 权限，余额查询另需 `account:read`。新增 `cards:create`、`cards:read`、`products:read`、`cards:fund`、`transactions:read`；不需要敏感卡资料。连接测试只查询套餐和余额，不创建订阅或开卡。卡片协议见 [Open API](Orbitcard-Open-API-V1.md)。
 

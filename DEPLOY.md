@@ -30,7 +30,6 @@ ADMIN_EMAIL=admin@example.com
 ADMIN_PASSWORD='replace_with_login_password'
 ADMIN_SECONDARY_PASSWORD='replace_with_secondary_password'
 ADMIN_TOKEN_SECRET='replace_with_random_secret_at_least_32_bytes'
-ORBITCARD_API_SECRET='replace_with_platform_issued_secret'
 ```
 
 不要使用这些占位值。登录密码和二级密码首次初始化时至少 8 位；已有账号由数据库管理，改 `.env` 不会重置已有账号。CDK 管理需要有效的管理员登录和二级验证。
@@ -41,7 +40,7 @@ ORBITCARD_API_SECRET='replace_with_platform_issued_secret'
 node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
 ```
 
-Orbitcard Secret 必须使用平台签发、与 API Key 配对的值。它只保留在服务端环境。含 `$`、`#` 或空格的配置使用单引号包裹，不要把 `.env` 当 shell 脚本执行。
+Orbitcard Secret 必须使用平台签发、与 API Key 配对的值。启动后在后台「Orbitcard 配置」页面填写 API Key 和 API Secret；服务端用 `ADMIN_TOKEN_SECRET` 派生的密钥加密保存，页面不会回显。既有部署也可继续使用 `.env` 中的 `ORBITCARD_API_SECRET`；若两处均有值，以后台保存值为准。不要随意更换 `ADMIN_TOKEN_SECRET`，否则已保存的 Secret 无法解密，需在后台重新填写。含 `$`、`#` 或空格的 `.env` 配置使用单引号包裹，不要把 `.env` 当 shell 脚本执行。
 
 启动：
 
@@ -53,7 +52,7 @@ docker compose logs -f app
 
 容器内应用固定使用 `mysql:3306`、数据库用户 `root`，宿主机应用端口取 `PORT`。数据库宿主机端口取 `MYSQL_PORT`（默认 3310），只绑定 `127.0.0.1`。HTTP 健康检查 `/api/health` 检查应用与数据库，不保证 Orbitcard 凭据和卡片余额有效。
 
-后台填写 API 根域名、API Key；可分别设置 Plus、Pro 100、Pro 200、Pro 500 的默认支付地区，并可设置最高 USDT 服务费、开卡产品代码和单卡首充上限。先保存 Key 和域名，再点击「读取各套餐可用地区」；每档留空时下单省略 `payment_region`，由平台自行选默认地区，不要求目录带 `default=true`。旧全局 `orbitcard_region` 值保留，但不参与新订单。产品未返回会员 USD 价格时，填写四档单次预算；不要把 USDT 平台服务费当成会员支付金额。无需再填写固定平台卡 ID。测试连接只查询套餐与余额；在「卡片与开卡」查询产品、同步卡片及脱敏消费交易检查读取权限。API Key 增加 `cards:create`、`cards:read`、`products:read`、`cards:fund`、`transactions:read`，余额查询需 `account:read`；无需敏感卡资料权限。确认配置有效后打开接单开关，再创建对应套餐的 CDK。
+后台填写 API 根域名、API Key 和 API Secret；可分别设置 Plus、Pro 100、Pro 200、Pro 500 的默认支付地区，并可设置最高 USDT 服务费、开卡产品代码和单卡首充上限。先保存凭据，再点击「读取各套餐可用地区」；每档留空时下单省略 `payment_region`，由平台自行选默认地区，不要求目录带 `default=true`。旧全局 `orbitcard_region` 值保留，但不参与新订单。产品未返回会员 USD 价格时，填写四档单次预算；不要把 USDT 平台服务费当成会员支付金额。无需填写固定平台卡 ID：配置页自动展示平台卡列表里的 ID，实际支付会重新读取并选卡。「卡片与开卡」中的交易查询也从已同步卡片列表选择 ID。测试连接只查询套餐与余额；在「卡片与开卡」查询产品、同步卡片及脱敏消费交易检查读取权限。API Key 增加 `cards:create`、`cards:read`、`products:read`、`cards:fund`、`transactions:read`，余额查询需 `account:read`；无需敏感卡资料权限。确认配置有效后打开接单开关，再创建对应套餐的 CDK。
 
 同一卡可以 Plus 4 次、Pro 100/200/500 各 1 次，分别计数、允许混用，共最多 7 次。历史卡同步后需二级验证确认四项历史次数。充值先检查账户 `available_balance`；不足套餐金额时锁定 CDK 并提醒联系管理员。之后拉取平台卡列表与批量详情，只从 ACTIVE、USD、资料和次数合格且未占用的卡中选一张；缺项时跳过该卡，不逐张补查。有剩余次数的卡异常或占用时锁定 CDK 并提示人工售后；无卡或当前套餐次数用尽时自动首充 20 USD 开卡，卡余额不足则补差额。管理员也可手动申请卡，完整规则见 [ORBITCARD-CARDS.md](ORBITCARD-CARDS.md)。
 
@@ -139,7 +138,7 @@ Windows 使用 `npm.cmd`，安装脚本为 `powershell -File scripts/install-win
 | 首次启动要求管理员密码 | 新数据库需要 8 位以上登录密码和二级密码 |
 | 启动拒绝签名密钥 | `ADMIN_TOKEN_SECRET` 是否为随机值且不少于 32 字节 |
 | 新兑换返回暂未开放 | 后台 Orbitcard 接单开关是否启用 |
-| Secret 未配置 | 服务器 `.env` 是否填写 `ORBITCARD_API_SECRET`，修改后是否重建容器 |
+| Secret 未配置或无法解密 | 在后台重新填写配对 API Secret；旧环境变量方案检查 `.env` 和容器重建；确认 `ADMIN_TOKEN_SECRET` 未意外变更 |
 | HMAC 失败 | Key/Secret 配对、HTTPS 根域名、系统时钟与权限 |
 | CDK 因账户余额锁定 | 管理员向平台账户充值，后台只读检查达到保存门槛后释放；重新提交 Session |
 | 补款待确认 | 检查卡资金/交易读取权限，确认原订单流水，不换键补款 |

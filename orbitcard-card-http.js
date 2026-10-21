@@ -34,6 +34,14 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
         ].map(key => [key,funding[key]])));
         res.json({ success: true, cards, issues, fundings });
     }));
+    app.get('/api/admin/orbitcard/cards/preview', handler(async (req, res) => {
+        const cards = await cardsApi.listCards(await config());
+        res.set('Cache-Control', 'no-store');
+        res.json({ success: true, total: cards.length,
+            active: cards.filter(card => card.provider_status === 'ACTIVE').length,
+            cards: cards.slice(0, 20).map(card => ({ card_id: card.card_id,
+                status: card.provider_status, last4: card.last4 })) });
+    }));
     app.post('/api/admin/orbitcard/cards/sync', handler(async (req, res) => {
         res.json({ success: true, count: await cardService.synchronize(await config()), message: '卡片摘要已同步，历史次数及套餐绑定保持不变' });
     }));

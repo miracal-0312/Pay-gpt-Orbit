@@ -14,28 +14,36 @@
 <div class="panel"><div class="row between"><h2>卡密列表</h2><button id="loadCdks" class="secondary">加载列表</button></div><div class="table-wrap"><table><thead><tr><th>卡密</th><th>套餐</th><th>状态</th><th>出库</th><th>操作</th></tr></thead><tbody id="cdkRows"></tbody></table></div><small>已有任务或使用记录的卡密不能删除。</small></div>
 </section>
 <section id="orbitcard" class="view" hidden>
-<div class="panel"><h2>Orbitcard 接单配置</h2><p id="secretState" class="muted"></p><form id="apiForm" class="grid">
-<label class="check span"><input id="apiEnabled" type="checkbox">开放新充值订单</label>
-<label>HTTPS 根域名<input id="baseUrl" type="url" placeholder="https://orbitcard.cc" required></label>
-<label>API Key<input id="apiKey" type="password" autocomplete="new-password" placeholder="留空保留已保存值"><small id="keyState"></small></label>
-<label>开卡产品代码（可选）<input id="productCode" maxlength="128" placeholder="留空选择支持 20 USD 首充的产品"></label>
-<label>单卡首充上限（USD，可选）<input id="maxInitialAmount" inputmode="decimal" placeholder="新卡固定首充 20；留空不另设上限"></label>
-<label>Plus 单次预算（USD）<input id="price_plus" inputmode="decimal" placeholder="产品无会员价格时必须填写"></label>
-<label>Pro 100 单次预算（USD）<input id="price_pro100" inputmode="decimal" placeholder="产品无会员价格时必须填写"></label>
-<label>Pro 200 单次预算（USD）<input id="price_pro200" inputmode="decimal" placeholder="产品无会员价格时必须填写"></label>
-<label>Pro 500 单次预算（USD）<input id="price_pro500" inputmode="decimal" placeholder="产品无会员价格时必须填写"></label>
+<div class="panel"><h2>Orbitcard 接单配置</h2><p class="muted">先填写连接凭据并保存，再测试接口和读取支付地区。API Key 需有 subscriptions:read/create、account:read、cards:read/create/fund、products:read、transactions:read 权限。</p><form id="apiForm" class="grid">
+<h3 class="span config-heading">连接凭据</h3>
+<label>HTTPS 根域名（必填）<input id="baseUrl" type="url" placeholder="https://orbitcard.cc" required></label>
+<label>API Key（必填）<input id="apiKey" type="password" autocomplete="new-password" placeholder="留空保留已保存值"><small id="keyState"></small></label>
+<label>API Secret（必填）<input id="apiSecret" type="password" autocomplete="new-password" placeholder="留空保留已保存值"><small id="secretState"></small></label>
+<div class="span config-note">Secret 只在提交时发送到服务端，以 AES-256-GCM 加密保存；页面不会回显。更换 API Key 时必须同时填写配对的 Secret。已有 ORBITCARD_API_SECRET 环境变量仍可使用。</div>
+<h3 class="span config-heading">套餐预算与支付地区</h3>
+<label>Plus 单次预算（USD）<input id="price_plus" inputmode="decimal" placeholder="产品未返回价格时必填"></label>
 <label>Plus 默认支付地区<select id="region_plus"><option value="">平台默认</option></select></label>
+<label>Pro 100 单次预算（USD）<input id="price_pro100" inputmode="decimal" placeholder="产品未返回价格时必填"></label>
 <label>Pro 100 默认支付地区<select id="region_pro100"><option value="">平台默认</option></select></label>
+<label>Pro 200 单次预算（USD）<input id="price_pro200" inputmode="decimal" placeholder="产品未返回价格时必填"></label>
 <label>Pro 200 默认支付地区<select id="region_pro200"><option value="">平台默认</option></select></label>
+<label>Pro 500 单次预算（USD）<input id="price_pro500" inputmode="decimal" placeholder="产品未返回价格时必填"></label>
 <label>Pro 500 默认支付地区<select id="region_pro500"><option value="">平台默认</option></select></label>
-<label>下单服务费上限（USDT，可选）<input id="maxFee" inputmode="decimal" placeholder="由平台下单时校验；留空不设上限"></label>
+<div class="span config-note">预算是会员支付金额，不能填写平台服务费；每档留空时，开卡产品必须返回该档 USD 价格。支付地区留空由 Orbitcard 选择默认地区。</div>
+<h3 class="span config-heading">自动选卡与开卡策略</h3>
+<div class="span config-note">卡片 ID 无需填写。支付前会实时调用 getCardList 取得卡 ID，再按卡状态、次数和余额自动选卡；无符合次数条件的卡时自动开卡并首充 20 USD。</div>
+<div class="span"><div class="row"><strong>平台卡片 ID（自动读取）</strong><button id="refreshCardIds" type="button" class="secondary">重新读取</button></div><p id="cardIdPreview" class="muted" role="status">保存连接凭据后自动读取。</p></div>
+<label>开卡产品代码（可选）<input id="productCode" maxlength="128" placeholder="留空自动选择支持 20 USD 首充的产品"></label>
+<label>单卡首充上限（USD，可选）<input id="maxInitialAmount" inputmode="decimal" placeholder="固定首充 20；留空不另设上限"></label>
+<label>下单服务费上限（USDT，可选）<input id="maxFee" inputmode="decimal" placeholder="留空不设上限"></label>
+<label class="check span"><input id="apiEnabled" type="checkbox">开放新充值订单</label>
 <div class="row span"><button>保存配置</button><button id="testApi" type="button" class="secondary">测试连接</button><button id="loadCatalog" type="button" class="secondary">查询套餐与余额</button><button id="loadRegions" type="button" class="secondary">读取各套餐可用地区</button></div>
-</form><p class="muted">每个套餐可单独选支付地区；留空时使用平台为该套餐标记的默认地区。请先保存 API Key 和域名，再读取可用地区。旧全局支付地区配置不再参与新订单。先检查账户可用余额，不足套餐金额则停止、锁定 CDK 并提醒联系管理员。次数可用的卡余额不足时自动补足差额；有剩余次数的卡异常或占用时锁定 CDK 并提示人工售后。无卡或当前套餐次数全满时自动申请新卡，首充固定 20 USD；管理员也可手动申请。Plus 4 次、Pro 100/200/500 各 1 次独立计数。预算不能填写平台服务费。</p></div>
+</form><p class="muted">账户可用余额不足套餐金额时锁定 CDK 并提示联系管理员。旧卡资金不足时按需补款；支付失败才换卡，未知结果继续查询原订单。Plus 每卡最多 4 次，Pro 100/200/500 每卡各 1 次。</p></div>
 <div class="panel"><h2>套餐与平台余额</h2><pre id="catalog">点击“查询套餐与余额”获取当前信息。</pre></div>
 </section>
 <section id="cards" class="view" hidden>
 <div class="panel"><h2>平台卡片</h2><div class="row"><button id="syncCards" class="secondary">同步平台卡片</button><button id="loadCards" class="secondary">刷新本地记录</button><button id="loadProducts" class="secondary">查询开卡产品与参数</button></div><p class="muted">只读取卡片 ID、尾号、状态和余额，不获取完整卡号或 CVV。历史卡片首次登记需分别填写四种套餐的已有成功次数，确认后不能清零。每卡同一时间只处理一笔充值，四种套餐可混用。</p><div class="table-wrap"><table><thead><tr><th>卡 ID / 尾号</th><th>平台状态 / 余额</th><th>各套餐成功次数</th><th>任务占用</th><th>历史次数 / 对账</th></tr></thead><tbody id="cardRows"></tbody></table></div></div>
-<div class="panel"><h2>卡片消费交易（只读对账）</h2><p class="muted">选择卡片后查询脱敏交易摘要；交易记录用于排查，不据此自动核销 CDK 或退款。需要 API Key 的 transactions:read 权限。</p><div class="row"><label>卡 ID<input id="transactionCardId" type="number" min="1" inputmode="numeric"></label><label>页码<input id="transactionPage" type="number" min="1" value="1" inputmode="numeric"></label><button id="loadTransactions" class="secondary">查询交易</button></div><pre id="cardTransactions">尚未查询。</pre></div>
+<div class="panel"><h2>卡片消费交易（只读对账）</h2><p class="muted">卡 ID 从已同步的平台卡片自动选择；交易记录用于排查，不据此自动核销 CDK 或退款。需要 API Key 的 transactions:read 权限。</p><div class="row"><label>卡 ID（自动读取）<select id="transactionCardId"><option value="">请先同步平台卡片</option></select></label><label>页码<input id="transactionPage" type="number" min="1" value="1" inputmode="numeric"></label><button id="loadTransactions" class="secondary">查询交易</button></div><pre id="cardTransactions">尚未查询。</pre></div>
 <div class="panel"><h2>申请卡片</h2><p>每张新卡固定首充 20 USD，只选择最低首充不高于 20 的可用产品。充值任务会优先复用有次数额度的旧卡，并只补足至当前套餐预算 + 产品最低留存余额。提前手动申请的卡片在实际兑换时按需补款。</p><form id="applyCardForm" class="row"><label>申请关联套餐<select id="applyPlan"><option value="plus">Plus（该项最多 4 次）</option><option value="pro100">Pro 100（该项最多 1 次）</option><option value="pro200">Pro 200（该项最多 1 次）</option><option value="pro500">Pro 500（该项最多 1 次）</option></select></label><button>首充 20 USD 申请一张卡</button></form><pre id="products">点击“查询开卡产品与参数”可查看自动获取的产品码与开卡正文。产品码留空会自动选择；首充 20.00 USD、数量 1 自动填写，实际开卡前重新校验。单独开卡无需会员预算；CDK 兑换的套餐金额仍需明确配置。</pre></div>
 <div class="panel"><div class="row between"><h2>开卡申请记录</h2><button id="refreshIssues" class="secondary">确认原开卡 / 补款</button></div><p class="muted">结果待确认时保留同一申请身份，不更换产品或幂等键重开。</p><div class="table-wrap"><table><thead><tr><th>时间 / 申请标识</th><th>产品 / 首充 USD</th><th>本次套餐 / 状态</th><th>平台订单 / 卡 ID</th></tr></thead><tbody id="issueRows"></tbody></table></div></div>
 <div class="panel"><h2>卡片补款流水</h2><p class="muted">补款成功后还会核对卡片可用余额。未知结果保留原补款、卡片占用及 CDK；已知订单号只匹配原充值流水，不按金额或时间猜测。</p><div class="table-wrap"><table><thead><tr><th>时间 / 任务</th><th>卡 ID / 本次补款 USD</th><th>状态 / 平台订单</th><th>资金快照</th></tr></thead><tbody id="fundingRows"></tbody></table></div></div>
