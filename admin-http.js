@@ -694,6 +694,7 @@ app.get('/api/admin/gpt-api', async (req, res) => {
                 orbitcard_product_code: cfg.orbitcard_product_code,
                 orbitcard_safety_margin: cfg.orbitcard_safety_margin,
                 orbitcard_max_initial_amount: cfg.orbitcard_max_initial_amount,
+                orbitcard_payment_regions: cfg.orbitcard_payment_regions,
                 orbitcard_secret_configured: Boolean(String(process.env.ORBITCARD_API_SECRET || '').trim()),
                 enabled: cfg.enabled,
                 base_url: cfg.base_url,

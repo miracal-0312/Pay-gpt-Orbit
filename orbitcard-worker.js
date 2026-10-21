@@ -13,6 +13,7 @@ async function run({ cfg, planType, session, cdk, setProgress, onSubmission, bro
     subscription.validate({ cfg, identity, planType, session });
     if (!String(process.env.ORBITCARD_API_SECRET || '').trim()) throw new Error('服务端尚未配置 ORBITCARD_API_SECRET');
     await subscription.requirePlan(cfg, planType);
+    await subscription.requireRegion(cfg, planType);
     if (typeof selectCard !== 'function') throw new Error('自动选卡服务尚未初始化');
     const cardId = Number(await selectCard());
     if (!Number.isSafeInteger(cardId) || cardId <= 0) throw new Error('自动选卡未返回有效平台卡 ID');

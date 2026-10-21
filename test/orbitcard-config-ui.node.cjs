@@ -51,6 +51,20 @@ test('Orbitcard credentials come only from environment, never admin input or old
         assert.equal(rows.has('gpt_api_key'), false);
         assert.equal(rows.has('orbitcard_api_secret_ciphertext'), false);
 
+        assert.deepEqual((await core.getGptApiConfig()).orbitcard_payment_regions, { plus: '', pro100: '', pro200: '', pro500: '' });
+        await core.saveGptApiConfig({ orbitcard_payment_regions: { plus: ' ph ', pro100: 'US', pro200: 'JP', pro500: 'CL' } });
+        assert.deepEqual((await core.getGptApiConfig()).orbitcard_payment_regions, { plus: 'PH', pro100: 'US', pro200: 'JP', pro500: 'CL' });
+        await core.saveGptApiConfig({ orbitcard_max_fee: '2' });
+        assert.equal((await core.getGptApiConfig()).orbitcard_payment_regions.plus, 'PH');
+        await core.saveGptApiConfig({ orbitcard_payment_regions: { plus: '' } });
+        assert.deepEqual((await core.getGptApiConfig()).orbitcard_payment_regions, { plus: '', pro100: 'US', pro200: 'JP', pro500: 'CL' });
+        await core.ensureGptApiConfigDefaults();
+        assert.equal((await core.getGptApiConfig()).orbitcard_payment_regions.pro500, 'CL');
+        for (const bad of [null, [], 'US', { go: 'US' }, { plus: 'USA' }, { plus: 1 }, { plus: {} }]) {
+            await assert.rejects(core.saveGptApiConfig({ orbitcard_payment_regions: bad }), /地区/);
+            assert.equal((await core.getGptApiConfig()).orbitcard_payment_regions.pro100, 'US');
+        }
+
         delete process.env.ORBITCARD_API_KEY;
         await assert.rejects(core.saveGptApiConfig({ enabled: true }), /ORBITCARD_API_KEY/);
         const html = fs.readFileSync(path.resolve(__dirname, '../public/admin.html'), 'utf8');
@@ -61,6 +75,7 @@ test('Orbitcard credentials come only from environment, never admin input or old
         assert.doesNotMatch(html, /id="price_plus"|id="region_plus"/);
         assert.match(html, /id="testResult"/);
         assert.match(html, /id="regionResult"/);
+        for (const plan of ['plus', 'pro100', 'pro200', 'pro500']) assert.match(html, new RegExp(`id="paymentRegion_${plan}"`));
         assert.doesNotMatch(script, /api_key:\s*\$|api_secret:\s*\$/);
     } finally {
         if (oldKey === undefined) delete process.env.ORBITCARD_API_KEY;

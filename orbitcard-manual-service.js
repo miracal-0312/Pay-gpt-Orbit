@@ -92,6 +92,8 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
         const selected = enabled.find(item => item.type === planType);
         if (!selected) throw new ManualOrderError('卡台当前未对该 API Key 开放此套餐', 409);
         subscription.validate({ cfg, identity: `manual-${requestId}`, planType, session });
+        try { await subscription.requireRegion(cfg, planType); }
+        catch (error) { throw new ManualOrderError(error.message, 409); }
         const maxConcurrent = await store.getMaxConcurrentActivations();
         if (activeJobs.size >= maxConcurrent) {
             throw new ManualOrderError('当前充值任务已满，请稍后重试', 429);

@@ -15,7 +15,7 @@ const DEFAULT_ADMIN_LOGIN_PATH = String(process.env.ADMIN_LOGIN_PATH || 'admin-l
 const DEFAULT_ADMIN_PANEL_PATH = String(process.env.ADMIN_PANEL_PATH || 'admin').trim().toLowerCase();
 const GPT_API_CONFIG_KEYS = [
     'gpt_api_enabled', 'gpt_api_base_url', 'gpt_api_protocol_version',
-    'orbitcard_max_fee', 'orbitcard_product_code', 'orbitcard_safety_margin', 'orbitcard_max_initial_amount'
+    'orbitcard_max_fee', 'orbitcard_product_code', 'orbitcard_safety_margin', 'orbitcard_max_initial_amount', 'orbitcard_payment_regions'
 ];
 
 function getPool() {
@@ -94,6 +94,7 @@ async function ensureGptApiConfigDefaults() {
         const defaults = { gpt_api_enabled: '0', gpt_api_base_url: orbitcardConfig.DEFAULT_BASE_URL,
             orbitcard_max_fee: '',
             orbitcard_product_code: '', orbitcard_safety_margin: '1', orbitcard_max_initial_amount: '',
+            orbitcard_payment_regions: '{}',
         };
         for (const [key, value] of Object.entries(defaults)) {
             if (saved[key] == null) await runExecute('INSERT IGNORE INTO app_config (config_key, config_value) VALUES (?, ?)', [key, value], options);
@@ -125,7 +126,8 @@ async function getGptApiConfig() {
         orbitcard_max_fee: String(map.orbitcard_max_fee || ''),
         orbitcard_product_code: String(map.orbitcard_product_code || ''),
         orbitcard_safety_margin: String(map.orbitcard_safety_margin ?? '1'),
-        orbitcard_max_initial_amount: String(map.orbitcard_max_initial_amount || '')
+        orbitcard_max_initial_amount: String(map.orbitcard_max_initial_amount || ''),
+        orbitcard_payment_regions: orbitcardConfig.normalizePaymentRegions(JSON.parse(map.orbitcard_payment_regions || '{}'))
     };
 }
 
@@ -134,7 +136,7 @@ async function saveGptApiConfig(input = {}) {
         throw new Error('API Key 和 API Secret 只能在服务器环境变量中配置');
     }
     if (Object.keys(input).some(key => key === 'orbitcard_region' || /^orbitcard_(?:price|region)_(?:plus|pro100|pro200|pro500)$/.test(key))) {
-        throw new Error('套餐金额使用平台推荐价，支付地区由平台默认选择；后台不再接收预算或地区设置');
+        throw new Error('套餐金额使用平台推荐价；旧版预算或地区字段已停用，请使用四档默认充值地区配置');
     }
     const existing = await getGptApiConfig();
     const cfg = orbitcardConfig.prepareConfig(input, existing, Boolean(String(process.env.ORBITCARD_API_SECRET || '').trim()));
@@ -142,7 +144,8 @@ async function saveGptApiConfig(input = {}) {
         gpt_api_protocol_version: orbitcardConfig.PROTOCOL_VERSION,
         orbitcard_max_fee: cfg.orbitcard_max_fee,
         orbitcard_product_code: cfg.orbitcard_product_code, orbitcard_safety_margin: cfg.orbitcard_safety_margin,
-        orbitcard_max_initial_amount: cfg.orbitcard_max_initial_amount };
+        orbitcard_max_initial_amount: cfg.orbitcard_max_initial_amount,
+        orbitcard_payment_regions: JSON.stringify(cfg.orbitcard_payment_regions) };
     await withTransaction(async connection => {
         for (const [key, value] of Object.entries(values)) {
             await runExecute(`INSERT INTO app_config (config_key, config_value) VALUES (?, ?)

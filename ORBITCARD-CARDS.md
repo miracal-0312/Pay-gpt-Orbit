@@ -107,7 +107,7 @@ API Key 需要 `subscriptions:read`、`subscriptions:create`、`account:read`、
 | `GET /api/admin/orbitcard/cards` | 本地卡片摘要、最近 100 条开卡和补款记录；不返回原始请求或凭据哈希 |
 | `POST /api/admin/orbitcard/cards/sync` | 同步卡片列表及非敏感详情；不重置次数 |
 | `GET /api/admin/orbitcard/products` | 查询产品、套餐单价和首充预算，返回 `automatic_application` 与 `application_error`；只读预览不实际开卡 |
-| `GET /api/admin/orbitcard/payment-regions` | 按四档套餐查询可用支付地区及平台默认标记；仅用于诊断，不影响下单 |
+| `GET /api/admin/orbitcard/payment-regions` | 按四档套餐查询可用支付地区及平台默认标记，供默认地区配置和只读调试；指定地区的订单在资金操作前再次校验 |
 | `POST /api/admin/orbitcard/cards/:cardId/bind` | `{usage:{plus:0,pro100:0,pro200:0,pro500:0}}`；一次性确认历史，需二级验证 |
 | `GET /api/admin/orbitcard/cards/:cardId/transactions?page=1` | 管理员只读查询该卡脱敏消费交易；每页 50 条，不获取完整卡号、CVV 或 Session |
 | `POST /api/admin/orbitcard/cards/apply` | `{plan_type:"plus"或"pro100"或"pro200"或"pro500"}`；需二级验证 |

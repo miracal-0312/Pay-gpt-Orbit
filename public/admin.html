@@ -28,14 +28,25 @@
 <div class="panel"><div class="row between"><h2>管理员订单</h2><button id="refreshManualOrders" type="button" class="secondary">刷新订单</button></div><div class="table-wrap"><table><thead><tr><th>时间 / 目标账号</th><th>模式 / 套餐 / 卡片 / CDK</th><th>原订单号</th><th>状态</th><th>操作</th></tr></thead><tbody id="manualOrderRows"></tbody></table></div></div>
 </section>
 <section id="orbitcard" class="view" hidden>
-<div class="panel"><div class="row between"><div><h2>Orbitcard 接单配置</h2><p class="muted">凭据在服务器环境变量中配置；支付金额使用开卡产品目录返回的套餐 USD 推荐价，支付地区由平台决定。</p></div><span id="orderState" class="pill">读取中</span></div>
+<div class="panel"><div class="row between"><div><h2>Orbitcard 接单配置</h2><p class="muted">凭据在服务器环境变量中配置；支付金额使用开卡产品目录返回的套餐 USD 推荐价，可按套餐设置默认充值地区。</p></div><span id="orderState" class="pill">读取中</span></div>
 <form id="apiForm" class="admin-config-form">
 <div class="config-section"><h3>连接与环境变量</h3><div class="config-grid"><label>HTTPS 根域名<input id="baseUrl" type="url" placeholder="https://orbitcard.cc" required></label><div class="credential-status"><span>API Key <strong id="keyState" role="status">正在检查…</strong></span><span>API Secret <strong id="secretState" role="status">正在检查…</strong></span></div></div><p class="config-note">在服务器 <code>.env</code> 设置 <code>ORBITCARD_API_KEY</code> 和 <code>ORBITCARD_API_SECRET</code>，更改后重建应用容器。页面不接收或显示凭据内容。</p></div>
 <div class="config-section"><div class="row between"><h3>平台推荐价（USD）</h3><button id="refreshPrices" type="button" class="secondary">刷新产品价格</button></div><p class="muted">价格按实际支付卡的产品实时读取。目录缺少对应套餐价格时停止自动充值，不使用旧预算或平台服务费代替。</p><div id="pricePreview" class="price-grid" role="status">配置凭据后读取产品目录。</div></div>
+<div class="config-section payment-regions-section">
+<div class="row between"><div><h3>默认充值地区</h3><p class="muted">四档套餐独立设置，对用户兑换和管理员手动开通同时生效。</p></div><button id="refreshPaymentRegions" type="button" class="secondary">刷新可选地区</button></div>
+<div class="payment-region-grid">
+<label>Plus<select id="paymentRegion_plus" aria-describedby="regionHint_plus"><option value="">平台默认</option></select><small id="regionHint_plus" role="status">尚未读取地区。</small></label>
+<label>Pro 100<select id="paymentRegion_pro100" aria-describedby="regionHint_pro100"><option value="">平台默认</option></select><small id="regionHint_pro100" role="status">尚未读取地区。</small></label>
+<label>Pro 200<select id="paymentRegion_pro200" aria-describedby="regionHint_pro200"><option value="">平台默认</option></select><small id="regionHint_pro200" role="status">尚未读取地区。</small></label>
+<label>Pro 500<select id="paymentRegion_pro500" aria-describedby="regionHint_pro500"><option value="">平台默认</option></select><small id="regionHint_pro500" role="status">尚未读取地区。</small></label>
+</div>
+<p id="paymentRegionState" class="muted" role="status">选择后点击下方“保存配置”。</p>
+<p class="config-note">“平台默认”不传地区参数，由 Orbitcard 决定。指定地区在支付准备前实时核验，停用时会停止本次支付。配置只用于尚未提交的新订阅，已提交订单继续查询原单。产品推荐价不等于地区报价，最终扣款以平台订单结果为准。</p>
+</div>
 <div class="config-section"><h3>自动选卡与开卡</h3><div class="config-grid"><label>开卡产品代码（可选）<input id="productCode" maxlength="128" placeholder="留空自动选择"></label><label>单卡首充上限（USD，可选）<input id="maxInitialAmount" inputmode="decimal" placeholder="固定首充 20；留空不另设上限"></label><label>下单服务费上限（USDT，可选）<input id="maxFee" inputmode="decimal" placeholder="留空不设上限"></label></div><div class="card-preview"><div class="row between"><strong>平台卡片 ID（自动读取）</strong><button id="refreshCardIds" type="button" class="secondary">重新读取</button></div><p id="cardIdPreview" class="muted" role="status">配置凭据后读取。</p></div><p class="muted">支付前实时读取卡片状态、次数和余额；没有符合次数条件的卡时自动开卡并首充 20 USD。</p></div>
 <div class="config-footer"><label class="check"><input id="apiEnabled" type="checkbox">开放新充值订单</label><button type="submit">保存配置</button></div>
 </form></div>
-<div class="panel"><h2>接口调试（只读）</h2><p class="muted">连接测试使用当前输入的根域名；套餐、余额与地区查询使用已保存的配置。每次调用的结果会写入下方调试日志。地区结果仅用于诊断，不参与下单。</p><div class="diagnostic-grid">
+<div class="panel"><h2>接口调试（只读）</h2><p class="muted">连接测试使用当前输入的根域名；套餐、余额与地区查询使用已保存的配置。每次调用的结果会写入下方调试日志。调试查询不会修改上方保存的默认充值地区。</p><div class="diagnostic-grid">
 <article class="diagnostic-card"><h3>测试连接</h3><p class="muted"><code>getSubscriptionPlans</code> + <code>getAccountBalance</code></p><button id="testApi" type="button" class="secondary">运行连接测试</button><div id="testResult" class="diagnostic-output" role="status">尚未测试。</div></article>
 <article class="diagnostic-card"><h3>套餐与账户余额</h3><p class="muted">查看启用套餐和账户可用余额。</p><button id="loadCatalog" type="button" class="secondary">查询套餐与余额</button><div id="catalog" class="diagnostic-output" role="status">尚未查询。</div></article>
 <article class="diagnostic-card diagnostic-region-card"><h3>各地区套餐价格调试</h3><p class="muted">逐档读取 <code>getSubscriptionPaymentRegions</code>，并列显示 <code>getProductCode</code> 推荐价。两种价格来源会分别标明。</p><button id="loadRegions" type="button" class="secondary">查询四档地区与价格</button><div id="regionResult" class="diagnostic-output" role="status">尚未查询。</div></article>

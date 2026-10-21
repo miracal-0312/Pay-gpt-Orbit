@@ -4,7 +4,7 @@
 
 ## 服务端配置
 
-在服务器环境变量中填写平台签发且配对的 `ORBITCARD_API_KEY` 和 `ORBITCARD_API_SECRET`；后台只填写 HTTPS 根域名及开卡策略，不接收或保存 API 凭据。四档套餐金额只采用 `getProductCode` 返回的对应 USD 推荐价；接口未返回价格时停止自动充值。订阅下单始终省略 `payment_region`，由平台选择默认地区；地区接口仅供只读调试。新充值先查询 `available_balance`，不足套餐金额即失败并锁定 CDK；再查卡片实时 ACTIVE 状态与次数。旧卡不足自动补差额，无符合次数条件的卡时首充 20 USD 开卡并按需补款；卡 ID 从 `getCardList` 自动读取，不填写固定卡 ID。同一卡 Plus 4 次、Pro 100/200/500 各 1 次，独立计数且允许混用。历史卡需同步后确认四项历史次数，详见 [ORBITCARD-CARDS.md](ORBITCARD-CARDS.md)。
+在服务器环境变量中填写平台签发且配对的 `ORBITCARD_API_KEY` 和 `ORBITCARD_API_SECRET`；后台填写 HTTPS 根域名、四档默认充值地区及开卡策略，不接收或保存 API 凭据。四档套餐金额只采用 `getProductCode` 返回的对应 USD 推荐价；接口未返回价格时停止自动充值。后台可为 Plus、Pro 100、Pro 200、Pro 500 分别指定默认充值地区，选项由 `getSubscriptionPaymentRegions` 返回。选择「平台默认」则不传 `payment_region`；指定地区在资金操作前校验可用性，再传入 `createSubscription`。该设置同时适用于用户兑换和管理员开通，已提交订单仍只查询原单。地区接口没有保证返回地区价格，不能将产品推荐价视为地区报价。新充值先查询 `available_balance`，不足套餐金额即失败并锁定 CDK；再查卡片实时 ACTIVE 状态与次数。旧卡不足自动补差额，无符合次数条件的卡时首充 20 USD 开卡并按需补款；卡 ID 从 `getCardList` 自动读取，不填写固定卡 ID。同一卡 Plus 4 次、Pro 100/200/500 各 1 次，独立计数且允许混用。历史卡需同步后确认四项历史次数，详见 [ORBITCARD-CARDS.md](ORBITCARD-CARDS.md)。
 
 订阅调用需要 `subscriptions:read`、`subscriptions:create` 权限，余额查询另需 `account:read`。新增 `cards:create`、`cards:read`、`products:read`、`cards:fund`、`transactions:read`；不需要敏感卡资料。连接测试只查询套餐和余额，不创建订阅或开卡。卡片协议见 [Open API](Orbitcard-Open-API-V1.md)。
 

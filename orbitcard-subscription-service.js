@@ -4,6 +4,7 @@ const { validOrder } = require('./orbitcard-cdk');
 const { PROVIDER_PLANS, paymentPlan } = require('./plan-registry');
 const { CardPreparationError } = require('./orbitcard-card-policy');
 const { parseSession } = require('./session-input');
+const { paymentRegion } = require('./orbitcard-config');
 
 // Shared by self-service, administrator orders and recovery. Persistence and
 // atomic submission claims belong to the caller; this service never retries a POST.
@@ -15,12 +16,26 @@ module.exports = function createSubscriptionService(provider) {
         if (!(result.plans || []).some(item => item.type === plan)) throw new CardPreparationError('Orbitcard 当前未开放此套餐');
         return plan;
     }
+    async function requireRegion(cfg, planType) {
+        const region = paymentRegion(cfg, planType);
+        if (!region) return;
+        const plan = PROVIDER_PLANS[paymentPlan(planType)];
+        const result = await provider.request(cfg, 'getSubscriptionPaymentRegions', { plan_type: plan });
+        if (!result.success) throw new CardPreparationError('默认充值地区查询失败，请稍后重试；尚未开卡、补款或提交订阅');
+        if (result.data?.plan_type !== plan || !Array.isArray(result.data?.payment_regions)) {
+            throw new CardPreparationError('默认充值地区返回格式或套餐不匹配，已停止支付准备');
+        }
+        if (!result.data.payment_regions.some(item => item?.code === region)) {
+            throw new CardPreparationError(`套餐默认充值地区 ${region} 当前不可用，请管理员重新选择地区或改为平台默认`);
+        }
+    }
     function validate({ cfg, identity, planType, session }) {
         const plan = PROVIDER_PLANS[paymentPlan(planType)];
         if (typeof identity !== 'string' || !identity || identity.length > 128 || /[\s\x00-\x1f]/.test(identity)) {
             throw new CardPreparationError('订阅订单编号无效');
         }
         parseSession(session);
+        paymentRegion(cfg, planType);
         if (cfg.orbitcard_max_fee && !/^\d+(?:\.\d+)?$/.test(cfg.orbitcard_max_fee)) throw new CardPreparationError('最高服务费必须为非负十进制金额');
         return plan;
     }
@@ -30,6 +45,8 @@ module.exports = function createSubscriptionService(provider) {
         if (!Number.isSafeInteger(Number(cardId)) || Number(cardId) < 1) throw new CardPreparationError('支付卡 ID 无效');
         const body = { client_order_no: identity, plan_type: plan, card_id: Number(cardId), session_json: session, authorized: true };
         if (cfg.orbitcard_max_fee) body.max_service_fee = cfg.orbitcard_max_fee;
+        const region = paymentRegion(cfg, planType);
+        if (region) body.payment_region = region;
         return { body, expected: { clientOrderNo: identity, planType: plan, cardId: Number(cardId), email: session.user.email } };
     }
     async function submit(cfg, prepared) {
@@ -52,5 +69,5 @@ module.exports = function createSubscriptionService(provider) {
             captcha: state === 'pending' ? provider.captcha(result.data) : null,
             retryAfterMs: result.retryAfterMs || 0 };
     }
-    return { requirePlan, validate, prepare, submit, query };
+    return { requirePlan, requireRegion, validate, prepare, submit, query };
 };

@@ -6,6 +6,7 @@ let cdkPlans = {};
 let loginUrl = '/admin-login', selected = 'overview', savedBaseUrl = '';
 let cdkPlanFilter = '', cdkLoadSequence = 0, cdkLoadedFilter = null;
 let manualCatalog = { plans: [] }, manualOrders = [];
+let paymentRegionLoadSequence = 0;
 function notice(text, type = '') { $('notice').textContent = text; $('notice').className = `message ${type}`; }
 function escapeHtml(value) { return String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch])); }
 function logout() { localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(SECONDARY_KEY); location.assign(loginUrl); }
@@ -60,6 +61,12 @@ async function loadApi() {
     $('apiEnabled').checked = config.enabled; $('baseUrl').value = config.base_url;
     $('productCode').value = config.orbitcard_product_code || '';
     $('maxInitialAmount').value = config.orbitcard_max_initial_amount || ''; $('maxFee').value = config.orbitcard_max_fee;
+    paymentRegionLoadSequence++;
+    for (const plan of Object.keys(cardPlans)) {
+        renderPaymentRegionOptions(plan, [], config.orbitcard_payment_regions?.[plan] || '');
+        $(`regionHint_${plan}`).textContent = '等待从已保存的平台读取可选地区。';
+    }
+    $('paymentRegionState').textContent = '选择后点击下方“保存配置”。';
     $('orderState').textContent = config.enabled ? '正在接单' : '已暂停新订单';
     $('orderState').className = `pill ${config.enabled ? 'success' : 'pending'}`;
     $('keyState').textContent = config.api_key_configured ? '环境变量已配置' : '缺少 ORBITCARD_API_KEY';
@@ -67,11 +74,63 @@ async function loadApi() {
     $('keyState').dataset.state = config.api_key_configured ? 'configured' : 'missing';
     $('secretState').dataset.state = config.orbitcard_secret_configured ? 'configured' : 'missing';
     if (config.api_key_configured && config.orbitcard_secret_configured) {
-        await Promise.all([loadCardIdPreview(), loadPricePreview()]);
+        await Promise.all([loadCardIdPreview(), loadPricePreview(), loadPaymentRegions()]);
     } else {
         $('cardIdPreview').textContent = '请先在服务器环境变量中配置配对的 API Key 和 API Secret。';
         $('pricePreview').textContent = '凭据尚未配置，无法读取平台推荐价。';
+        $('paymentRegionState').textContent = '请先配置平台凭据；已有地区设置会保留。';
+        $('refreshPaymentRegions').disabled = false;
     }
+}
+function regionLabel(code) {
+    try {
+        const name = new Intl.DisplayNames(['zh-CN'], { type: 'region' }).of(code);
+        return name && name !== code ? `${name} · ${code}` : code;
+    } catch (_) { return code; }
+}
+function renderPaymentRegionOptions(plan, options, selectedValue) {
+    const select = $(`paymentRegion_${plan}`), seen = new Set();
+    const safeOptions = options.filter(item => /^[A-Z]{2}$/.test(item?.code || '') && !seen.has(item.code) && seen.add(item.code));
+    const upstreamDefault = safeOptions.find(item => item.default);
+    select.innerHTML = `<option value="">平台默认${upstreamDefault ? `（${escapeHtml(regionLabel(upstreamDefault.code))}）` : ''}</option>`
+        + safeOptions.map(item => `<option value="${item.code}">${escapeHtml(regionLabel(item.code))}${item.default ? ' · 平台默认项' : ''}</option>`).join('');
+    if (selectedValue && !seen.has(selectedValue)) {
+        const option = document.createElement('option'); option.value = selectedValue;
+        option.textContent = `${regionLabel(selectedValue)}（已选，待确认可用性）`; select.append(option);
+    }
+    select.value = selectedValue;
+    return safeOptions;
+}
+async function loadPaymentRegions() {
+    const sequence = ++paymentRegionLoadSequence, button = $('refreshPaymentRegions');
+    button.disabled = true;
+    $('paymentRegionState').textContent = `正在读取 ${savedBaseUrl} 的四档可选地区…`;
+    let failures = 0;
+    try {
+        for (const plan of Object.keys(cardPlans)) {
+            if (sequence !== paymentRegionLoadSequence) return;
+            const hint = $(`regionHint_${plan}`); hint.textContent = '正在读取…'; hint.className = '';
+            try {
+                const data = await diagnosticFetch(`/api/admin/orbitcard/payment-regions?plan=${plan}`);
+                if (sequence !== paymentRegionLoadSequence) return;
+                const result = data.regions?.[plan];
+                appendPlatformChecks([result?.trace], savedBaseUrl);
+                if (!result || result.error) throw new Error(result?.error || '平台未返回地区');
+                const value = $(`paymentRegion_${plan}`).value;
+                const options = renderPaymentRegionOptions(plan, result.options || [], value);
+                const unavailable = value && !options.some(item => item.code === value);
+                hint.textContent = unavailable ? `已选地区 ${value} 当前未开放，请重新选择。`
+                    : options.length ? `已读取 ${options.length} 个可选地区` : '平台未提供指定地区，可保留平台默认。';
+                hint.className = unavailable ? 'region-unavailable' : '';
+                if (unavailable) failures++;
+            } catch (error) {
+                if (sequence !== paymentRegionLoadSequence) return;
+                failures++; hint.className = 'region-unavailable';
+                hint.textContent = `读取失败，保留当前选择：${error.message}`;
+            }
+        }
+        $('paymentRegionState').textContent = `${failures ? '部分地区需要核对' : '地区读取完成'} · ${new Date().toLocaleTimeString('zh-CN')}。选择后点击下方“保存配置”；根域名修改后请先保存再刷新。`;
+    } finally { if (sequence === paymentRegionLoadSequence) button.disabled = false; }
 }
 async function loadPricePreview() {
     const output = $('pricePreview');
@@ -97,6 +156,7 @@ async function loadCardIdPreview() {
 }
 function apiInput() { return { enabled: $('apiEnabled').checked, base_url: $('baseUrl').value.trim(),
     orbitcard_product_code: $('productCode').value.trim(), orbitcard_max_initial_amount: $('maxInitialAmount').value.trim(),
+    orbitcard_payment_regions: Object.fromEntries(Object.keys(cardPlans).map(plan => [plan, $(`paymentRegion_${plan}`).value])),
     orbitcard_max_fee: $('maxFee').value.trim() }; }
 function renderCardRow(card, sync = null) {
     const id = escapeHtml(card.card_id);
@@ -406,6 +466,10 @@ $('loadRegions').onclick = () => runDiagnostic('loadRegions', 'regionResult', as
 });
 $('clearDiagnosticLog').onclick = () => { diagnosticLines.length = 0; $('diagnosticLog').textContent = '尚无调试记录。'; };
 $('refreshPrices').onclick = () => perform(loadPricePreview);
+$('refreshPaymentRegions').onclick = () => perform(loadPaymentRegions);
+for (const plan of Object.keys(cardPlans)) $(`paymentRegion_${plan}`).addEventListener('change', () => {
+    $('paymentRegionState').textContent = '地区选择已更改，请点击下方“保存配置”后生效。';
+});
 $('refreshCardIds').onclick = () => perform(loadCardIdPreview);
 $('loadCards').onclick = () => perform(loadCards);
 $('loadTransactions').onclick = () => perform(async () => {

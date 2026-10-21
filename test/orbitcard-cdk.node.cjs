@@ -291,6 +291,62 @@ test('a failed submission claim never calls createSubscription',async () => {
     } finally {if(previous===undefined)delete process.env.ORBITCARD_API_SECRET;else process.env.ORBITCARD_API_SECRET=previous;}
 });
 
+test('each configured region is checked before card preparation and passed to its own subscription plan', async () => {
+    const previous = process.env.ORBITCARD_API_SECRET; process.env.ORBITCARD_API_SECRET = 'test-secret';
+    try {
+        const configured = { plus: 'PH', pro100: 'US', pro200: 'JP', pro500: 'CL' };
+        for (const [plan, region] of Object.entries(configured)) {
+            const { api, worker } = modules(), events = [], requests = [];
+            api.fetchPlans = async () => ({ success: true, plans: [{ type: api.PLAN_MAP[plan] }] });
+            api.request = async (_, operation, body, key) => {
+                events.push(operation); requests.push({ operation, body, key });
+                if (operation === 'getSubscriptionPaymentRegions') return { success: true,
+                    data: { plan_type: api.PLAN_MAP[plan], payment_regions: [{ code: region }] } };
+                return { success: false, status: 503 };
+            };
+            await worker.run({ cfg: { orbitcard_payment_regions: configured }, planType: plan, clientOrderNo: `order-${plan}`,
+                session: { user: { email: 'target@example.test' }, account: {}, accessToken: 'test-session' },
+                selectCard: async () => { events.push('allocate'); return 42; },
+                setProgress: async () => {}, onSubmission() {}, broadcast() {}, sleep: async () => {}, maxPolls: 1 });
+            assert.deepEqual(events, ['getSubscriptionPaymentRegions', 'allocate', 'createSubscription', 'getSubscription']);
+            const created = requests.find(row => row.operation === 'createSubscription');
+            assert.equal(created.body.plan_type, api.PLAN_MAP[plan]); assert.equal(created.body.payment_region, region);
+            assert.equal(created.key, `order-${plan}`);
+            assert.deepEqual(requests.at(-1).body, { client_order_no: `order-${plan}` });
+        }
+    } finally { if (previous === undefined) delete process.env.ORBITCARD_API_SECRET; else process.env.ORBITCARD_API_SECRET = previous; }
+});
+
+test('unavailable regions and failed or mismatched region responses stop before any allocation or subscription', async () => {
+    const previous = process.env.ORBITCARD_API_SECRET; process.env.ORBITCARD_API_SECRET = 'test-secret';
+    try {
+        for (const result of [{ success: false, status: 429 }, { success: true, data: { plan_type: 'gpt-plus', payment_regions: [{ code: 'PH' }] } },
+            { success: true, data: { plan_type: 'gpt-pro-5x', payment_regions: [{ code: 'US' }] } }, { success: true, data: {} }]) {
+            const { api, worker } = modules(), operations = [];
+            api.fetchPlans = async () => ({ success: true, plans: [{ type: 'gpt-plus' }] });
+            api.request = async (_, operation) => { operations.push(operation); return result; };
+            await assert.rejects(worker.run({ cfg: { orbitcard_payment_regions: { plus: 'US' } }, planType: 'plus', clientOrderNo: 'stopped-order',
+                session: { user: { email: 'target@example.test' }, account: {}, accessToken: 'test-session' },
+                selectCard: async () => assert.fail('must not allocate or fund'), setProgress: async () => {}, onSubmission() {} }), /地区/);
+            assert.deepEqual(operations, ['getSubscriptionPaymentRegions']);
+        }
+    } finally { if (previous === undefined) delete process.env.ORBITCARD_API_SECRET; else process.env.ORBITCARD_API_SECRET = previous; }
+});
+
+test('platform default and legacy aliases preserve region behavior without an unnecessary upstream query', async () => {
+    const { normalizePaymentRegions, paymentRegion } = require('../orbitcard-config');
+    const gateway = require('../orbitcard-subscription-service')({ request: async () => assert.fail('default needs no region lookup') });
+    const session = { user: { email: 'target@example.test' }, account: {}, accessToken: 'test-session' };
+    const cfg = { orbitcard_payment_regions: normalizePaymentRegions({ pro100: 'US' }) };
+    assert.equal(paymentRegion(cfg, 'pro_5x'), 'US'); assert.equal(paymentRegion(cfg, 'gpt-pro-5x'), 'US');
+    await gateway.requireRegion(cfg, 'plus');
+    const body = gateway.prepare({ cfg, identity: 'original-order', planType: 'plus', cardId: 42, session }).body;
+    assert.equal(Object.hasOwn(body, 'payment_region'), false);
+    const pinned = gateway.prepare({ cfg, identity: 'original-pro-order', planType: 'pro100', cardId: 42, session }).body;
+    cfg.orbitcard_payment_regions.pro100 = 'JP';
+    assert.equal(pinned.payment_region, 'US');
+});
+
 test('worker retries only after a verified terminal upstream failure',async () => {
     const {worker,api}=modules(),operations=[],confirmed=[];
     api.fetchPlans=async()=>({success:true,plans:[{type:'gpt-plus'}]});

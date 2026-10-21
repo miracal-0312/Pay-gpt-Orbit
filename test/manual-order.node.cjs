@@ -62,6 +62,8 @@ function fixture({ unknown = false, pendingAllocation = false, now = Date.now } 
         captcha: () => null,
         request: async (_cfg, operation, body, key) => {
             calls.push({ operation, body, key });
+            if (operation === 'getSubscriptionPaymentRegions') return { success: true,
+                data: { plan_type: body.plan_type, payment_regions: [{ code: 'PH' }, { code: 'US' }] } };
             if (operation === 'createSubscription') {
                 if (unknown) return { success: false, error: 'network timeout' };
                 return { success: true, data: { task_no: 'task-1', client_order_no: key,
@@ -141,6 +143,31 @@ test('unknown submission queries the original order and never submits again', as
     await service.refresh(id);
     assert.equal(calls.filter(x => x.operation === 'createSubscription').length, 1);
     assert(calls.filter(x => x.operation === 'getSubscription').every(x => x.body.client_order_no === `manual-${id}`));
+});
+
+test('administrator test and fulfillment use configured regions, and changing defaults never resubmits an unknown order', async () => {
+    process.env.ORBITCARD_API_KEY = 'key'; process.env.ORBITCARD_API_SECRET = 'secret';
+    for (const mode of ['test', 'fulfillment']) {
+        const f = fixture({ unknown: true }); f.cfg.orbitcard_payment_regions = { plus: 'PH' };
+        const input = { requestId: id, planType: 'gpt-plus', mode, session, authorized: true,
+            ...(mode === 'fulfillment' ? { cdkCode: 'KC-TEST123' } : {}) };
+        await f.service.create(input);
+        await until(() => f.orders.get(id).state === 'manual');
+        assert.equal(f.calls[0].operation, 'getSubscriptionPaymentRegions');
+        assert.equal(f.calls.find(row => row.operation === 'createSubscription').body.payment_region, 'PH');
+        f.cfg.orbitcard_payment_regions.plus = 'US';
+        await f.service.create(input); await f.service.refresh(id);
+        assert.equal(f.calls.filter(row => row.operation === 'createSubscription').length, 1);
+    }
+});
+
+test('administrator region validation precedes order creation, CDK reservation and card preparation', async () => {
+    process.env.ORBITCARD_API_KEY = 'key'; process.env.ORBITCARD_API_SECRET = 'secret';
+    const f = fixture(); f.cfg.orbitcard_payment_regions = { plus: 'JP' };
+    await assert.rejects(f.service.create({ requestId: id, planType: 'gpt-plus', mode: 'fulfillment',
+        cdkCode: 'KC-TEST123', session, authorized: true }), /地区 JP 当前不可用/);
+    assert.equal(f.created.length, 0); assert.equal(f.allocations.length, 0);
+    assert.deepEqual(f.calls.map(row => row.operation), ['getSubscriptionPaymentRegions']);
 });
 
 test('manual preparation is never queried as a submitted subscription', async () => {
