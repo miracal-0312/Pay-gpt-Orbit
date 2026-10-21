@@ -5,7 +5,9 @@ const crypto = require('node:crypto');
 const { DEFAULT_BASE_URL, normalizeBaseUrl } = require('./orbitcard-config');
 const audit = require('./runtime-log');
 
-const PLAN_MAP = Object.freeze({ plus: 'gpt-plus', pro100: 'gpt-pro-5x', pro200: 'gpt-pro-20x', pro500: 'gpt-pro-25x', pro_5x: 'gpt-pro-5x', pro_20x: 'gpt-pro-20x' });
+const { PROVIDER_PLANS, LEGACY_PLAN_ALIASES } = require('./plan-registry');
+const PLAN_MAP = Object.freeze({ ...PROVIDER_PLANS, ...Object.fromEntries(
+    Object.entries(LEGACY_PLAN_ALIASES).map(([alias, plan]) => [alias, PROVIDER_PLANS[plan]])) });
 const accountCooldowns = new Map();
 
 async function request(cfg, operation, body = {}, idempotencyKey = '') {

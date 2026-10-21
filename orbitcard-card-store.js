@@ -28,6 +28,10 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
         async function listCards() {
             return query('SELECT * FROM orbitcard_managed_cards WHERE scope = ? ORDER BY successful_plus+successful_pro100+successful_pro200+successful_pro500 DESC, card_id', [scope]);
         }
+        async function issueForJob(jobKey) {
+            const rows = await query('SELECT * FROM orbitcard_card_issues WHERE scope=? AND job_key=? ORDER BY created_at DESC LIMIT 1', [scope, jobKey]);
+            return rows[0] || null;
+        }
         async function bindCard(cardId, counts) {
             if (!counts || Object.keys(counts).length !== 4 || Object.entries(LIMITS).some(([plan, limit]) =>
                 !Object.hasOwn(counts, plan) || !Number.isInteger(counts[plan]) || counts[plan] < 0 || counts[plan] > limit)) {
@@ -133,7 +137,7 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
             return query(`SELECT * FROM orbitcard_card_fundings WHERE scope=?${pending ? " AND state IN ('prepared','submitting','pending','unknown')" : ''}
                 ORDER BY updated_at ${pending ? 'ASC' : 'DESC'} LIMIT 100`, [scope]);
         }
-        return { syncCards, listCards, bindCard, reserveCard, pendingIssue, createIssue, updateIssue, completeIssue, listIssues, attachIssue,
+        return { syncCards, listCards, bindCard, reserveCard, pendingIssue, createIssue, updateIssue, completeIssue, listIssues, attachIssue, issueForJob,
             blockBalance, fundingForJob, createFunding, updateFunding, listFundings };
     }
 

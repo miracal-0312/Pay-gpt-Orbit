@@ -6,6 +6,7 @@ const api = require('./orbitcard-client');
 const cardsApi = require('./orbitcard-cards-client');
 const { planFor, cardScope, LIMITS } = require('./orbitcard-card-policy');
 const money = require('./orbitcard-money');
+const { decideCards } = require('./orbitcard-payment-decision');
 
 module.exports = function createCardService({ store, audit, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), maxIssuePolls = 3, now = Date.now }) {
     function record(jobKey, event, text, data) { audit({ jobKey: jobKey || '', source: 'orbitcard', event, text, data }); }
@@ -130,60 +131,17 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
         if(relevant.length && details.size===0) {
             throw new CardSwitchExhaustedError('平台卡片列表非空但批量详情全部缺失，无法确认可用支付卡；请联系人工售后');
         }
-        const candidates=[];
-        let busy=false,abnormal=0;
-        const noteAbnormal=(cardId,reason,status='') => {
-            abnormal++;
-            record(jobKey,'card_unavailable','平台支付卡异常，已从本次选卡中排除',{card_id:cardId,reason,status});
-        };
-        for (const row of saved) {
-            if (excluded.has(Number(row.card_id))) continue;
-            if (!live.has(Number(row.card_id))) {
-                if(row.history_confirmed && Number(row[`successful_${plan}`]) < LIMITS[plan] && !row.active_job) {
-                    noteAbnormal(row.card_id,'missing_from_platform_list');
-                }
-                continue;
-            }
-            // Read live status before considering history, quota or card funds.
-            const card = details.get(Number(row.card_id));
-            const eligible=Boolean(row.history_confirmed) && Number(row[`successful_${plan}`]) < LIMITS[plan];
-            if(!card) {
-                if(row.active_job===jobKey) throw new CardPreparationError('已预占卡片的实时详情缺失，请核对原补款及管理员订单');
-                if(eligible && !row.active_job) noteAbnormal(row.card_id,'invalid_detail');
-                continue;
-            }
-            card.product_code ||= live.get(Number(row.card_id))?.product_code || '';
-            card.bin ||= live.get(Number(row.card_id))?.bin || '';
-            await locked.syncCards([card]);
-            if (card.provider_status !== 'ACTIVE') {
-                if(row.active_job===jobKey) throw new CardPreparationError('已预占卡片状态异常，请核对原补款及管理员订单');
-                if(eligible && !row.active_job) noteAbnormal(card.card_id,'inactive',card.provider_status);
-                continue;
-            }
-            if (!eligible) continue;
-            if(row.active_job && row.active_job!==jobKey) {busy=true;continue;}
-            const product = products.find(item => item.product_code === card.product_code);
-            const price = cardsApi.planPrice(product, plan);
-            if (!price || card.currency !== 'USD' || !Number.isFinite(product?.min_retained_balance)
-                || product.min_retained_balance < 0 || card.balance_amount === null) {
-                if(row.active_job===jobKey) throw new CardPreparationError('已预占卡片的支付价格或余额资料异常，请核对原订单');
-                noteAbnormal(card.card_id,'invalid_payment_data',card.provider_status);continue;
-            }
-            try {
-                const target=money.units(price)+money.units(product.min_retained_balance);
-                const deficit=target-money.units(card.balance_amount);
-                candidates.push({card,row,price:money.units(price),target,deficit:deficit>0n?deficit:0n});
-            } catch(error) {
-                if(!(error instanceof CardPreparationError)) throw error;
-                if(row.active_job===jobKey) throw error;
-                noteAbnormal(card.card_id,'invalid_amount',card.provider_status);
-            }
-        }
-        candidates.sort((a,b) => (a.row.active_job===jobKey ? -1 : b.row.active_job===jobKey ? 1 : 0)
-            || (a.deficit<b.deficit?-1:a.deficit>b.deficit?1:0));
+        const decision = decideCards({ saved, listed: liveCards, detailed: [...details.values()], products,
+            jobKey, planType, excludedCardIds: selection.excludedCardIds, priceFor: cardsApi.planPrice });
+        for (const skipped of decision.skipped) record(jobKey, 'card_unavailable', '卡片已从本次支付选择中排除', skipped);
+        for (const card of details.values()) await locked.syncCards([card]);
+        record(jobKey, 'card_payment_decision', '支付卡准备决策', {
+            action: decision.action, candidates: decision.candidates.length, waiting: decision.waiting, skipped: decision.skipped.length });
+        let busy = false;
+        const candidates = decision.candidates;
         for (const candidate of candidates) {
             const {row,card,price,target,deficit}=candidate;
-            await requireFunds(locked,jobKey,initialAvailable,price,planBudget);
+            if (initialAvailable !== null) await requireFunds(locked,jobKey,initialAvailable,price,planBudget);
             const reserved = await locked.reserveCard(card.card_id, jobKey, planType);
             if (!reserved) {
                 if(row.active_job===jobKey) throw new CardPreparationError('原订单预占卡片状态已变更，禁止换卡或重复开卡');
@@ -201,8 +159,11 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
             return card;
         }
         if(owned.length) throw new CardPreparationError('原订单预占卡片暂不可支付，禁止换卡或重复开卡');
-        if(busy) record(jobKey,'card_unavailable','可用卡片均被其他任务占用，无法选择支付卡',{});
-        if(abnormal) record(jobKey,'card_unavailable','异常卡片已排除；无可用卡时尝试申请新卡',{count:abnormal});
+        if (busy || decision.action === 'wait') {
+            const unconfirmed = decision.waiting.some(card => card.reason === 'history_unconfirmed');
+            throw new CardPreparationError(unconfirmed ? '旧卡历史次数尚未确认，请在后台登记后继续；本次未开新卡'
+                : '支付卡正被其他订单占用，请等待原订单完成后重试；本次未开新卡');
+        }
         return null;
     }
 
@@ -216,12 +177,13 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
             } : cardMethods;
             const available=await account(cfg);
             const originalFunding=await locked.fundingForJob(jobKey);
-            if(originalFunding && originalFunding.state!=='failed') {
+            if(originalFunding) {
                 if(originalFunding.scope!==cardScope(cfg.base_url)
                     || originalFunding.credential_hash!==credentialHash(cfg)
                     || originalFunding.plan_type!==planFor(planType)) {
                     throw new CardPreparationError('原补款的平台、密钥或套餐与当前订单不一致，禁止继续支付');
                 }
+                if (originalFunding.state === 'failed') throw new CardPreparationError('原补款已失败，请确认原订单后重新发起兑换');
                 const card = originalFunding.state==='ready'
                     ? await cardsApi.cardDetail(cfg,originalFunding.card_id)
                     : await fundingService.confirm(cfg,locked,originalFunding);
@@ -242,6 +204,22 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
                     throw new CardPreparationError('原补款卡片尚未满足支付金额，请继续核对原补款，禁止换卡重复充值');
                 }
                 return card.card_id;
+            }
+            const originalIssue = await locked.issueForJob(jobKey);
+            if (originalIssue) {
+                if (originalIssue.plan_type !== planFor(planType) || originalIssue.credential_hash !== credentialHash(cfg)) {
+                    throw new CardPreparationError('原开卡申请的套餐或密钥不一致，请核对原订单');
+                }
+                if (originalIssue.state === 'failed') throw new CardPreparationError('原开卡已失败，请确认原订单后重新发起兑换');
+                // Finish this job's original issue before looking at unrelated cards.
+                const opened = originalIssue.state === 'ready'
+                    ? await cardsApi.cardDetail(cfg, originalIssue.card_id) : await confirmIssue(cfg, locked, originalIssue);
+                const products = await cardsApi.products(cfg), budget = budgetFor(products, planType);
+                const selected = await reusable(cfg, locked, jobKey, planType, [opened], products, budget, null, selection);
+                if (!selected || selected.card_id !== Number(originalIssue.card_id)) {
+                    throw new CardPreparationError('原开卡申请的卡片暂不可支付，请核对原卡；禁止重新开卡');
+                }
+                return selected.card_id;
             }
             const products = await cardsApi.products(cfg),planBudget=budgetFor(products,planType);
             await requireFunds(locked,jobKey,available,planBudget);

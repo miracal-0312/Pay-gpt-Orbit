@@ -11,7 +11,8 @@ flowchart TD
     C -->|余额不足| D[锁定 CDK 提醒管理员充值]
     C --> E[拉取卡列表及批量详情]
     E -->|详情整体异常| F[锁定 CDK 告知人工售后]
-    E -->|没有合格可用卡| M[固定幂等键首充20美元自动开卡]
+    E -->|只有占用中或历史待登记的卡| W[提示等待或登记 本次不开卡]
+    E -->|无合格卡且无待处理条件| M[固定幂等键首充20美元自动开卡]
     M -->|确认新卡 ACTIVE| G
     E -->|有合格卡| G[选一张卡预占 按需补差额]
     G --> H[原子认领后提交订阅]
@@ -48,7 +49,9 @@ Session 必须是 JSON 对象，包含 `user`、`account`、字符串 `accessTok
 | --- | --- | --- |
 | 已建任务未提交 | `prepared` | 占用 |
 | 账户可用余额不足 | `balance_blocked` / `failed` | 锁定；首笔准备阶段可在补足后释放，重试阶段转人工售后 |
-| 个别卡异常、占用或次数已满 | 继续选卡 | 无合格旧卡时按原意图自动开卡 |
+| 个别卡异常或次数已满 | 继续选卡 | 无合格旧卡且没有待处理条件时按原意图自动开卡 |
+| 只有占用中或历史待登记的候选卡 | 首次任务 `rejected` | 提示等待或登记，释放本次 CDK；本次不花钱开卡，重试任务保留售后锁定 |
+| 准备记录临时无法读取 | `prepared` / `manual` | 保留 CDK 与支付卡，恢复时先核对原开卡或补款，不查询尚未创建的订阅 |
 | 批量详情整体缺失或归属异常 | `support_locked` / `failed` | 锁定，提示联系人工售后；不盲目开卡 |
 | 无卡或当前套餐次数全满 | `card_pending` 或继续支付 | 自动开卡首充 20 USD；原申请待确认时保留 CDK 与原幂等键 |
 | 卡补款尚待确认，订阅未提交 | `funding_pending` / `manual` | 卡片与 CDK 保持占用，确认原补款后再提示重新提交 Session |
@@ -110,10 +113,16 @@ CDK 与订单关联记录不提供删除接口；有历史任务或使用记录�
 | 模块 | 职责 |
 | --- | --- |
 | `activation-service.js` | 输入校验、接单门禁、并发名额、创建与调度 |
+| `plan-registry.js` | 四档本地套餐、平台套餐映射及单卡独立次数上限 |
+| `payment-service.js` | CDK 支付编排、三张不同卡的明确失败重试、异常保留和最终结算通知 |
 | `orbitcard-cdk-store.js` | CDK 与原单绑定、事务结算和防止旧任务回滚 |
-| `orbitcard-client.js` / `orbitcard-worker.js` | HMAC 请求、只创建一次、原单轮询 |
+| `orbitcard-client.js` | HMAC 请求、超时和平台限流、响应安全摘要 |
+| `orbitcard-subscription-service.js` | 自助、管理员和恢复共用的参数校验、下单正文、原单归属与结果判定 |
+| `orbitcard-worker.js` | 单次订阅尝试、持久化认领、提交一次和原单轮询 |
 | `orbitcard-query.js` / `order-recovery.js` | 查询合并、限流、重启恢复 |
+| `orbitcard-payment-decision.js` | 对一次实时卡片快照作出支付、补款、等待或开卡决策，不包含网络或数据库操作 |
 | `orbitcard-cards-client.js` / `orbitcard-card-service.js` | 账户可用余额、批量选卡、产品预算、补款及管理员开卡恢复 |
+| `orbitcard-manual-service.js` / `orbitcard-manual-store.js` | 管理员测试与人工交付受理、并发占位、原订单恢复和结算 |
 | `orbitcard-money.js` / `orbitcard-funding-service.js` | 十进制差额、幂等补款、原流水恢复和卡余额复核 |
 | `orbitcard-card-store.js` / `orbitcard-card-http.js` | 持久化额度和申请、同事务结算、管理员卡片入口 |
 | `mysql-core.js` / `mysql-store.js` | 数据库、安全配置、核心表迁移及历史保护 |
@@ -121,3 +130,5 @@ CDK 与订单关联记录不提供删除接口；有历史任务或使用记录�
 | `server.js` / `admin-http.js` | 用户与管理员 HTTP、任务订阅 |
 
 `npm test` 使用 Node 内置测试、模拟上游和事务存储，以及本机 HTTP 服务验证流程。不发起真实充值，不能替代部署后的 MySQL 迁移、镜像构建、日志权限或平台连接验证。
+
+此次重构把支付循环从 HTTP 服务中移出，调用顺序保持可验证：Session、套餐和订单编号先校验，再准备卡片及资金；原补款、原开卡先恢复，再处理新选择；只有原子认领后才提交订阅。自助订单的旧凭据哈希存在时必须匹配当前 API Key，管理员订单同时匹配平台与密钥；查询缓存不能绕过身份校验。尚在准备的管理员订单不查订阅，提交后的频繁刷新遵守查询间隔。支付换卡后的审计使用本次任务编号，避免第二、第三次请求混入首笔任务日志。

@@ -28,6 +28,7 @@ module.exports = function fixture() {
         if (q.includes('FROM orbitcard_managed_cards')) return structuredClone(db.cards.filter(c => c.scope === p[0] && (!q.includes('card_id=?') || c.card_id === Number(p[1]))).sort((a,b) => b.successful_plus-a.successful_plus || a.card_id-b.card_id));
         if (q.includes('FROM orbitcard_card_uses')) return structuredClone(db.uses.filter(u => u.job_key === p[0]));
         if (q.includes('FROM orbitcard_card_issues')) return structuredClone(db.issues.filter(i => i.scope === p[0] && (!q.includes('plan_type=?') || i.plan_type === p[1])
+            && (!q.includes('job_key=?') || i.job_key === p[1])
             && (!q.includes('state IN') || ['prepared','submitting','pending','unknown'].includes(i.state))));
         if (q.includes('FROM cdk_codes')) return structuredClone(db.cdks.filter(c => c.cdk_code === p[0]));
         if (q.includes('FROM task_logs')) {

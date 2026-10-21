@@ -1,43 +1,35 @@
 'use strict';
 
 const api = require('./orbitcard-client');
-const { CardPreparationError } = require('./orbitcard-card-policy');
-const { clientOrderNo: makeClientOrderNo, validOrder } = require('./orbitcard-cdk');
+const { clientOrderNo: makeClientOrderNo } = require('./orbitcard-cdk');
+const subscription = require('./orbitcard-subscription-service')(api);
 
 async function run({ cfg, planType, session, cdk, setProgress, onSubmission, broadcast, sleep,
     maxPolls = 180, intervalMs = 5000, onOutcome = () => {}, onConfirmedFailure, onRejectedSubmission,
     clientOrderNo, attemptKey = 'legacy', selectCard }) {
     const plan = api.PLAN_MAP[planType];
     if (!plan) throw new Error(`Orbitcard 尚不支持当前 CDK 套餐: ${planType}`);
-    if (!session || typeof session !== 'object' || !(session.accessToken || session.access_token) || !session.user || !session.account) {
-        throw new Error('Orbitcard 需要目标账号完整 Session JSON（含 user、account、accessToken）');
-    }
+    const identity = clientOrderNo || makeClientOrderNo(cdk, attemptKey);
+    subscription.validate({ cfg, identity, planType, session });
     if (!String(process.env.ORBITCARD_API_SECRET || '').trim()) throw new Error('服务端尚未配置 ORBITCARD_API_SECRET');
-    const plans = await api.fetchPlans(cfg);
-    if (!plans.success) throw new CardPreparationError(plans.error || 'Orbitcard 套餐查询失败，请稍后重试');
-    if (!plans.plans.some(p => p.type === plan)) throw new CardPreparationError('Orbitcard 当前未开放此套餐');
-    if (cfg.orbitcard_max_fee && !/^\d+(?:\.\d+)?$/.test(cfg.orbitcard_max_fee)) throw new Error('最高服务费必须为非负十进制金额');
+    await subscription.requirePlan(cfg, planType);
     if (typeof selectCard !== 'function') throw new Error('自动选卡服务尚未初始化');
     const cardId = Number(await selectCard());
     if (!Number.isSafeInteger(cardId) || cardId <= 0) throw new Error('自动选卡未返回有效平台卡 ID');
     // Fixed within an attempt; a confirmed failed attempt can use a new identity.
-    const identity = clientOrderNo || makeClientOrderNo(cdk, attemptKey);
-    const body = { client_order_no: identity, plan_type: plan, card_id: cardId, session_json: session,
-        authorized: true };
-    if (cfg.orbitcard_max_fee) body.max_service_fee = cfg.orbitcard_max_fee;
+    const prepared = subscription.prepare({ cfg, identity, planType, cardId, session });
     // Persist the binding before any remote write, so a crash can only trigger a query.
     await setProgress('running', 20, '正在提交 Orbitcard 订阅订单...', {
         orbitcardState: 'submitting', expectedState: 'prepared', expectedClientOrderNo: identity
     });
     await onSubmission();
-    const created = await api.request(cfg, 'createSubscription', body, identity);
+    const created = await subscription.submit(cfg, prepared);
     // A create error may include a different or partial task snapshot. Query by our
     // durable client identity until the task number is proven to belong to this order.
-    let orderId = validOrder(created.data, { clientOrderNo: identity, planType: plan,
-        email: session.user.email, cardId }) ? created.data.task_no || created.data.orderId : undefined;
-    let last = api.summary(created.data);
+    let orderId = created.orderId;
+    let last = created.snapshot;
     // Nonzero create codes may still carry an accepted order. Never infer failure from HTTP/code.
-    if (!created.success && created.requestError?.submission_outcome === 'rejected') {
+    if (created.rejected) {
         if (onRejectedSubmission) return onRejectedSubmission({ clientOrderNo: identity, cardId, orderId,
             raw: JSON.stringify(last) });
         await setProgress('failed', 0, 'Orbitcard 已确认拒绝提交，CDK 已释放，请检查配置和 Session 后重试', {
@@ -53,24 +45,19 @@ async function run({ cfg, planType, session, cdk, setProgress, onSubmission, bro
     for (let poll = 0; poll < maxPolls && Date.now() < deadline; poll++) {
         await sleep(Math.min(delay, Math.max(0, deadline - Date.now())));
         if (Date.now() >= deadline) break;
-        const result = await api.request(cfg, 'getSubscription', orderId ? { task_no: orderId } : { client_order_no: identity });
+        const result = await subscription.query(cfg, { ...prepared.expected, orderId });
         if (!result.success) {
             broadcast(null);
             delay = Math.max(5000, Math.min(delay * 2, 30000), result.retryAfterMs || 0);
-            if (result.status === 404 || result.status === 401 || result.status === 403) break;
+            if (result.ownershipMismatch) require('./runtime-log').push({ jobKey: cfg.auditJobKey || '', source: 'orbitcard',
+                event: 'ownership_mismatch', text: '订单归属校验失败，保留 CDK 和原订单' });
+            if (result.stopTracking) break;
             continue;
         }
-        const data = result.data;
-        const receivedId = data?.orderId || data?.task_no;
-        if (!validOrder(data, { orderId, clientOrderNo: identity, planType: plan, email: session.user.email, cardId })) {
-            require('./runtime-log').push({ jobKey: cfg.auditJobKey || '', source: 'orbitcard',
-                event: 'ownership_mismatch', text: '订单归属校验失败，保留 CDK 和原订单' });
-            break;
-        }
-        orderId = receivedId;
-        last = api.summary(data);
-        const status = api.outcome(data, true);
-        broadcast(status === 'pending' ? api.captcha(data) : null);
+        orderId = result.orderId;
+        last = result.snapshot;
+        const status = result.state;
+        broadcast(result.captcha);
         if (status !== 'pending') {
             if (status === 'failed' && onConfirmedFailure) {
                 return onConfirmedFailure({ clientOrderNo: identity, cardId, orderId,
@@ -83,9 +70,9 @@ async function run({ cfg, planType, session, cdk, setProgress, onSubmission, bro
             return status === 'failed';
         }
         await setProgress('running', Math.min(95, 40 + poll),
-            data.stage === 'awaiting_captcha' ? '请完成人机验证，系统将继续查询原订单' : 'Orbitcard 正在处理订阅...',
+            result.stage === 'awaiting_captcha' ? '请完成人机验证，系统将继续查询原订单' : 'Orbitcard 正在处理订阅...',
             { orbitcardState: 'pending', gptApiOrderId: orderId, gptApiRaw: JSON.stringify(last) });
-        delay = Math.max(5000, intervalMs);
+        delay = Math.max(5000, intervalMs, result.retryAfterMs || 0);
     }
     broadcast(null);
     await setProgress('manual', 99, 'Orbitcard 结果待确认，已保留订单和 CDK，请联系管理员查询原订单，勿重复支付',

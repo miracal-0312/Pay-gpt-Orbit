@@ -6,7 +6,7 @@ const createService = require('../orbitcard-manual-service');
 const createStore = require('../orbitcard-manual-store');
 const { cardScope } = require('../orbitcard-card-policy');
 
-function fixture({ unknown = false, pendingAllocation = false } = {}) {
+function fixture({ unknown = false, pendingAllocation = false, now = Date.now } = {}) {
     const orders = new Map(), calls = [], created = [], allocations = [];
     const cfg = { enabled: true, base_url: 'https://orbitcard.cc', api_key: 'key' };
     const plans = [
@@ -80,8 +80,9 @@ function fixture({ unknown = false, pendingAllocation = false } = {}) {
         }
         return 12;
     } };
-    const service = createService({ store, activeJobs: new Set(), audit: () => {}, provider, cardService });
-    return { service, calls, created, orders, allocations, cfg };
+    const activeJobs = new Set();
+    const service = createService({ store, activeJobs, audit: () => {}, provider, cardService, now });
+    return { service, calls, created, orders, allocations, cfg, store, provider, cardService, activeJobs };
 }
 
 async function until(check) {
@@ -140,6 +141,51 @@ test('unknown submission queries the original order and never submits again', as
     await service.refresh(id);
     assert.equal(calls.filter(x => x.operation === 'createSubscription').length, 1);
     assert(calls.filter(x => x.operation === 'getSubscription').every(x => x.body.client_order_no === `manual-${id}`));
+});
+
+test('manual preparation is never queried as a submitted subscription', async () => {
+    process.env.ORBITCARD_API_KEY='key';process.env.ORBITCARD_API_SECRET='secret';
+    const f=fixture({pendingAllocation:true});
+    await assert.rejects(f.service.create({requestId:id,planType:'gpt-plus',mode:'test',session,authorized:true}),/原补款/);
+    assert.equal((await f.service.refresh(id)).state,'preparing');
+    assert.equal(f.calls.length,0);
+});
+
+test('manual query checks original platform before making another request', async () => {
+    process.env.ORBITCARD_API_KEY='key';process.env.ORBITCARD_API_SECRET='secret';
+    const f=fixture({unknown:true});
+    await f.service.create({requestId:id,planType:'gpt-plus',mode:'test',session,authorized:true});
+    await until(()=>f.orders.get(id).state==='manual');
+    const previous=f.calls.length;f.cfg.base_url='https://different.example';
+    await assert.rejects(f.service.refresh(id),/平台地址与原订单不一致/);
+    assert.equal(f.calls.length,previous);
+});
+
+test('manual admission reserves capacity after the awaited limit without oversubscription', async () => {
+    process.env.ORBITCARD_API_KEY='key';process.env.ORBITCARD_API_SECRET='secret';
+    const f=fixture(), releases=[];
+    f.store.getMaxConcurrentActivations=()=>new Promise(resolve=>releases.push(resolve));
+    const first=f.service.create({requestId:id,planType:'gpt-plus',mode:'test',session,authorized:true});
+    const second=f.service.create({requestId:'2b056caa-d7a6-4c39-9672-88e9cc5c6577',planType:'gpt-plus',mode:'test',session,authorized:true});
+    const results=Promise.allSettled([first,second]);
+    await until(()=>releases.length===2);releases.forEach(resolve=>resolve(1));
+    const settled=await results;
+    assert.equal(settled.filter(r=>r.status==='fulfilled').length,1);
+    assert.equal(settled.find(r=>r.status==='rejected').reason.status,429);
+    await until(()=>f.orders.get(id)?.state==='success');
+    assert.equal(f.created.length,1);assert.equal(f.allocations.length,1);
+});
+
+test('manual query respects server Retry-After without creating another order', async () => {
+    process.env.ORBITCARD_API_KEY='key';process.env.ORBITCARD_API_SECRET='secret';
+    let clock=100000;const f=fixture({unknown:true,now:()=>clock});
+    const original=f.provider.request;
+    f.provider.request=async(...args)=>({...await original(...args),retryAfterMs:20000});
+    await f.service.create({requestId:id,planType:'gpt-plus',mode:'test',session,authorized:true});
+    await until(()=>f.orders.get(id)?.state==='pending');
+    await f.service.refresh(id);assert.equal(f.calls.length,1);
+    clock+=20001;await f.service.refresh(id);assert.equal(f.calls.length,2);
+    await f.service.refresh(id);assert.equal(f.calls.length,2);
 });
 
 test('pending funding keeps the same manual request and never submits until it is confirmed', async () => {

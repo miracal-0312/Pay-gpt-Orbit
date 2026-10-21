@@ -2,7 +2,7 @@
 
 const crypto = require('node:crypto');
 
-const LIMITS = Object.freeze({ plus: 4, pro100: 1, pro200: 1, pro500: 1 });
+const { CARD_LIMITS: LIMITS, paymentPlan } = require('./plan-registry');
 class CardPreparationError extends Error {}
 class AccountBalanceError extends CardPreparationError {}
 class FundingPendingError extends CardPreparationError {}
@@ -10,11 +10,7 @@ class CardDataError extends CardPreparationError {}
 class CardSwitchExhaustedError extends CardPreparationError {}
 
 function planFor(planType) {
-    if (['plus', 'gpt-plus'].includes(planType)) return 'plus';
-    if (['pro100', 'pro_5x', 'gpt-pro-5x'].includes(planType)) return 'pro100';
-    if (['pro200', 'pro_20x', 'gpt-pro-20x'].includes(planType)) return 'pro200';
-    if (['pro500', 'gpt-pro-25x'].includes(planType)) return 'pro500';
-    throw new Error('不支持的卡片充值套餐');
+    return paymentPlan(planType);
 }
 
 function cardScope(baseUrl) {

@@ -3,13 +3,11 @@
 const crypto = require('node:crypto');
 const api = require('./orbitcard-client');
 const { parseSession } = require('./session-input');
-const { validOrder } = require('./orbitcard-cdk');
 const { cardScope, CardPreparationError } = require('./orbitcard-card-policy');
+const { PROVIDER_TO_PLAN: CDK_PLAN } = require('./plan-registry');
 
 const REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PLAN_ID = /^[a-z][a-z0-9_-]{0,63}$/;
-const CDK_PLAN = Object.freeze({ 'gpt-plus': 'plus', 'gpt-pro-5x': 'pro100',
-    'gpt-pro-20x': 'pro200', 'gpt-pro-25x': 'pro500' });
 const SUPPORTED_PLANS = Object.freeze(Object.keys(CDK_PLAN));
 const CDK_CODE = /^[A-Za-z0-9_-]{4,32}$/;
 
@@ -17,8 +15,9 @@ class ManualOrderError extends Error {
     constructor(message, status = 400) { super(message); this.status = status; }
 }
 
-module.exports = function createManualService({ store, activeJobs, audit, cardService, provider = api }) {
-    const inFlight = new Set(), challenges = new Map();
+module.exports = function createManualService({ store, activeJobs, audit, cardService, provider = api, now = Date.now }) {
+    const subscription = require('./orbitcard-subscription-service')(provider);
+    const inFlight = new Set(), challenges = new Map(), nextQueryAt = new Map();
     let recovering = false;
     const record = (order, event, text, data = {}) => audit({ jobKey: order?.client_order_no || '', source: 'orbitcard', event, text, data });
 
@@ -92,7 +91,9 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
         const enabled = await plans(cfg);
         const selected = enabled.find(item => item.type === planType);
         if (!selected) throw new ManualOrderError('卡台当前未对该 API Key 开放此套餐', 409);
-        if (activeJobs.size >= await store.getMaxConcurrentActivations()) {
+        subscription.validate({ cfg, identity: `manual-${requestId}`, planType, session });
+        const maxConcurrent = await store.getMaxConcurrentActivations();
+        if (activeJobs.size >= maxConcurrent) {
             throw new ManualOrderError('当前充值任务已满，请稍后重试', 429);
         }
         const slot = `manual-accept-${crypto.randomUUID()}`;
@@ -148,21 +149,18 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
     async function submit(order, cfg, session) {
         const identity = order.client_order_no;
         try {
-            const body = { client_order_no: identity, plan_type: order.plan_type,
-                card_id: Number(order.card_id), session_json: session, authorized: true };
-            if (cfg.orbitcard_max_fee) body.max_service_fee = cfg.orbitcard_max_fee;
-            const result = await provider.request({ ...cfg, auditJobKey: identity }, 'createSubscription', body, identity);
-            const snapshot = provider.summary(result.data);
-            if (!result.success && result.requestError?.submission_outcome === 'rejected') {
+            const prepared = subscription.prepare({ cfg, identity, planType: order.plan_type, cardId: order.card_id, session });
+            const result = await subscription.submit({ ...cfg, auditJobKey: identity }, prepared);
+            const snapshot = result.snapshot;
+            if (result.rejected) {
                 await store.settleManualOrder(order.request_id, { state: 'failed', snapshot,
                     message: 'Orbitcard 明确拒绝提交；支付卡已释放，请核对 Session 与配置' });
                 record(order, 'manual_order_rejected', '卡台明确拒绝管理员订单');
                 return;
             }
-            const valid = validOrder(result.data, { clientOrderNo: identity, planType: order.plan_type,
-                email: order.target_email, cardId: Number(order.card_id) });
+            if (result.retryAfterMs) nextQueryAt.set(order.request_id, now() + result.retryAfterMs);
             await store.settleManualOrder(order.request_id, { state: 'pending',
-                taskNo: valid ? result.data.task_no || result.data.orderId : null, snapshot,
+                taskNo: result.orderId || null, snapshot,
                 message: '已提交或结果待确认；只查询原订单，不重复创建' });
             record(order, 'manual_order_submitted', '管理员订单已提交或状态待确认',
                 { plan_type: order.plan_type, card_id: Number(order.card_id), client_order_no: identity });
@@ -180,26 +178,32 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
         try {
             const order = await store.getManualOrder(requestId);
             if (!order) throw new ManualOrderError('管理员订单不存在', 404);
-            if (['success', 'failed', 'prepared'].includes(order.state)) return publicOrder(order);
+            if (!['submitting', 'pending', 'manual'].includes(order.state)) return publicOrder(order);
             const cfg = knownCfg || await config();
             const hash = crypto.createHash('sha256').update(String(cfg.api_key || '')).digest('hex');
             if (hash !== order.api_key_hash) throw new ManualOrderError('API Key 与原订单不一致，请恢复原配置后查询', 409);
-            const result = await provider.request({ ...cfg, auditJobKey: order.client_order_no }, 'getSubscription',
-                order.task_no ? { task_no: order.task_no } : { client_order_no: order.client_order_no });
-            if (!result.success || !validOrder(result.data, { orderId: order.task_no, clientOrderNo: order.client_order_no,
-                planType: order.plan_type, email: order.target_email, cardId: Number(order.card_id) })) {
+            if (cardScope(cfg.base_url) !== order.scope) throw new ManualOrderError('平台地址与原订单不一致，请恢复原配置后查询', 409);
+            if ((nextQueryAt.get(requestId) || 0) > now()) return publicOrder(order);
+            for (const [key, until] of nextQueryAt) if (until <= now()) nextQueryAt.delete(key);
+            const result = await subscription.query({ ...cfg, auditJobKey: order.client_order_no }, {
+                orderId: order.task_no, clientOrderNo: order.client_order_no,
+                planType: order.plan_type, email: order.target_email, cardId: Number(order.card_id) });
+            nextQueryAt.set(requestId, now() + Math.max(5000, result.retryAfterMs || 0));
+            if (!result.success) {
+                challenges.delete(requestId);
                 record(order, 'manual_order_query_unconfirmed', '原管理员订单尚未返回可核对的归属结果');
                 return publicOrder(await store.settleManualOrder(requestId, { state: 'manual',
                     message: '原订单查询暂不可确认；保留支付卡占用，勿重新付款' }));
             }
-            const state = provider.outcome(result.data, true);
+            const state = result.state;
             const next = state === 'success' ? 'success' : state === 'failed' ? 'failed' : 'pending';
-            const captcha = provider.captcha(result.data);
+            if (next !== 'pending') nextQueryAt.delete(requestId);
+            const captcha = result.captcha;
             if (captcha && next === 'pending') challenges.set(requestId, captcha);
             else challenges.delete(requestId);
             const updated = await store.settleManualOrder(requestId, {
-                state: next, taskNo: result.data.task_no || result.data.orderId,
-                snapshot: provider.summary(result.data),
+                state: next, taskNo: result.orderId,
+                snapshot: result.snapshot,
                 message: next === 'success' ? 'Orbitcard 已确认开通成功' : next === 'failed'
                     ? 'Orbitcard 已确认开通失败；支付卡已释放' : captcha
                         ? '需要完成人机验证，然后继续查询原订单' : 'Orbitcard 仍在处理；继续查询原订单'

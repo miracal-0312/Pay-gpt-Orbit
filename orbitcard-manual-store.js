@@ -2,8 +2,7 @@
 
 const { cardScope, LIMITS } = require('./orbitcard-card-policy');
 
-const COUNTED_PLANS = Object.freeze({ 'gpt-plus': 'plus', 'gpt-pro-5x': 'pro100',
-    'gpt-pro-20x': 'pro200', 'gpt-pro-25x': 'pro500' });
+const { PROVIDER_TO_PLAN: COUNTED_PLANS } = require('./plan-registry');
 
 module.exports = function createManualStore({ runQuery, runExecute, withTransaction }) {
     async function getManualOrder(requestId) {

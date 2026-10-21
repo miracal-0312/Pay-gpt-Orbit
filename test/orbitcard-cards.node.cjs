@@ -443,7 +443,7 @@ test('card allocation failure prevents any subscription create request',async ()
     }});
     const previous=process.env.ORBITCARD_API_SECRET; process.env.ORBITCARD_API_SECRET='fixture';
     try {
-        await assert.rejects(worker.run({cfg:{},planType:'plus',session:{user:{email:'c@example.test'},account:{},accessToken:'secret'},
+        await assert.rejects(worker.run({cfg:{},planType:'plus',clientOrderNo:'allocation-failure',session:{user:{email:'c@example.test'},account:{},accessToken:'secret'},
             selectCard:async () => {throw new Error('card unavailable');}}),/card unavailable/);
         assert.deepEqual(calls,[]);
     } finally {if(previous===undefined) delete process.env.ORBITCARD_API_SECRET; else process.env.ORBITCARD_API_SECRET=previous;}
@@ -471,6 +471,112 @@ test('full worker path passes selected card to create and atomically consumes it
         assert.equal(f.db.cards[0].successful_plus,1); assert.equal(f.db.cards[0].active_job,null); assert.equal(f.db.tasks[0].status,'success');
         assert.ok(!JSON.stringify(f.db).includes('private-session')); assert.ok(!JSON.stringify(f.events).includes('private-session'));
     } finally {if(previous===undefined) delete process.env.ORBITCARD_API_SECRET; else process.env.ORBITCARD_API_SECRET=previous;}
+});
+
+async function runPaymentCore({ plan = 'plus', balance = 50, empty = false, result = 'success', account = 10000,
+    invalidSession = false, count = 1 } = {}) {
+    const f = serviceFixture(), requests = [], notices = [], activeJobs = new Set(), activeChallenges = new Map();
+    const cards = [];
+    if (!empty) for (let n = 0; n < count; n++) cards.push({ ...await f.addCard(42 + n), status: 'ACTIVE', balance });
+    f.setCards(cards); f.setAccount(account);
+    const task = await f.claim(plan), orders = new Map(), provider = require('../orbitcard-client');
+    const transport = { PLAN_MAP: provider.PLAN_MAP, summary: provider.summary, outcome: provider.outcome, captcha: () => null,
+        fetchPlans: async () => ({ success: true, plans: Object.values(require('../plan-registry').PROVIDER_PLANS).map(type => ({ type })) }),
+        request: async (config, operation, body, key) => {
+            requests.push({ operation, body, key, jobKey: config.auditJobKey });
+            if (operation === 'createSubscription') {
+                const current = f.db.tasks.find(row => row.orbitcard_client_order_no === body.client_order_no);
+                assert.equal(current.orbitcard_state, 'submitting');
+                assert.equal(f.db.cards.find(row => row.card_id === body.card_id).active_job, current.job_key);
+                assert.equal(body.payment_region, undefined);
+                assert.equal(key, body.client_order_no);
+                const snapshot = { task_no: `SUB-${orders.size + 1}`, client_order_no: key, card_id: body.card_id,
+                    targetEmail: body.session_json.user.email, plan_type: body.plan_type,
+                    status: result === 'success' ? 'succeeded' : 'failed', subscription_succeeded: result === 'success' };
+                orders.set(key, snapshot);
+                return result === 'unknown' ? { success: false, status: 504 } : { success: true, data: snapshot };
+            }
+            assert.equal(operation, 'getSubscription');
+            if (result === 'unknown') return { success: false, status: 503 };
+            return { success: true, data: orders.get(body.client_order_no) || [...orders.values()].find(row => row.task_no === body.task_no) };
+        } };
+    const worker = load('orbitcard-worker.js', { './orbitcard-client': transport });
+    const store = { ...f.store, getTaskStatus: async key => structuredClone(f.db.tasks.find(row => row.job_key === key)) };
+    const core = require('../payment-service')({ store, cardService: f.service, worker: { run: args => worker.run({ ...args, maxPolls: 1 }) },
+        activeJobs, activeChallenges, audit: event => f.events.push(event), broadcast() {}, log() {},
+        notify: async order => notices.push(order), sleep: async () => {} });
+    const previous = process.env.ORBITCARD_API_SECRET; process.env.ORBITCARD_API_SECRET = 'fixture';
+    activeJobs.add(task.jobKey);
+    try {
+        await core.run({ task: { ...task, apiConfig: cfg }, cdk: 'CODE-1', planType: plan,
+            session: invalidSession ? {} : { user: { email: 'customer@example.test' }, account: {}, accessToken: 'private-core-session' } });
+    } finally { if (previous === undefined) delete process.env.ORBITCARD_API_SECRET; else process.env.ORBITCARD_API_SECRET = previous; }
+    assert.equal(activeJobs.size, 0); assert.equal(activeChallenges.size, 0);
+    assert.ok(!JSON.stringify([f.db, f.events, notices]).includes('private-core-session'));
+    return { ...f, requests, notices };
+}
+
+test('payment core completes all four plans and settles CDK and card quota exactly once', async () => {
+    for (const plan of ['plus', 'pro100', 'pro200', 'pro500']) {
+        const f = await runPaymentCore({ plan, balance: 600 });
+        assert.equal(f.db.tasks[0].status, 'success'); assert.ok(f.db.cdks[0].used_at);
+        assert.equal(f.db.cards[0][`successful_${plan}`], 1); assert.equal(f.db.cards[0].active_job, null);
+        assert.equal(f.db.uses[0].state, 'consumed'); assert.equal(f.db.issues.length, 0); assert.equal(f.db.fundings.length, 0);
+        assert.deepEqual(f.requests.map(row => row.operation), ['createSubscription', 'getSubscription']);
+        assert.equal(f.notices.at(-1).status, 'success');
+    }
+});
+
+test('payment core funds the exact deficit or opens at 20 USD before submitting membership', async () => {
+    const old = await runPaymentCore({ balance: 5 });
+    assert.equal(old.db.fundings[0].amount, '16.00'); assert.equal(old.db.fundings[0].state, 'ready');
+    assert.equal(old.db.issues.length, 0); assert.equal(old.db.tasks[0].status, 'success');
+    const fresh = await runPaymentCore({ empty: true });
+    assert.equal(fresh.db.issues.length, 1); assert.equal(fresh.db.issues[0].amount, '20.00');
+    assert.equal(fresh.db.fundings[0].amount, '1.00'); assert.equal(fresh.db.tasks[0].status, 'success');
+    assert.equal(fresh.calls.filter(row => row.operation === 'createCard').length, 1);
+});
+
+test('payment core keeps unknown payments on the original identity and retains CDK and card', async () => {
+    const f = await runPaymentCore({ result: 'unknown' });
+    assert.equal(f.db.tasks.length, 1); assert.equal(f.db.tasks[0].orbitcard_state, 'manual');
+    assert.ok(f.db.cdks[0].used_at); assert.equal(f.db.cards[0].active_job, f.db.tasks[0].job_key);
+    assert.equal(f.db.cards[0].successful_plus, 0);
+    assert.deepEqual(f.requests.map(row => row.operation), ['createSubscription', 'getSubscription']);
+    assert.equal(f.requests[1].body.client_order_no, f.requests[0].key);
+});
+
+test('payment core rotates only confirmed failures and locks after three distinct cards', async () => {
+    const f = await runPaymentCore({ result: 'failed', count: 3 });
+    assert.equal(f.db.tasks.length, 3); assert.equal(f.db.tasks.at(-1).orbitcard_state, 'support_locked');
+    assert.ok(f.db.cdks[0].used_at);
+    const writes = f.requests.filter(row => row.operation === 'createSubscription');
+    assert.equal(new Set(writes.map(row => row.key)).size, 3);
+    assert.equal(new Set(writes.map(row => row.body.card_id)).size, 3);
+    assert.deepEqual(writes.map(row => row.jobKey), f.db.tasks.map(row => row.job_key));
+    assert.ok(f.db.cards.every(row => row.successful_plus === 0 && !row.active_job));
+});
+
+test('payment core rejects invalid session before funding and locks an insufficient account before payment', async () => {
+    const invalid = await runPaymentCore({ invalidSession: true, empty: true });
+    assert.equal(invalid.calls.length, 0); assert.equal(invalid.requests.length, 0); assert.equal(invalid.db.cdks[0].used_at, null);
+    const low = await runPaymentCore({ account: 1 });
+    assert.equal(low.requests.length, 0); assert.equal(low.db.tasks[0].orbitcard_state, 'balance_blocked');
+    assert.ok(low.db.cdks[0].used_at); assert.equal(low.db.fundings.length, 0); assert.equal(low.db.issues.length, 0);
+});
+
+test('a transient failure reading preparation records cannot release CDK or the reserved payment card', async () => {
+    const f = fixture(), task = await f.claim(); await f.addCard();
+    await f.store.cardMethods(f.base).reserveCard(42, task.jobKey, 'plus');
+    const store = { ...f.store, getCardIssueForTask: async () => { throw new Error('temporary read failure'); },
+        getTaskStatus: async key => structuredClone(f.db.tasks.find(row => row.job_key === key)) };
+    const core = require('../payment-service')({ store, cardService: {},
+        worker: { run: async () => { throw new Error('preparation interrupted'); } },
+        activeJobs: new Set([task.jobKey]), activeChallenges: new Map(), audit() {}, broadcast() {}, log() {}, notify: async () => {} });
+    await core.run({ task: { ...task, apiConfig: cfg }, cdk: 'CODE-1', planType: 'plus', session: {} });
+    assert.equal(f.db.tasks[0].orbitcard_state, 'prepared'); assert.equal(f.db.tasks[0].status, 'manual');
+    assert.ok(f.db.cdks[0].used_at); assert.equal(f.db.cards[0].active_job, task.jobKey);
+    assert.equal(f.db.uses[0].state, 'reserved');
 });
 
 test('prepared issuance recovery does not send a remote write after a crash',async () => {
@@ -734,12 +840,46 @@ test('unknown automatic opening stays bound to the CDK and reuses its original k
     assert.equal(f.db.issues.length,1);
 });
 
-test('busy or abnormal cards with remaining quota are skipped before opening a new card',async () => {
+test('unconfirmed imported history pauses instead of buying another card',async()=>{
+    const f=serviceFixture(),card=await f.addCard(42,false);f.setCards([{...card,status:'ACTIVE'}]);
+    const task=await f.claim();await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/历史次数尚未确认/);
+    assert.ok(!f.calls.some(call=>['createCard','rechargeCard'].includes(call.operation)));
+});
+
+test('an original pending opening cannot be bypassed by another funded card',async()=>{
+    const f=serviceFixture({createCard:async()=>({success:true,data:{order_no:'OPEN-1',status:'pending_confirm',completed:false}})});
+    const task=await f.claim();await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/原开卡申请仍待确认/);
+    const available=await f.addCard(42);f.setCards([{...available,status:'ACTIVE',balance:100}]);f.advance();
+    await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/原开卡申请仍待确认/);
+    assert.equal(f.db.cards[0].active_job,null);assert.equal(f.db.issues.length,1);
+    const requests=f.calls.filter(call=>call.operation==='createCard');
+    assert.equal(requests.length,2);assert.equal(requests[0].key,requests[1].key);
+});
+
+test('a ready original opening resumes its own card without applying account threshold twice',async()=>{
+    const f=serviceFixture();const task=await f.claim();
+    await assert.rejects(f.service.allocate({...cfg,orbitcard_max_initial_amount:'1'},task.jobKey,'plus'),/上限/);
+    const card=await f.addCard(42);f.setCards([{...card,status:'ACTIVE',balance:50}]);
+    const methods=f.store.cardMethods(cfg.base_url);
+    await methods.createIssue({issue_key:'original-ready',job_key:task.jobKey,plan_type:'plus',product_code:'p1',amount:'20.00',
+        credential_hash:require('node:crypto').createHash('sha256').update(cfg.api_key).digest('hex'),
+        request_body:JSON.stringify({product_code:'p1',amount:'20.00',quantity:1})});
+    await methods.completeIssue({issue_key:'original-ready'},card);f.setAccount(0);
+    assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),42);
+    assert.ok(!f.calls.some(call=>call.operation==='createCard'));
+});
+
+test('busy cards wait without spending; unavailable cards can trigger a new card',async () => {
     for(const setup of ['busy','frozen']) {
         const f=serviceFixture(),card=await f.addCard(42);
         f.setCards([{...card,status:setup==='frozen'?'FROZEN':'ACTIVE',balance:50}]);
         if(setup==='busy') f.db.cards[0].active_job='other';
         const task=await f.claim();
+        if (setup === 'busy') {
+            await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'), /其他订单占用/);
+            assert.equal(f.calls.filter(call=>['createCard','rechargeCard'].includes(call.operation)).length,0);
+            continue;
+        }
         assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),101);
         assert.equal(f.calls.filter(call=>call.operation==='createCard').length,1);
     }

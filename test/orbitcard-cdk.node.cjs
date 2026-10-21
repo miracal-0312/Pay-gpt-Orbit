@@ -418,6 +418,19 @@ test('query ownership mismatch preserves the CDK and does not persist credential
     assert.ok(!JSON.stringify(result).includes('secret'));
 });
 
+test('original-order queries reject changed credentials before network or cached result reuse', async () => {
+    const { api, query } = modules(); let calls = 0;
+    api.request = async () => { calls++; return { success: false, status: 503 }; };
+    const input = { cfg: { base_url: 'https://orbitcard.test', api_key: 'original' }, task: {
+        job_key: 'key-bound-order', orbitcard_base_url: 'https://orbitcard.test', orbitcard_client_order_no: 'original-order',
+        orbitcard_api_key_hash: require('node:crypto').createHash('sha256').update('original').digest('hex') }, persist: async () => {} };
+    await assert.rejects(query.refresh({ ...input, cfg: { ...input.cfg, api_key: 'changed' } }), /原订单不同/);
+    assert.equal(calls, 0);
+    await query.refresh(input);
+    await assert.rejects(query.refresh({ ...input, cfg: { ...input.cfg, api_key: 'changed' } }), /原订单不同/);
+    assert.equal(calls, 1);
+});
+
 test('activation errors before acquiring a CDK cannot roll back somebody else’s lock', async () => {
     let rollbacks = 0;
     const deps = { ensureStoreReady: async () => {}, activeJobs: new Set(),
