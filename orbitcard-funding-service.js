@@ -29,6 +29,7 @@ module.exports = function createFundingService({ api, cardsApi, audit, now, slee
         throw new FundingPendingError('原补款流水分页超过上限，保留原订单');
     }
     async function confirm(cfg, locked, funding, polls=maxPolls) {
+        await cfg.executionGuard?.assertOwned();
         if (funding.scope!==cardScope(cfg.base_url) || funding.credential_hash!==keyHash(cfg)) throw new FundingPendingError('补款平台或 API Key 与原申请不同，请恢复原配置后确认');
         if (Number(funding.retry_at || 0)>now()) throw new FundingPendingError('原补款订单仍在重查间隔内，请稍后确认');
         let body;

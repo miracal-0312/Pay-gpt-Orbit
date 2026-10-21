@@ -44,6 +44,7 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
             if (!task?.orbitcard_client_order_no) throw new Error('兑换任务未绑定 Orbitcard 订单');
             if (expectedState && task.orbitcard_state !== expectedState) return { applied: false, status: task.status };
             if (expectedClientOrderNo && task.orbitcard_client_order_no !== expectedClientOrderNo) return { applied: false, status: task.status };
+            if (gptApiOrderId && task.gpt_api_order_id && task.gpt_api_order_id !== gptApiOrderId) return { applied: false, status: task.status };
             if (['prepared','submitting'].includes(orbitcardState)
                 && (expectedState !== 'prepared' || !expectedClientOrderNo || task.orbitcard_state !== 'prepared')) {
                 return { applied: false, status: task.status };
@@ -53,7 +54,16 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
             // Stale reads must never release a code after confirmed success, nor reopen a failed attempt.
             if (task.orbitcard_state === 'success' && orbitcardState !== 'success') return { applied: false, status: 'success' };
             if (task.orbitcard_state === 'support_locked') return { applied: false, status: 'failed' };
-            if (['failed', 'rejected'].includes(task.orbitcard_state) && !['success','failed','rejected'].includes(orbitcardState)) return { applied: false, status: task.status };
+            if (['failed', 'rejected'].includes(task.orbitcard_state)) return { applied: false, status: task.status };
+            if (task.orbitcard_state === 'prepared' && ['failed','rejected'].includes(orbitcardState)) {
+                // Recheck inside the transaction: a recovery snapshot can predate
+                // a funding/issuance intent committed by a worker losing its lock.
+                const funding = await runQuery(`SELECT funding_key FROM orbitcard_card_fundings WHERE job_key=?
+                    AND state IN ('prepared','submitting','pending','unknown') FOR UPDATE`, [jobKey], options);
+                const issue = task.orbitcard_issue_key ? await runQuery(`SELECT issue_key FROM orbitcard_card_issues WHERE issue_key=?
+                    AND state IN ('prepared','submitting','pending','unknown') FOR UPDATE`, [task.orbitcard_issue_key], options) : [];
+                if (funding.length || issue.length) return { applied: false, status: task.status };
+            }
             await runExecute(`UPDATE task_logs SET status = ?, progress = GREATEST(progress, ?), message = ?,
                 orbitcard_state = ?, gpt_api_order_id = COALESCE(?, gpt_api_order_id),
                 gpt_api_raw = COALESCE(?, gpt_api_raw), session_payload = NULL WHERE job_key = ?`,
@@ -105,7 +115,7 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
             if (failure.subscription_succeeded !== false && failure.upstream_status !== 'failed' && failure.status !== 'failed') {
                 throw new Error('缺少平台明确的订阅失败终态，不能自动重试');
             }
-            if (!orderId || (failure.task_no && failure.task_no !== orderId)
+            if (!orderId || (task.gpt_api_order_id && task.gpt_api_order_id !== orderId) || (failure.task_no && failure.task_no !== orderId)
                 || (failure.orderId && failure.orderId !== orderId)
                 || (failure.client_order_no && failure.client_order_no !== clientOrderNo)
                 || (failure.card_id != null && Number(failure.card_id) !== card)) {

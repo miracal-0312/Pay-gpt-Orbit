@@ -100,6 +100,7 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
                 || (await runQuery('SELECT funding_key FROM orbitcard_card_fundings WHERE job_key = ? LIMIT 1', [jobKey], options)).length) {
                 throw new Error('管理员订单已有开卡或补款意图，须核对原单，不能自动释放');
             }
+            if (order.cdk_code) await runQuery('SELECT cdk_code FROM cdk_codes WHERE cdk_code = ? FOR UPDATE', [order.cdk_code], options);
             if (Number(order.card_id) > 0) {
                 const [card] = await runQuery('SELECT * FROM orbitcard_managed_cards WHERE scope = ? AND card_id = ? FOR UPDATE',
                     [order.scope, order.card_id], options);
@@ -108,7 +109,6 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
                     [order.scope, order.card_id, jobKey], options);
             }
             if (order.cdk_code) {
-                await runQuery('SELECT cdk_code FROM cdk_codes WHERE cdk_code = ? FOR UPDATE', [order.cdk_code], options);
                 await runExecute('UPDATE cdk_codes SET used_at = NULL WHERE cdk_code = ?', [order.cdk_code], options);
             }
             await runExecute("UPDATE orbitcard_admin_orders SET state = 'failed', message = ? WHERE request_id = ? AND state = 'preparing'",
@@ -221,6 +221,7 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
             if (!order) throw new Error('管理员订单不存在');
             if (order.task_no && taskNo && order.task_no !== taskNo) throw new Error('平台订单号与原订单不一致');
             if (['success', 'failed'].includes(order.state)) return order;
+            if (!['submitting','pending','manual'].includes(order.state)) return order;
             const safeTaskNo = taskNo || order.task_no || null;
             await runExecute(`UPDATE orbitcard_admin_orders SET state = ?, task_no = COALESCE(task_no, ?),
                 snapshot = ?, message = ? WHERE request_id = ?`,

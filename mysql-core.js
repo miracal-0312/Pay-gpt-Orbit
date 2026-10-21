@@ -46,6 +46,21 @@ function createPasswordHash(password) {
     return `scrypt$${salt}$${hash}`;
 }
 
+async function openLockConnection() {
+    const connection = await mysql.createConnection({ host: DB_HOST, port: DB_PORT, user: DB_USER, password: DB_PASSWORD,
+        database: DB_NAME, charset: 'utf8mb4', enableKeepAlive: true, keepAliveInitialDelay: 10000,
+        connectTimeout: 10000 });
+    // Dedicated connections may fail while awaiting the platform rather than a
+    // database query. Handle idle errors; the next ownership check/query fails.
+    connection.on('error', () => {});
+    return connection;
+}
+
+function queryError(error) {
+    return Object.assign(new Error(`MySQL 执行失败: ${error?.message || String(error)}`, { cause: error }),
+        { code: error?.code, errno: error?.errno });
+}
+
 async function runQuery(sql, params = [], options = {}) {
     const executor = options.connection || getPool();
 
@@ -53,8 +68,7 @@ async function runQuery(sql, params = [], options = {}) {
         const [rows] = await executor.query(sql, params);
         return rows;
     } catch (error) {
-        const detail = error && error.message ? error.message : String(error);
-        throw new Error(`MySQL 执行失败: ${detail}`);
+        throw queryError(error);
     }
 }
 
@@ -65,25 +79,11 @@ async function runExecute(sql, params = [], options = {}) {
         const [result] = await executor.execute(sql, params);
         return result;
     } catch (error) {
-        const detail = error && error.message ? error.message : String(error);
-        throw new Error(`MySQL 执行失败: ${detail}`);
+        throw queryError(error);
     }
 }
 
-async function withTransaction(callback) {
-    const connection = await getPool().getConnection();
-    try {
-        await connection.beginTransaction();
-        const result = await callback(connection);
-        await connection.commit();
-        return result;
-    } catch (error) {
-        await connection.rollback();
-        throw error;
-    } finally {
-        connection.release();
-    }
-}
+const withTransaction = require('./mysql-transaction')({ getPool });
 
 async function ensureGptApiConfigDefaults() {
     await withTransaction(async connection => {
@@ -462,4 +462,4 @@ async function updateAdminPassword(password) {
         passwordVersion: nextVersion
     };
 }
-module.exports = { getPool, createPasswordHash, runQuery, runExecute, withTransaction, ensureGptApiConfigDefaults, getGptApiConfig, saveGptApiConfig, hasColumn, ensureColumn, getAppConfigValue, setAppConfigValue, getTelegramConfig, saveTelegramConfig, getMaintenanceModeState, setMaintenanceModeState, getAdminAuthConfig, saveAdmin2faLoginMode, getAdminPaths, saveAdminPaths, updateAdminEmail, updateAdminSecondaryPassword, saveAdminTotpConfig, insertAdminLoginLog, listAdminLoginLogs, updateAdminPassword, close: async () => { if (pool) await pool.end(); }, connectionInfo: { host: DB_HOST, port: DB_PORT, database: DB_NAME, user: DB_USER } };
+module.exports = { getPool, openLockConnection, createPasswordHash, runQuery, runExecute, withTransaction, ensureGptApiConfigDefaults, getGptApiConfig, saveGptApiConfig, hasColumn, ensureColumn, getAppConfigValue, setAppConfigValue, getTelegramConfig, saveTelegramConfig, getMaintenanceModeState, setMaintenanceModeState, getAdminAuthConfig, saveAdmin2faLoginMode, getAdminPaths, saveAdminPaths, updateAdminEmail, updateAdminSecondaryPassword, saveAdminTotpConfig, insertAdminLoginLog, listAdminLoginLogs, updateAdminPassword, close: async () => { if (pool) await pool.end(); }, connectionInfo: { host: DB_HOST, port: DB_PORT, database: DB_NAME, user: DB_USER } };

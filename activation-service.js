@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const { parseSession } = require('./session-input');
 const config = require('./orbitcard-config');
+const { cdkLockKey } = require('./payment-execution-lock');
 
 // The only redemption entry point. Reservation is acquired before any remote create.
 module.exports = function createActivationHandler({ store, ensureStoreReady, activeJobs, runWorker, log, isDraining = () => false }) {
@@ -12,7 +13,7 @@ module.exports = function createActivationHandler({ store, ensureStoreReady, act
         let session;
         try { session = parseSession(req.body?.session || req.body?.token); }
         catch (error) { return res.status(400).json({ success: false, message: error.message }); }
-        let slot = null, task = null, dispatched = false;
+        let slot = null, task = null, dispatched = false, executionGuard = null;
         try {
             await ensureStoreReady();
             const code = await store.verifyCdkDetails(cdk);
@@ -34,6 +35,9 @@ module.exports = function createActivationHandler({ store, ensureStoreReady, act
                 || String(existing.orbitcard_base_url || '').replace(/\/+$/, '') !== String(cfg.base_url || '').replace(/\/+$/, ''))) {
                 return res.status(409).json({ success: false, message: '重试须使用原目标账号和原 Orbitcard 平台；请联系人工售后' });
             }
+            executionGuard = await store.acquirePaymentLock(cdkLockKey(cdk));
+            if (!executionGuard) return res.status(409).json({ success: false, message: '此 CDK 正在处理，请查询原订单，不要重复提交' });
+            await executionGuard.assertOwned();
             const max = await store.getMaxConcurrentActivations();
             if (activeJobs.size >= max) return res.status(429).json({ success: false, message: '当前任务已满，请稍后再试' });
             slot = `accept-${crypto.randomUUID()}`;
@@ -53,22 +57,26 @@ module.exports = function createActivationHandler({ store, ensureStoreReady, act
             activeJobs.delete(slot);
             slot = task.jobKey;
             activeJobs.add(slot);
-            task.apiConfig = { ...cfg, auditJobKey: task.jobKey };
+            task.apiConfig = { ...cfg, auditJobKey: task.jobKey, executionGuard };
+            log(task.jobKey, '已取得 CDK 跨进程执行权，恢复任务将跳过本次处理中订单', 'execution_lock_acquired');
             log(task.jobKey, `Orbitcard 兑换任务已创建，CDK=${cdk}`);
             // Dispatch itself is synchronous; the worker catches asynchronous settlement errors.
             const pending = runWorker({ task, session, cdk, planType: code.plan_type || 'plus' });
             dispatched = true;
-            Promise.resolve(pending).catch(() => {}).finally(() => activeJobs.delete(task.jobKey));
+            Promise.resolve(pending).catch(() => {}).finally(async () => {
+                activeJobs.delete(task.jobKey); await executionGuard.release();
+            }).catch(() => {});
             return res.json({ success: true, provider: 'orbitcard', jobKey: task.orbitcardRetryRootJobKey || task.jobKey,
                 message: resume ? '已继续原 CDK 的支付重试，请持续查询' : '订单已受理，请持续查询原订单' });
         } catch (_) {
             if (task && !dispatched) {
-                try { await store.settleOrbitcardTask(task.jobKey, { status: 'failed', progress: 0,
+                try { await executionGuard.assertOwned(); await store.settleOrbitcardTask(task.jobKey, { status: 'failed', progress: 0,
                     orbitcardState: 'rejected', expectedState: 'prepared', message: '任务尚未提交，CDK 已释放' }); } catch (_) { /* startup recovery will reconcile the durable prepared record */ }
             }
             return res.status(503).json({ success: false, message: '充值服务暂不可用，请联系管理员检查配置或查询原订单' });
         } finally {
             if (slot && !dispatched) activeJobs.delete(slot);
+            if (executionGuard && !dispatched) await executionGuard.release();
         }
     };
 };

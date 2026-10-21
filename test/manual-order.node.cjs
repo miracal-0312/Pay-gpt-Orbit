@@ -13,7 +13,7 @@ function fixture({ unknown = false, pendingAllocation = false, now = Date.now } 
         { type: 'gpt-go', name: 'Go' }, { type: 'gpt-plus', name: 'Plus' },
         { type: 'gpt-credits-250', name: '250 credits' }
     ];
-    const store = {
+    const store = { acquirePaymentLock: require('./helpers/payment-locks.cjs')().acquirePaymentLock,
         getGptApiConfig: async () => cfg,
         getMaxConcurrentActivations: async () => 5,
         getManualOrder: async id => orders.get(id) || null,
@@ -96,6 +96,46 @@ async function until(check) {
     }
     assert.fail('background order did not reach expected state');
 }
+
+test('two admin service instances cannot prepare the same request or release it through recovery', async () => {
+    process.env.ORBITCARD_API_KEY='key'; process.env.ORBITCARD_API_SECRET='secret';
+    const f=fixture(); let enter, release;
+    const entered=new Promise(resolve=>{enter=resolve;}), gate=new Promise(resolve=>{release=resolve;});
+    const allocate=f.cardService.allocate;
+    f.cardService.allocate=async(...args)=>{enter();await gate;return allocate(...args);};
+    const other=createService({store:f.store,activeJobs:new Set(),provider:f.provider,cardService:f.cardService,audit(){}});
+    const input={requestId:id,planType:'gpt-plus',mode:'test',session,authorized:true};
+    const first=f.service.create(input);
+    try {
+        await entered;
+        await assert.rejects(other.create(input),error=>error.status===409);
+        assert.equal((await other.refresh(id)).state,'preparing');
+        let abandoned=0;
+        f.store.listRecoverableManualOrders=async()=>[{...f.orders.get(id),state:'prepared'}];
+        f.store.abandonPreparedManualOrder=async()=>{abandoned++;throw new Error('must not release active order');};
+        await other.recover(); assert.equal(abandoned,0); assert.equal(f.calls.length,0);
+    } finally {release();}
+    await first; await until(()=>f.orders.get(id).state==='success');
+    assert.equal(f.allocations.length,1);assert.equal(f.calls.filter(x=>x.operation==='createSubscription').length,1);
+});
+
+test('admin execution ownership remains held after HTTP acceptance until background submission finishes', async () => {
+    process.env.ORBITCARD_API_KEY='key';process.env.ORBITCARD_API_SECRET='secret';
+    const f=fixture();let enter,release;
+    const entered=new Promise(resolve=>{enter=resolve;}), gate=new Promise(resolve=>{release=resolve;});
+    const request=f.provider.request;
+    f.provider.request=async(...args)=>{if(args[1]==='createSubscription'){enter();await gate;}return request(...args);};
+    const input={requestId:id,planType:'gpt-plus',mode:'test',session,authorized:true};
+    const other=createService({store:f.store,activeJobs:new Set(),provider:f.provider,cardService:f.cardService,audit(){}});
+    await f.service.create(input); await entered;
+    try {
+        await assert.rejects(other.create(input),error=>error.status===409);
+        assert.equal((await other.refresh(id)).state,'submitting');
+        assert.equal(f.calls.length,0,'must not query an order still in its original create request');
+    } finally {release();}
+    await until(()=>f.orders.get(id).state==='success');
+    assert.equal(f.calls.filter(x=>x.operation==='createSubscription').length,1);
+});
 
 const session = JSON.stringify({ user: { email: 'buyer@example.com' }, account: {}, accessToken: 'secret-session' });
 const id = '1b056caa-d7a6-4c39-9672-88e9cc5c6577';
@@ -355,6 +395,13 @@ test('a prepared order interrupted before submission releases its CDK and card w
     assert.equal(db.orders[0].state, 'failed');
     assert.equal(db.cdks[0].used_at, null);
     assert.equal(db.card.active_job, null);
+});
+
+test('a stale query cannot settle an unsubmitted admin preparation', async () => {
+    const {db,store}=storeFixture(); await store.createManualOrder(manualInput(id));
+    const order=await store.settleManualOrder(id,{state:'success',message:'stale query'});
+    assert.equal(order.state,'prepared');assert.equal(db.card.successful_plus,0);
+    assert.equal(db.card.active_job,`manual-${id}`);assert.equal(db.cdks[0].used_at,'reserved');
 });
 
 test('automatic manual preparation reserves its CDK before card funding and binds one eligible card', async () => {

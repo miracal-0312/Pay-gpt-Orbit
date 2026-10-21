@@ -34,6 +34,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
     }
 
     async function confirmIssue(cfg, locked, issue, polls = maxIssuePolls) {
+        await cfg.executionGuard?.assertOwned();
         if (issue.credential_hash !== credentialHash(cfg)) throw new CardPreparationError('原开卡申请的 API Key 与当前配置不同，请恢复原凭据后确认，禁止换身份重开');
         if (Number(issue.retry_at || 0) > now()) throw new CardPreparationError('原开卡申请处于重查间隔内，请稍后确认原申请');
         let body;
@@ -169,6 +170,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
 
     async function allocate(cfg, jobKey, planType, selection = {}) {
         return store.withCardAllocationLock(cfg.base_url, async cardMethods => {
+            await cfg.executionGuard?.assertOwned();
             const locked = selection.manualRequestId ? {
                 ...cardMethods,
                 reserveCard: (cardId, key, plan) => store.reserveManualCard(selection.manualRequestId, cardId, key, plan),

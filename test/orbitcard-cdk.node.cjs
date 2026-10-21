@@ -48,6 +48,7 @@ function database(factory) {
         },
         async runQuery(sql, args) {
             const q = sql.replace(/\s+/g, ' ');
+            if (q.includes('FROM orbitcard_card_fundings') || q.includes('FROM orbitcard_card_issues')) return [];
             if (q.includes('FROM cdk_codes')) return [{ ...db.cdk }];
             if (q.includes("orbitcard_state IN")) return db.tasks.filter(t => ['prepared','submitting','pending','manual','success'].includes(t.orbitcard_state));
             if (q.includes('JOIN cdk_codes')) return db.tasks.length ? [{ ...db.tasks.at(-1) }] : [];

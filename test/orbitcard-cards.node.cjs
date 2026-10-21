@@ -589,13 +589,13 @@ test('prepared issuance recovery does not send a remote write after a crash',asy
 test('advisory allocation lock is always released and lock timeout never runs allocation',async () => {
     const calls=[]; let acquired=1;
     const connection={release() {calls.push('release');},destroy() {calls.push('destroy');}};
-    const store=require('../orbitcard-card-store')({getPool:() => ({getConnection:async () => connection}),
+    const store=require('../orbitcard-card-store')({openLockConnection:async () => connection,
         runQuery:async (sql,params,options) => {assert.equal(options.connection,connection);calls.push(sql);return [{acquired}];}});
     await assert.rejects(store.withCardAllocationLock(cfg.base_url,async () => {throw new Error('allocation failed');}),/allocation failed/);
-    assert.ok(calls.some(value => value.startsWith('SELECT RELEASE_LOCK')));assert.equal(calls.at(-1),'release');
+    assert.equal(calls.at(-1),'destroy');assert.ok(!calls.includes('release'));
     calls.length=0;acquired=0;
     await assert.rejects(store.withCardAllocationLock(cfg.base_url,async () => {throw new Error('must not execute');}),/支付卡正在分配/);
-    assert.equal(calls.length,2);assert.equal(calls.at(-1),'release');
+    assert.equal(calls.length,2);assert.equal(calls.at(-1),'destroy');
 });
 
 test('card management HTTP routes require secondary auth for applying and binding',async t => {

@@ -19,7 +19,7 @@ module.exports = function fixture() {
     async function runQuery(sql, p = []) {
         const q = clean(sql);
         if(q.includes('FROM orbitcard_card_fundings')) return structuredClone(db.fundings.filter(f =>
-            q.includes('WHERE job_key=')?f.job_key===p[0]:f.scope===p[0] && (!q.includes('job_key=?') || f.job_key===p[1])
+            (q.includes('WHERE job_key=')?f.job_key===p[0]:f.scope===p[0] && (!q.includes('job_key=?') || f.job_key===p[1]))
                 && (!q.includes('state IN') || ['prepared','submitting','pending','unknown'].includes(f.state))));
         if(q.startsWith('SELECT i.* FROM orbitcard_card_issues')) {
             const task=db.tasks.find(t => t.job_key===p[0]);return structuredClone(db.issues.filter(i => i.issue_key===task?.orbitcard_issue_key));
@@ -27,7 +27,7 @@ module.exports = function fixture() {
         if (q.includes('LEFT JOIN orbitcard_card_uses')) return db.tasks.filter(t => ['running','manual'].includes(t.status) && !db.uses.some(u => u.job_key === t.job_key));
         if (q.includes('FROM orbitcard_managed_cards')) return structuredClone(db.cards.filter(c => c.scope === p[0] && (!q.includes('card_id=?') || c.card_id === Number(p[1]))).sort((a,b) => b.successful_plus-a.successful_plus || a.card_id-b.card_id));
         if (q.includes('FROM orbitcard_card_uses')) return structuredClone(db.uses.filter(u => u.job_key === p[0]));
-        if (q.includes('FROM orbitcard_card_issues')) return structuredClone(db.issues.filter(i => i.scope === p[0] && (!q.includes('plan_type=?') || i.plan_type === p[1])
+        if (q.includes('FROM orbitcard_card_issues')) return structuredClone(db.issues.filter(i => (q.includes('WHERE issue_key=') ? i.issue_key === p[0] : i.scope === p[0]) && (!q.includes('plan_type=?') || i.plan_type === p[1])
             && (!q.includes('job_key=?') || i.job_key === p[1])
             && (!q.includes('state IN') || ['prepared','submitting','pending','unknown'].includes(i.state))));
         if (q.includes('FROM cdk_codes')) return structuredClone(db.cdks.filter(c => c.cdk_code === p[0]));
@@ -102,7 +102,7 @@ module.exports = function fixture() {
     const cardStore=cardFactory({runQuery,runExecute,withTransaction,getPool() { throw new Error('Unexpected real connection'); }});
     const cdkStore=cdkFactory({runQuery,runExecute,withTransaction,settleCardUse:cardStore.settleCardUse,
         createTaskLog: async input => { const task={ id:++sequence,job_key:`job-${sequence}`,cdk_code:input.cdkCode,status:'running',progress:3 }; db.tasks.push(task); return {jobKey:task.job_key}; } });
-    const store={...cardStore,...cdkStore,withCardAllocationLock(base, fn) {
+    const store={...cardStore,...cdkStore,acquirePaymentLock:require('./payment-locks.cjs')().acquirePaymentLock,getTaskStatus:async key=>structuredClone(db.tasks.find(t=>t.job_key===key)),withCardAllocationLock(base, fn) {
         const pending=allocationTail.then(() => fn(cardStore.cardMethods(base))); allocationTail=pending.catch(() => {}); return pending;
     }};
     async function claim(plan='plus') {

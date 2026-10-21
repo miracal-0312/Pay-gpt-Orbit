@@ -60,6 +60,7 @@ module.exports = function createSubscriptionService(provider, audit = () => {}) 
         return { body, expected: { clientOrderNo: identity, planType: plan, cardId: Number(cardId), email: session.user.email } };
     }
     async function submit(cfg, prepared) {
+        await cfg.executionGuard?.assertOwned();
         record(cfg, 'subscription_submission_started', '开始向卡台提交订阅及 Session；此步骤可能真实扣款', {
             client_order_no: prepared.expected.clientOrderNo, plan_type: prepared.expected.planType, card_id: prepared.expected.cardId,
             payment_region: prepared.body.payment_region || null

@@ -10,6 +10,7 @@ module.exports = function createPaymentService({ store, cardService, worker, act
         const rootJobKey = task.orbitcardRetryRootJobKey || task.jobKey;
         let submitted = false;
         const setProgress = async (status, progress, message, extra = {}) => {
+            await task.apiConfig.executionGuard?.assertOwned();
             const saved = await store.settleOrbitcardTask(jobKey, { status, progress, message, ...extra });
             if (!saved.applied) throw new Error('任务已结束或被替换');
             audit({ jobKey, source: 'orbitcard', event: 'task_state', text: message,
@@ -37,6 +38,7 @@ module.exports = function createPaymentService({ store, cardService, worker, act
                     },
                     onSubmission: () => { submitted = true; }, sleep,
                     onConfirmedFailure: async failure => {
+                        await task.apiConfig.executionGuard?.assertOwned();
                         const recorded = await store.recordOrbitcardPaymentFailure(jobKey, failure);
                         if (!recorded.applied) throw new Error('支付失败记录已被其他执行者处理，保留原订单核对');
                         try { log(jobKey, `第 ${attempt}/3 次支付已明确失败，卡 ID ${failure.cardId}`, 'payment_attempt_failed'); }
@@ -63,6 +65,7 @@ module.exports = function createPaymentService({ store, cardService, worker, act
                 jobKey = task.jobKey;
                 submitted = false;
                 activeJobs.add(jobKey);
+                await task.apiConfig.executionGuard?.assertOwned();
                 if (!await store.claimOrbitcardRetryTask(jobKey, task.orbitcardClientOrderNo)) {
                     throw new Error('下一次支付尝试尚未取得执行权，保留 CDK 并等待重新提交 Session');
                 }
@@ -74,6 +77,10 @@ module.exports = function createPaymentService({ store, cardService, worker, act
                     .catch(() => log(jobKey,'订阅已成功，卡片资金只读核对暂不可用，请稍后在后台查询','payment_reconciliation_pending'));
             }
         } catch (error) {
+            if (task.apiConfig.executionGuard) {
+                try { await task.apiConfig.executionGuard.assertOwned(); }
+                catch (_) { log(jobKey, '支付执行权已失效，保留原订单由恢复任务核对', 'execution_lock_lost'); return; }
+            }
             if (!submitted && error instanceof CardSwitchExhaustedError) {
                 try {
                     const locked=await store.lockOrbitcardSupport(jobKey,'prepared',error.message,{cardSelectionExhausted:true});

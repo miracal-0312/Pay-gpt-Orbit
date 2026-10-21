@@ -20,7 +20,7 @@ function load(name, mocks = {}) {
 const session = { accessToken: 'synthetic-token', user: { email: 'customer@example.test' }, account: {} };
 function fixture(overrides = {}) {
     const events = [], activeJobs = new Set();
-    const store = {
+    const store = { acquirePaymentLock: require('./helpers/payment-locks.cjs')().acquirePaymentLock,
         verifyCdkDetails: async () => ({ type: '自助', plan_type: 'plus' }), getRunningTaskByCdk: async () => null,
         getMaintenanceModeState: async () => ({}), getGptApiConfig: async () => ({ enabled: true, api_key: 'key', orbitcard_card_id: '42', base_url: 'https://orbitcard.test' }),
         getMaxConcurrentActivations: async () => 1,
@@ -105,16 +105,17 @@ test('a synchronous dispatch failure only releases its own still-prepared attemp
 
 test('restart recovery releases only prepared tasks and never creates a replacement order', async () => {
     const calls = [], states = [], audits = [];
-    const store = {
+    const store = { acquirePaymentLock: require('./helpers/payment-locks.cjs')().acquirePaymentLock,
         settleOrbitcardTask: async (key, state) => { states.push([key,state]); return { applied: true }; },
         getGptApiConfig: async () => ({ enabled: false, api_key: 'saved-key' }),
-        getTaskStatus: async () => ({ status: 'manual' })
+        getTaskStatus: async key => ({ job_key: key, cdk_code: 'CDK-TEST', status: 'manual',
+            orbitcard_state: key === 'prepared' ? 'prepared' : 'manual', orbitcard_client_order_no: 'fixed-identity' })
     };
     const recovery = require('../order-recovery')({ store, activeJobs: new Set(), audit: event => audits.push(event),
         query: { refresh: async input => { calls.push(input); return { success: true, applied: true }; } } });
-    await recovery.refreshTask({ job_key: 'prepared', orbitcard_state: 'prepared' });
+    await recovery.refreshTask({ job_key: 'prepared', cdk_code: 'CDK-TEST', orbitcard_state: 'prepared' });
     assert.equal(states[0][1].expectedState,'prepared'); assert.equal(states[0][1].orbitcardState,'rejected'); assert.equal(calls.length,0);
-    await recovery.refreshTask({ job_key: 'unknown', orbitcard_state: 'manual', orbitcard_client_order_no: 'fixed-identity' });
+    await recovery.refreshTask({ job_key: 'unknown', cdk_code: 'CDK-TEST', orbitcard_state: 'manual', orbitcard_client_order_no: 'fixed-identity' });
     assert.equal(calls.length,1); assert.equal(calls[0].task.orbitcard_client_order_no,'fixed-identity'); assert.equal(calls[0].cfg.enabled,false);
     assert.equal(states.length,1); assert.equal(audits[0].event,'recovery_unsubmitted');
 });
@@ -122,7 +123,9 @@ test('background reconciliation skips active workers and applies backoff to fail
     let queries = 0, touches = 0;
     const recovery = require('../order-recovery')({
         activeJobs: new Set(['active']), audit() {},
-        store: { listRecoverableOrbitcardTasks: async () => [{ job_key: 'active', orbitcard_state: 'pending' }, { job_key: 'unknown', orbitcard_state: 'manual' }],
+        store: { acquirePaymentLock: require('./helpers/payment-locks.cjs')().acquirePaymentLock,
+            getTaskStatus: async key => ({ job_key: key, cdk_code: 'CDK-TEST', orbitcard_state: 'manual' }),
+            listRecoverableOrbitcardTasks: async () => [{ job_key: 'active', cdk_code: 'CDK-TEST', orbitcard_state: 'pending' }, { job_key: 'unknown', cdk_code: 'CDK-TEST', orbitcard_state: 'manual' }],
             getGptApiConfig: async () => ({}), noteQueryAttempt: async () => { touches++; } },
         query: { refresh: async () => { queries++; return { success: false, retryAfterMs: 60000 }; } }
     });
@@ -214,7 +217,7 @@ test('HTTP redemption carries the Session only to Orbitcard and exposes live ver
     const done = new Promise(resolve => { completed=resolve; });
     const events = [], writes = [], tasks = new Map();
     const task = { job_key: 'live-job', cdk_code: 'CDK-TEST', orbitcard_client_order_no: 'stable-client', orbitcard_state: 'prepared', status: 'running', orbitcard_email: session.user.email };
-    const store = {
+    const store = { acquirePaymentLock: require('./helpers/payment-locks.cjs')().acquirePaymentLock,
         ensureReady: async () => {}, getAdminPaths: async () => ({ loginPath: 'admin-login',panelPath: 'admin' }),
         verifyCdkDetails: async () => ({ type: '自助',plan_type: 'plus' }), getRunningTaskByCdk: async () => null,
         getMaintenanceModeState: async () => ({}), getMaxConcurrentActivations: async () => 1,

@@ -141,6 +141,7 @@ test('enabling third-party mode dispatches Orbitcard for a CDK without any provi
         ensureStoreReady: async () => {}, activeJobs: new Set(), log() {},
         runWorker: async input => { submissions++; assert.equal(input.task.orbitcardClientOrderNo, 'cdk-current-attempt'); },
         store: {
+            acquirePaymentLock: require('./helpers/payment-locks.cjs')().acquirePaymentLock,
             getMaintenanceModeState: async () => ({}), getMaxConcurrentActivations: async () => 5,
             verifyCdkDetails: async () => ({ type: '自助', plan_type: 'plus' }), getRunningTaskByCdk: async () => null,
             getGptApiConfig: async () => ({ enabled: true, api_key: 'test-key', base_url: 'https://orbitcard.test', orbitcard_card_id: '42' }),

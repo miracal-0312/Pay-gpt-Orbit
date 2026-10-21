@@ -11,6 +11,7 @@ const PLAN_MAP = Object.freeze({ ...PROVIDER_PLANS, ...Object.fromEntries(
 const accountCooldowns = new Map();
 
 async function request(cfg, operation, body = {}, idempotencyKey = '') {
+    if (['createSubscription','createCard','rechargeCard'].includes(operation)) await cfg.executionGuard?.assertOwned();
     const key = String(process.env.ORBITCARD_API_KEY || '').trim();
     const secret = String(process.env.ORBITCARD_API_SECRET || '').trim();
     if (!key || !secret) return { success: false, error: '请在服务器环境变量中配置配对的 ORBITCARD_API_KEY 和 ORBITCARD_API_SECRET' };

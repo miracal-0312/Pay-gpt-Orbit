@@ -5,6 +5,7 @@ const api = require('./orbitcard-client');
 const { parseSession } = require('./session-input');
 const { cardScope, CardPreparationError } = require('./orbitcard-card-policy');
 const { PROVIDER_TO_PLAN: CDK_PLAN } = require('./plan-registry');
+const { manualLockKeys } = require('./payment-execution-lock');
 
 const REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PLAN_ID = /^[a-z][a-z0-9_-]{0,63}$/;
@@ -69,7 +70,24 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
             && order.scope === cardScope(cfg.base_url);
     }
 
-    async function create({ requestId, planType, mode, cdkCode, session: rawSession, authorized, adminEmail }) {
+    async function create(input) {
+        if (!REQUEST_ID.test(String(input.requestId || ''))) throw new ManualOrderError('请使用有效的请求编号');
+        const cdk = input.mode === 'fulfillment' ? String(input.cdkCode || '').trim() : null;
+        if (cdk !== null && !CDK_CODE.test(cdk)) throw new ManualOrderError('人工交付必须填写有效 CDK');
+        const guard = await store.acquirePaymentLock(manualLockKeys(input.requestId, cdk));
+        if (!guard) throw new ManualOrderError('此管理员订单或 CDK 正在处理，请查询原订单', 409);
+        let background = null;
+        try {
+            await guard.assertOwned();
+            record({ client_order_no: `manual-${input.requestId}` }, 'execution_lock_acquired', '已取得管理员订单跨进程执行权');
+            return await createOwned(input, guard, pending => { background = pending; });
+        } finally {
+            if (background) background.catch(() => {}).finally(() => guard.release()).catch(() => {});
+            else await guard.release();
+        }
+    }
+
+    async function createOwned({ requestId, planType, mode, cdkCode, session: rawSession, authorized, adminEmail }, executionGuard, handoff) {
         if (!REQUEST_ID.test(String(requestId || ''))) throw new ManualOrderError('请使用有效的请求编号');
         if (typeof planType !== 'string' || !PLAN_ID.test(planType)) throw new ManualOrderError('请选择有效的卡台套餐');
         if (!['test', 'fulfillment'].includes(mode)) throw new ManualOrderError('请选择测试开通或人工交付模式');
@@ -80,7 +98,7 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
         let session;
         try { session = parseSession(rawSession); }
         catch (error) { throw new ManualOrderError(error.message); }
-        const cfg = { ...await config(), auditJobKey: `manual-${requestId}` }, email = session.user.email.trim().toLowerCase();
+        const cfg = { ...await config(), auditJobKey: `manual-${requestId}`, executionGuard }, email = session.user.email.trim().toLowerCase();
         const keyHash = crypto.createHash('sha256').update(String(cfg.api_key || '')).digest('hex');
         let existing = await store.getManualOrder(requestId);
         if (existing && (!matches(existing, { planType, targetEmail: email, cfg })
@@ -124,13 +142,16 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
                     if (!cardService || typeof cardService.allocate !== 'function') throw new Error('自动选卡服务尚未初始化');
                     const cardId = await cardService.allocate(cfg, existing.client_order_no, planType,
                         { manualRequestId: requestId });
+                    await executionGuard.assertOwned();
                     existing = await store.markManualPrepared(requestId, existing.client_order_no, cardId);
                     record(existing, 'manual_card_ready', '管理员订单支付卡已准备', { card_id: cardId, plan_type: planType });
                 } catch (error) {
                     // Release a preparation with no remote write or reserved card;
                     // otherwise preserve the original issue/funding intent for retry.
-                    await store.failManualPreparation(requestId, existing.client_order_no,
-                        `支付准备失败：${error.message}`).catch(() => {});
+                    try {
+                        await executionGuard.assertOwned();
+                        await store.failManualPreparation(requestId, existing.client_order_no, `支付准备失败：${error.message}`);
+                    } catch (_) { /* another owner or an unresolved monetary intent must remain reserved */ }
                     record(existing, 'manual_preparation_failed', '管理员订单支付准备未完成，请查询原准备记录', { error_type: error instanceof CardPreparationError ? 'card_preparation' : 'local_error' });
                     if (error instanceof ManualOrderError) throw error;
                     if (error instanceof CardPreparationError || /请求编号|待确认管理员订单|支付卡|CDK|卡密/.test(error.message)) {
@@ -139,10 +160,12 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
                     throw error;
                 }
             }
+            await executionGuard.assertOwned();
             if (await store.claimManualSubmission(requestId)) {
                 activeJobs.delete(slot);
                 activeJobs.add(existing.client_order_no);
                 const job = submit(existing, cfg, session);
+                handoff(job);
                 job.catch(() => {}).finally(() => activeJobs.delete(existing.client_order_no));
                 record(existing, 'manual_order_accepted', '管理员订单已保存并认领提交',
                     { plan_type: planType, card_id: Number(existing.card_id), target_email: email, mode, cdk_code: code || undefined });
@@ -156,6 +179,7 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
         try {
             const prepared = subscription.prepare({ cfg, identity, planType: order.plan_type, cardId: order.card_id, session });
             const result = await subscription.submit({ ...cfg, auditJobKey: identity }, prepared);
+            await cfg.executionGuard?.assertOwned();
             const snapshot = result.snapshot;
             if (result.rejected) {
                 await store.settleManualOrder(order.request_id, { state: 'failed', snapshot,
@@ -169,8 +193,12 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
                 message: '已提交或结果待确认；只查询原订单，不重复创建' });
             record(order, 'manual_order_submitted', '管理员订单已提交或状态待确认',
                 { plan_type: order.plan_type, card_id: Number(order.card_id), client_order_no: identity });
-            await refresh(order.request_id, cfg);
+            await refreshOwned(order.request_id, cfg);
         } catch (_) {
+            if (cfg.executionGuard) {
+                try { await cfg.executionGuard.assertOwned(); }
+                catch (_) { record(order, 'execution_lock_lost', '管理员订单执行权已失效，保留原单等待恢复核对'); return; }
+            }
             await store.settleManualOrder(order.request_id, { state: 'manual',
                 message: '提交结果尚未确认；请查询原订单，勿重新发起付款' }).catch(() => {});
             record(order, 'manual_order_unknown', '管理员订单提交结果待核对');
@@ -178,13 +206,22 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
     }
 
     async function refresh(requestId, knownCfg = null) {
+        const order = await store.getManualOrder(requestId);
+        if (!order) throw new ManualOrderError('管理员订单不存在', 404);
+        const guard = await store.acquirePaymentLock(manualLockKeys(requestId, order.cdk_code));
+        if (!guard) return get(requestId);
+        try { await guard.assertOwned(); return await refreshOwned(requestId, knownCfg, guard); }
+        finally { await guard.release(); }
+    }
+
+    async function refreshOwned(requestId, knownCfg = null, guard = null) {
         if (inFlight.has(requestId)) return get(requestId);
         inFlight.add(requestId);
         try {
             const order = await store.getManualOrder(requestId);
             if (!order) throw new ManualOrderError('管理员订单不存在', 404);
             if (!['submitting', 'pending', 'manual'].includes(order.state)) return publicOrder(order);
-            const cfg = knownCfg || await config();
+            const cfg = { ...(knownCfg || await config()), executionGuard: guard || knownCfg?.executionGuard };
             const hash = crypto.createHash('sha256').update(String(cfg.api_key || '')).digest('hex');
             if (hash !== order.api_key_hash) throw new ManualOrderError('API Key 与原订单不一致，请恢复原配置后查询', 409);
             if (cardScope(cfg.base_url) !== order.scope) throw new ManualOrderError('平台地址与原订单不一致，请恢复原配置后查询', 409);
@@ -193,6 +230,7 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
             const result = await subscription.query({ ...cfg, auditJobKey: order.client_order_no }, {
                 orderId: order.task_no, clientOrderNo: order.client_order_no,
                 planType: order.plan_type, email: order.target_email, cardId: Number(order.card_id) });
+            await cfg.executionGuard?.assertOwned();
             nextQueryAt.set(requestId, now() + Math.max(5000, result.retryAfterMs || 0));
             if (!result.success) {
                 challenges.delete(requestId);
@@ -225,8 +263,13 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
             for (const order of await store.listRecoverableManualOrders()) {
                 if (activeJobs.has(order.client_order_no) || inFlight.has(order.request_id)) continue;
                 if (order.state === 'prepared') {
-                    const released = await store.abandonPreparedManualOrder(order.request_id).catch(() => null);
-                    if (released) record(released, 'manual_order_prepared_abandoned', '管理员订单提交前中断，已释放 CDK 与卡片');
+                    const guard = await store.acquirePaymentLock(manualLockKeys(order.request_id, order.cdk_code));
+                    if (!guard) continue;
+                    try {
+                        await guard.assertOwned();
+                        const released = await store.abandonPreparedManualOrder(order.request_id).catch(() => null);
+                        if (released) record(released, 'manual_order_prepared_abandoned', '管理员订单提交前中断，已释放 CDK 与卡片');
+                    } finally { await guard.release(); }
                     continue;
                 }
                 await refresh(order.request_id).catch(() => {});

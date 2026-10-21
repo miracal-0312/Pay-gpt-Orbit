@@ -3,17 +3,12 @@ const { CardPreparationError } = require('./orbitcard-card-policy');
 
 const { cardScope, planFor, LIMITS, settlementState } = require('./orbitcard-card-policy');
 
-module.exports = function createCardStore({ runQuery, runExecute, withTransaction, getPool }) {
+module.exports = function createCardStore({ runQuery, runExecute, withTransaction, openLockConnection }) {
     function methods(baseUrl, connection = null) {
         const scope = cardScope(baseUrl), options = connection ? { connection } : {};
         const query = (sql, args = []) => runQuery(sql, args, options);
         const execute = (sql, args = []) => runExecute(sql, args, options);
-        const transaction = async fn => {
-            if (!connection) return withTransaction(fn);
-            await connection.beginTransaction();
-            try { const result = await fn(connection); await connection.commit(); return result; }
-            catch (error) { await connection.rollback(); throw error; }
-        };
+        const transaction = fn => withTransaction(fn, connection);
         async function syncCards(cards) {
             for (const card of cards) {
                 await execute(`INSERT INTO orbitcard_managed_cards
@@ -121,11 +116,26 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
             return rows[0] || null;
         }
         async function createFunding(funding) {
-            await execute(`INSERT INTO orbitcard_card_fundings
+            return transaction(async tx => {
+                const opts = { connection: tx }, manual = funding.job_key.startsWith('manual-');
+                const [owner] = await runQuery(manual
+                    ? 'SELECT * FROM orbitcard_admin_orders WHERE client_order_no = ? FOR UPDATE'
+                    : 'SELECT * FROM task_logs WHERE job_key=? FOR UPDATE', [funding.job_key], opts);
+                if (!owner || (manual ? owner.state !== 'preparing' || owner.scope !== scope
+                    || Number(owner.card_id) !== Number(funding.card_id) || planFor(owner.plan_type) !== funding.plan_type
+                    : owner.orbitcard_state !== 'prepared' || cardScope(owner.orbitcard_base_url) !== scope
+                    || Number(owner.orbitcard_card_id) !== Number(funding.card_id) || planFor(owner.orbitcard_plan_type) !== funding.plan_type)) {
+                    throw new CardPreparationError('支付任务已变更，不能创建新的补款意图');
+                }
+                const [card] = await runQuery('SELECT * FROM orbitcard_managed_cards WHERE scope=? AND card_id=? FOR UPDATE',
+                    [scope, funding.card_id], opts);
+                if (!card || card.active_job !== funding.job_key) throw new CardPreparationError('补款卡片已不属于当前任务');
+                await runExecute(`INSERT INTO orbitcard_card_fundings
                 (funding_key,scope,job_key,plan_type,card_id,credential_hash,request_body,amount,target_balance,state)
                 VALUES (?,?,?,?,?,?,?,?,?,'prepared')`, [funding.funding_key,scope,funding.job_key,funding.plan_type,funding.card_id,
-                funding.credential_hash,funding.request_body,funding.amount,funding.target_balance]);
-            return {...funding,scope,state:'prepared'};
+                funding.credential_hash,funding.request_body,funding.amount,funding.target_balance], opts);
+                return {...funding,scope,state:'prepared'};
+            });
         }
         async function updateFunding(key, {state,order_no,provider_status,fee_snapshot,retry_at,message}) {
             await execute(`UPDATE orbitcard_card_fundings SET state=?,order_no=COALESCE(NULLIF(?,''),order_no),
@@ -143,19 +153,15 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
 
     async function withCardAllocationLock(baseUrl, fn) {
         const scope = cardScope(baseUrl), name = `oc-card-${scope.slice(0, 48)}`;
-        const connection = await getPool().getConnection();
-        let locked = false, destroyed = false;
+        const connection = await openLockConnection();
         try {
             const rows = await runQuery('SELECT GET_LOCK(?, 10) AS acquired', [name], { connection });
             if (Number(rows[0]?.acquired) !== 1) throw new CardPreparationError('支付卡正在分配，请稍后重试');
-            locked = true;
             return await fn(methods(baseUrl, connection));
         } finally {
-            if (locked) {
-                try { await runQuery('SELECT RELEASE_LOCK(?)', [name], { connection }); }
-                catch (_) { connection.destroy(); destroyed = true; }
-            }
-            if (!destroyed) connection.release();
+            // A dedicated connection cannot starve the query/transaction pool.
+            // Disconnect always releases the advisory lock, including error paths.
+            connection.destroy();
         }
     }
 

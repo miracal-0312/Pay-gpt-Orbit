@@ -258,9 +258,11 @@ async function getAdminData() {
         telegram: { ...telegram, bot_token: '', bot_token_saved: Boolean(telegram.bot_token) } };
 }
 
-const cardStore = require('./orbitcard-card-store')({ withTransaction, runQuery, runExecute, getPool: core.getPool });
+const cardStore = require('./orbitcard-card-store')({ withTransaction, runQuery, runExecute, openLockConnection: core.openLockConnection });
 const orbitcardCdkStore = require('./orbitcard-cdk-store')({ withTransaction, runQuery, runExecute, createTaskLog, settleCardUse: cardStore.settleCardUse });
 const manualStore = require('./orbitcard-manual-store')({ runQuery, runExecute, withTransaction });
-module.exports = { ...core, ...cardStore, ...orbitcardCdkStore, ...manualStore, ensureReady, initializeBaseData, createTaskLog, getTaskStatus,
+const acquirePaymentLock = require('./payment-execution-lock').createExecutionLocks({
+    openConnection: core.openLockConnection, namespace: core.connectionInfo?.database || '' });
+module.exports = { ...core, ...cardStore, ...orbitcardCdkStore, ...manualStore, acquirePaymentLock, ensureReady, initializeBaseData, createTaskLog, getTaskStatus,
     getRunningTaskByCdk, verifyCdkDetails, listCdks, listCdksExportPage, insertCdks, markCdksShipped, deleteCdk,
     listAdminTaskLogs, listRecentGptApiOrders, listRecoverableOrbitcardTasks, noteQueryAttempt, getMaxConcurrentActivations, saveConfig, getAdminData, safeOrder };
