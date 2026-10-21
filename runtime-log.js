@@ -82,4 +82,34 @@ function after(afterId, limit) {
 
 function clear() { initialize(); buffer.length = 0; }
 function stats() { initialize(); return { count: buffer.length, nextSeq: seq + 1 }; }
-module.exports = { push, tail, after, clear, stats, taskFile, initialize, LOG_DIR };
+async function readTask(jobKey, cursor = 0) {
+    const file = taskFile(jobKey), offset = Number(cursor);
+    if (!/^\d+$/.test(String(cursor)) || !Number.isSafeInteger(offset) || offset < 0) throw new Error('无效的日志位置');
+    let handle;
+    try { handle = await fs.promises.open(file, 'r'); }
+    catch (error) { if (error.code === 'ENOENT' && offset === 0) return { entries: [], next_cursor: 0, has_more: false, exists: false }; throw error; }
+    try {
+        const size = (await handle.stat()).size;
+        if (offset > size) throw new Error('日志位置超过文件长度');
+        if (offset) {
+            const previous = Buffer.alloc(1); await handle.read(previous, 0, 1, offset - 1);
+            if (previous[0] !== 10) throw new Error('日志位置不是记录边界');
+        }
+        const chunk = Buffer.alloc(Math.min(1024 * 1024, size - offset));
+        const { bytesRead } = await handle.read(chunk, 0, chunk.length, offset);
+        const data = chunk.subarray(0, bytesRead), end = data.lastIndexOf(10);
+        if (end < 0) {
+            if (bytesRead === 1024 * 1024) throw new Error('单条日志超过读取上限，请下载日志');
+            return { entries: [], next_cursor: offset, has_more: false, exists: true };
+        }
+        const entries = []; let consumed = 0;
+        for (const line of data.subarray(0, end + 1).toString('utf8').split('\n').slice(0, -1)) {
+            consumed += Buffer.byteLength(line, 'utf8') + 1;
+            if (!line.trim()) continue;
+            try { entries.push(sanitize(JSON.parse(line))); } catch (_) { /* incomplete historical record */ }
+            if (entries.length >= 200) break;
+        }
+        return { entries, next_cursor: offset + consumed, has_more: offset + consumed < size, exists: true };
+    } finally { await handle.close(); }
+}
+module.exports = { push, tail, after, clear, stats, taskFile, initialize, LOG_DIR, readTask };

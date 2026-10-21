@@ -10,12 +10,12 @@ function decideCards({ saved, listed, detailed, products, jobKey, planType, excl
     const excluded = new Set(excludedCardIds.map(Number)), candidates = [], skipped = [], waiting = [];
     for (const row of saved) {
         const id = Number(row.card_id), owned = row.active_job === jobKey;
-        if (excluded.has(id)) continue;
+        if (excluded.has(id)) { skipped.push({ card_id: id, reason: 'previous_payment_failed' }); continue; }
         if (!live.has(id)) { skipped.push({ card_id: id, reason: 'missing_from_platform_list' }); continue; }
         if (!row.history_confirmed) { waiting.push({ card_id: id, reason: 'history_unconfirmed' }); continue; }
         const used = Number(row[`successful_${plan}`]);
         if (!Number.isInteger(used) || used < 0) throw new CardPreparationError('卡片历史次数无效，请管理员核对后继续');
-        if (used >= LIMITS[plan]) continue;
+        if (used >= LIMITS[plan]) { skipped.push({ card_id: id, reason: 'limit_reached', successful_uses: used, limit: LIMITS[plan] }); continue; }
         if (row.active_job && !owned) { waiting.push({ card_id: id, reason: 'busy' }); continue; }
         const detail = details.get(id);
         if (!detail) {

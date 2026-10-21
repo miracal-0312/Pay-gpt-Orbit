@@ -16,7 +16,7 @@ class ManualOrderError extends Error {
 }
 
 module.exports = function createManualService({ store, activeJobs, audit, cardService, provider = api, now = Date.now }) {
-    const subscription = require('./orbitcard-subscription-service')(provider);
+    const subscription = require('./orbitcard-subscription-service')(provider, audit);
     const inFlight = new Set(), challenges = new Map(), nextQueryAt = new Map();
     let recovering = false;
     const record = (order, event, text, data = {}) => audit({ jobKey: order?.client_order_no || '', source: 'orbitcard', event, text, data });
@@ -80,7 +80,7 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
         let session;
         try { session = parseSession(rawSession); }
         catch (error) { throw new ManualOrderError(error.message); }
-        const cfg = await config(), email = session.user.email.trim().toLowerCase();
+        const cfg = { ...await config(), auditJobKey: `manual-${requestId}` }, email = session.user.email.trim().toLowerCase();
         const keyHash = crypto.createHash('sha256').update(String(cfg.api_key || '')).digest('hex');
         let existing = await store.getManualOrder(requestId);
         if (existing && (!matches(existing, { planType, targetEmail: email, cfg })
@@ -91,6 +91,7 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
         const enabled = await plans(cfg);
         const selected = enabled.find(item => item.type === planType);
         if (!selected) throw new ManualOrderError('卡台当前未对该 API Key 开放此套餐', 409);
+        record({ client_order_no: cfg.auditJobKey }, 'payment_plan_selected', '管理员已选择卡台开放套餐', { plan_type: planType, mode });
         subscription.validate({ cfg, identity: `manual-${requestId}`, planType, session });
         try { await subscription.requireRegion(cfg, planType); }
         catch (error) { throw new ManualOrderError(error.message, 409); }
@@ -118,6 +119,7 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
                 throw new ManualOrderError('此请求编号已用于另一笔管理员订单', 409);
             }
             if (existing.state === 'preparing') {
+                record(existing, 'manual_preparation_started', '开始实时选卡并按需准备资金', { plan_type: planType });
                 try {
                     if (!cardService || typeof cardService.allocate !== 'function') throw new Error('自动选卡服务尚未初始化');
                     const cardId = await cardService.allocate(cfg, existing.client_order_no, planType,
@@ -129,6 +131,7 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
                     // otherwise preserve the original issue/funding intent for retry.
                     await store.failManualPreparation(requestId, existing.client_order_no,
                         `支付准备失败：${error.message}`).catch(() => {});
+                    record(existing, 'manual_preparation_failed', '管理员订单支付准备未完成，请查询原准备记录', { error_type: error instanceof CardPreparationError ? 'card_preparation' : 'local_error' });
                     if (error instanceof ManualOrderError) throw error;
                     if (error instanceof CardPreparationError || /请求编号|待确认管理员订单|支付卡|CDK|卡密/.test(error.message)) {
                         throw new ManualOrderError(error.message, 409);

@@ -113,8 +113,8 @@ class OpenApiProbeTests(unittest.TestCase):
                          ["succeeded"])
         products = next(item for item in report["checks"] if item["operation"] == "getProductCode")["summary"]
         self.assertTrue(products["price_field_present"])
-        self.assertEqual(products["products"][0]["gpt_plan_prices"],
-                         [{"id": "plus", "price": "20.00", "currency": "USD", "source": "transaction"}])
+        self.assertEqual(products["products"][0]["plan_ids_with_price"], ["plus"])
+        self.assertNotIn("gpt_plan_prices", products["products"][0])
         self.assertNotIn("do-not-print", json.dumps(products))
 
     def test_missing_balance_and_batch_card_are_reported_as_failures(self):
@@ -136,14 +136,14 @@ class OpenApiProbeTests(unittest.TestCase):
     def test_product_probe_marks_missing_price_field(self):
         summary = probe.summarize("getProductCode", {"list": [{"product_code": "p1"}]})
         self.assertFalse(summary["price_field_present"])
-        self.assertIsNone(summary["products"][0]["gpt_plan_prices"])
+        self.assertEqual(summary["products"][0]["plan_ids_with_price"], [])
 
     def test_products_only_probe_calls_no_other_api(self):
         client = FakeClient()
         result = probe.run_product_check(client, {"base_url": "https://orbitcard.cc"})
         self.assertEqual(client.calls, [("getProductCode", {})])
         self.assertEqual(result["status"], "ok")
-        self.assertEqual(result["summary"]["products"][0]["gpt_plan_prices"][0]["price"], "20.00")
+        self.assertEqual(result["summary"]["products"][0]["plan_ids_with_price"], ["plus"])
 
 
 if __name__ == "__main__":

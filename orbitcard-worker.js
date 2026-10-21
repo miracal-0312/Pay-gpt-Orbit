@@ -2,7 +2,7 @@
 
 const api = require('./orbitcard-client');
 const { clientOrderNo: makeClientOrderNo } = require('./orbitcard-cdk');
-const subscription = require('./orbitcard-subscription-service')(api);
+const subscription = require('./orbitcard-subscription-service')(api, entry => require('./runtime-log').push(entry));
 
 async function run({ cfg, planType, session, cdk, setProgress, onSubmission, broadcast, sleep,
     maxPolls = 180, intervalMs = 5000, onOutcome = () => {}, onConfirmedFailure, onRejectedSubmission,

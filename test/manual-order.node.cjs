@@ -7,7 +7,7 @@ const createStore = require('../orbitcard-manual-store');
 const { cardScope } = require('../orbitcard-card-policy');
 
 function fixture({ unknown = false, pendingAllocation = false, now = Date.now } = {}) {
-    const orders = new Map(), calls = [], created = [], allocations = [];
+    const orders = new Map(), calls = [], created = [], allocations = [], auditEntries = [], auditContexts = [];
     const cfg = { enabled: true, base_url: 'https://orbitcard.cc', api_key: 'key' };
     const plans = [
         { type: 'gpt-go', name: 'Go' }, { type: 'gpt-plus', name: 'Plus' },
@@ -61,6 +61,7 @@ function fixture({ unknown = false, pendingAllocation = false, now = Date.now } 
         outcome: value => value.upstream_status === 'succeeded' ? 'success' : 'pending',
         captcha: () => null,
         request: async (_cfg, operation, body, key) => {
+            auditContexts.push({operation,jobKey:_cfg.auditJobKey});
             calls.push({ operation, body, key });
             if (operation === 'getSubscriptionPaymentRegions') return { success: true,
                 data: { plan_type: body.plan_type, payment_regions: [{ code: 'PH' }, { code: 'US' }] } };
@@ -76,6 +77,7 @@ function fixture({ unknown = false, pendingAllocation = false, now = Date.now } 
         }
     };
     const cardService = { allocate: async (_cfg, jobKey, planType, selection) => {
+        auditContexts.push({operation:'allocate',jobKey:_cfg.auditJobKey});
         allocations.push({ jobKey, planType, selection });
         if (pendingAllocation && allocations.length === 1) {
             throw new (require('../orbitcard-card-policy').FundingPendingError)('原补款结果待确认');
@@ -83,8 +85,8 @@ function fixture({ unknown = false, pendingAllocation = false, now = Date.now } 
         return 12;
     } };
     const activeJobs = new Set();
-    const service = createService({ store, activeJobs, audit: () => {}, provider, cardService, now });
-    return { service, calls, created, orders, allocations, cfg, store, provider, cardService, activeJobs };
+    const service = createService({ store, activeJobs, audit: entry => auditEntries.push(entry), provider, cardService, now });
+    return { service, calls, created, orders, allocations, cfg, store, provider, cardService, activeJobs, auditEntries, auditContexts };
 }
 
 async function until(check) {
@@ -97,6 +99,20 @@ async function until(check) {
 
 const session = JSON.stringify({ user: { email: 'buyer@example.com' }, account: {}, accessToken: 'secret-session' });
 const id = '1b056caa-d7a6-4c39-9672-88e9cc5c6577';
+
+test('manual payment stages and all upstream preparation calls share one durable trace without Session secrets', async()=>{
+    process.env.ORBITCARD_API_KEY='key';process.env.ORBITCARD_API_SECRET='secret';
+    const f=fixture();f.cfg.orbitcard_payment_regions={plus:'PH'};
+    await f.service.create({requestId:id,planType:'gpt-plus',mode:'test',session,authorized:true});
+    await until(()=>f.orders.get(id).state==='success');
+    const jobKey=`manual-${id}`;
+    assert.ok(f.auditContexts.every(entry=>entry.jobKey===jobKey));
+    assert.ok(f.auditEntries.every(entry=>entry.jobKey===jobKey));
+    for(const event of ['session_validated','payment_plan_selected','payment_region_selected','manual_card_ready','subscription_parameters_ready','subscription_submission_started','subscription_submission_returned','subscription_result_checked']) {
+        assert.ok(f.auditEntries.some(entry=>entry.event===event),event);
+    }
+    assert.ok(!JSON.stringify(f.auditEntries).includes('secret-session'));
+});
 
 test('test mode uses only Plus and Pro plans and charges once without a CDK', async () => {
     process.env.ORBITCARD_API_KEY = 'key'; process.env.ORBITCARD_API_SECRET = 'secret';

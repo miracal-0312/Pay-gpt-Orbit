@@ -50,9 +50,9 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
     }));
     app.get('/api/admin/orbitcard/products', handler(async (req, res) => {
         const cfg = await config(), products = await cardsApi.products(cfg);
-        const catalog = products.map(product => ({ ...product, plans: Object.fromEntries(CANONICAL_PLAN_TYPES.map(plan => {
-            const selected = cardsApi.selection(product, plan, cfg);
-            return [plan, selected ? { amount: selected.amount, price: selected.price } : null];
+        const catalog = products.map(({ prices, ...product }) => ({ ...product, plans: Object.fromEntries(CANONICAL_PLAN_TYPES.map(plan => {
+            const selected = cardsApi.selection({ ...product, prices }, plan, cfg);
+            return [plan, selected ? { amount: selected.amount, available: true } : null];
         })) }));
         let application=null,applicationError=null;
         try {application=cardsApi.createCardBody(cardsApi.chooseOpeningProduct(products,cfg));}
@@ -79,10 +79,7 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
                 const code=String(item?.code || '').toUpperCase();
                 if(!/^[A-Z]{2}$/.test(code) || seen.has(code)) return false;
                 seen.add(code);return true;
-            }).map(item => ({code:String(item.code).toUpperCase(),default:item.default===true,
-                region_price:typeof item.price==='string' && /^\d{1,14}(?:\.\d{1,8})?$/.test(item.price)
-                    && Number(item.price)>0 && String(item.currency || '').toUpperCase()==='USD' ? item.price : null,
-                currency:String(item.currency || '').toUpperCase().slice(0,8)})),trace};
+            }).map(item => ({code:String(item.code).toUpperCase(),default:item.default===true})),trace};
         }
         res.json({success:true,regions});
     }));

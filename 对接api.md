@@ -42,7 +42,7 @@
 
 ## 管理入口
 
-后台继续使用 `/api/admin/gpt-api` 配置路径；旧预算和地区字段不再读取或接受。后台「接口调试」分别展示 `/test` 连接测试、`/status` 套餐与余额、`GET /api/admin/orbitcard/payment-regions` 四档地区查询结果。地区查询不参与订阅下单。CDK 行锁保护新任务创建，卡分配使用 MySQL 命名锁，提交订阅前以任务状态和固定订单号原子认领；未知结果只查原单。
+后台继续使用 `/api/admin/gpt-api` 配置路径；旧预算和地区字段不再读取或接受。后台「接口调试」分别展示 `/test` 连接测试、`/status` 套餐与余额、`GET /api/admin/orbitcard/payment-regions` 四档地区查询结果。单独调试地区不会修改默认配置；真实下单会核验该套餐已保存的地区。新增 `POST /api/admin/orbitcard/diagnostics/preflight`（Session/套餐/余额/地区/卡片/完整链路只读预检）和 `GET /api/admin/orbitcard/diagnostics/logs/:jobKey?cursor=0`（按字节游标读取持久化日志），均需管理员二级验证。真实调试复用 `POST /api/admin/manual/orders` 的 `test` 模式和原订单刷新接口，不增加独立支付通道。CDK 行锁保护新任务创建，卡分配使用 MySQL 命名锁，提交订阅前以任务状态和固定订单号原子认领；未知结果只查原单。
 
 `POST /api/admin/orders/:jobKey/refresh` 查询已有订单；`GET /api/admin/task-logs/:jobKey/audit` 下载任务日志。均需管理员认证。管理员自身的 Bearer 登录令牌与供应商 HMAC 协议用途不同。
 

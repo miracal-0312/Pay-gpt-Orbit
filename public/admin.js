@@ -41,7 +41,7 @@ function renderTasks(tasks) {
         const order = task.order || {}, fee = order.fee_status ? `${order.service_fee ?? '—'} ${order.currency || 'USDT'} / ${order.fee_status}` : '—';
         const payment = order.payment ? `${order.payment.amount} ${order.payment.currency}` : '—';
         const refresh = task.provider === 'orbitcard' ? `<button class="secondary" data-refresh-order="${escapeHtml(task.jobKey)}">查原单</button>` : '<small>历史记录</small>';
-        return `<tr><td>${escapeHtml(task.time)}<br><code>${escapeHtml(task.cdk)}</code></td><td>${escapeHtml(task.provider === 'orbitcard' ? task.token : '历史账号')}<br><code>${escapeHtml(task.order_id || task.client_order_no || task.jobKey)}</code><br>卡 ID：${escapeHtml(task.card_id || '历史未绑定')}</td><td>${status(task.status)}<br>${escapeHtml(task.message)}</td><td>${escapeHtml(fee)}</td><td>${escapeHtml(payment)}</td><td>${refresh} <button class="secondary" data-download-audit="${escapeHtml(task.jobKey)}">下载日志</button></td></tr>`;
+        return `<tr><td>${escapeHtml(task.time)}<br><code>${escapeHtml(task.cdk)}</code></td><td>${escapeHtml(task.provider === 'orbitcard' ? task.token : '历史账号')}<br><code>${escapeHtml(task.order_id || task.client_order_no || task.jobKey)}</code><br>卡 ID：${escapeHtml(task.card_id || '历史未绑定')}</td><td>${status(task.status)}<br>${escapeHtml(task.message)}</td><td>${escapeHtml(fee)}</td><td>${escapeHtml(payment)}</td><td>${refresh} <button class="secondary" data-download-audit="${escapeHtml(task.jobKey)}">下载日志</button> <button class="secondary" data-debug-trace="${escapeHtml(task.jobKey)}">链路日志</button></td></tr>`;
     }).join('') || '<tr><td colspan="6">暂无任务</td></tr>';
 }
 async function loadOverview() {
@@ -74,10 +74,9 @@ async function loadApi() {
     $('keyState').dataset.state = config.api_key_configured ? 'configured' : 'missing';
     $('secretState').dataset.state = config.orbitcard_secret_configured ? 'configured' : 'missing';
     if (config.api_key_configured && config.orbitcard_secret_configured) {
-        await Promise.all([loadCardIdPreview(), loadPricePreview(), loadPaymentRegions()]);
+        await Promise.all([loadCardIdPreview(), loadPaymentRegions()]);
     } else {
         $('cardIdPreview').textContent = '请先在服务器环境变量中配置配对的 API Key 和 API Secret。';
-        $('pricePreview').textContent = '凭据尚未配置，无法读取平台推荐价。';
         $('paymentRegionState').textContent = '请先配置平台凭据；已有地区设置会保留。';
         $('refreshPaymentRegions').disabled = false;
     }
@@ -131,20 +130,6 @@ async function loadPaymentRegions() {
         }
         $('paymentRegionState').textContent = `${failures ? '部分地区需要核对' : '地区读取完成'} · ${new Date().toLocaleTimeString('zh-CN')}。选择后点击下方“保存配置”；根域名修改后请先保存再刷新。`;
     } finally { if (sequence === paymentRegionLoadSequence) button.disabled = false; }
-}
-async function loadPricePreview() {
-    const output = $('pricePreview');
-    output.textContent = '正在读取产品目录中的套餐 USD 价格…';
-    try {
-        const data = await request('/api/admin/orbitcard/products');
-        const configuredCode = $('productCode').value.trim();
-        const products = (data.products || []).filter(product => !configuredCode || product.product_code === configuredCode);
-        output.innerHTML = Object.entries(cardPlans).map(([plan, label]) => {
-            const prices = products.flatMap(product => (product.prices || []).filter(price => price.plan_type === plan && price.currency === 'USD')
-                .map(price => `<small>${escapeHtml(product.product_code)}：${escapeHtml(price.price)} USD · ${escapeHtml(price.source === 'transaction' ? '交易参考价' : price.source === 'config' ? '平台配置价' : '平台返回价')}</small>`));
-            return `<div class="price-card"><strong>${escapeHtml(label)}</strong>${prices.length ? prices.join('') : '<small>平台未返回 USD 推荐价，暂不能自动充值</small>'}</div>`;
-        }).join('');
-    } catch (error) { output.textContent = `推荐价查询失败：${error.message}`; }
 }
 async function loadCardIdPreview() {
     $('cardIdPreview').textContent = '正在从 Orbitcard 读取卡片 ID…';
@@ -345,7 +330,7 @@ function renderManualOrders(orders) {
         const action = `${order.state === 'preparing'
             ? `<button type="button" class="secondary" data-retry-manual="${escapeHtml(order.request_id)}">继续准备</button>` : ''}${['submitting','pending','manual'].includes(order.state)
             ? `<button type="button" class="secondary" data-refresh-manual="${escapeHtml(order.request_id)}">查询原订单</button>` : ''}
-            <button type="button" class="secondary" data-download-manual="${escapeHtml(order.client_order_no)}">下载日志</button>`;
+            <button type="button" class="secondary" data-download-manual="${escapeHtml(order.client_order_no)}">下载日志</button> <button type="button" class="secondary" data-debug-trace="${escapeHtml(order.client_order_no)}">链路日志</button>`;
         return `<tr><td>${escapeHtml(new Date(order.created_at).toLocaleString('zh-CN'))}<br>${escapeHtml(order.target_email)}</td>
             <td>${order.mode === 'fulfillment' ? '人工交付' : '测试开通'}<br>${escapeHtml(order.plan_name || order.plan_type)}<br>${order.card_id ? `卡 ${escapeHtml(order.card_id)}` : '待选卡'}${order.cdk_code ? `<br><code>${escapeHtml(order.cdk_code)}</code>` : ''}</td>
             <td><code>${escapeHtml(order.client_order_no)}</code><br><small>请求 ${escapeHtml(order.request_id)}</small>${order.task_no ? `<br><code>${escapeHtml(order.task_no)}</code>` : ''}</td>
@@ -441,31 +426,22 @@ $('loadCatalog').onclick = () => runDiagnostic('loadCatalog', 'catalog', async (
     return {html:`<strong>查询完成 · ${checkedAt()}</strong><p>账户可用余额：${balance == null ? escapeHtml(data.balance_error || '查询失败') : `${escapeHtml(balance)} USD`}</p><ul>${planItems(data.gpt_plans)}</ul>`,warning:balance == null};
 });
 $('loadRegions').onclick = () => runDiagnostic('loadRegions', 'regionResult', async output => {
-    let products = [], productError = '';
-    try { products = (await diagnosticFetch('/api/admin/orbitcard/products')).products || []; }
-    catch (error) { productError = error.message; }
     const regions = {};
     for (const [index, plan] of Object.keys(cardPlans).entries()) {
         output.textContent = `正在查询地区 ${index + 1}/4：${cardPlans[plan]}…`;
         try {
             const data = await diagnosticFetch(`/api/admin/orbitcard/payment-regions?plan=${plan}`);
-            regions[plan] = data.regions?.[plan] || {options:[],error:'平台未返回该套餐地区'};
+            regions[plan] = data.regions?.[plan] || { options: [], error: '平台未返回该套餐地区' };
             appendPlatformChecks([regions[plan].trace], savedBaseUrl);
-        } catch (error) { regions[plan] = {options:[],error:error.message}; }
+        } catch (error) { regions[plan] = { options: [], error: error.message }; }
     }
-    const rows = Object.entries(cardPlans).flatMap(([plan, label]) => {
-        const result = regions[plan], options = result.options?.length ? result.options : [null];
-        const references = products.flatMap(product => (product.prices || [])
-            .filter(price => price.plan_type === plan && price.currency === 'USD')
-            .map(price => `${product.product_code}: ${price.price} USD`));
-        const reference = references.length ? references.map(escapeHtml).join('<br>') : '未返回';
-        return options.map(item => `<tr><td>${escapeHtml(label)}</td><td>${escapeHtml(item?.code || '—')}</td><td>${item?.default ? '是' : '否'}</td><td>${item?.region_price ? `${escapeHtml(item.region_price)} USD` : '未返回'}</td><td>${reference}</td><td>${escapeHtml(result.error || '可用')}</td></tr>`);
+    const rows = Object.entries(cardPlans).flatMap(([plan,label]) => {
+        const result=regions[plan];
+        return (result.options?.length ? result.options : [null]).map(item => `<tr><td>${escapeHtml(label)}</td><td>${escapeHtml(item ? regionLabel(item.code) : '—')}</td><td>${item?.default ? '是' : '否'}</td><td>${escapeHtml(result.error || '可用')}</td></tr>`);
     }).join('');
-    const warning = Boolean(productError || Object.values(regions).some(result => result.error));
-    return {html:`<strong>地区与价格查询完成 · ${checkedAt()}</strong><p>地区接口未文档化地区价格；“产品推荐价”来自卡产品目录，非地区价，也不代表最终扣款。</p>${productError ? `<p>产品价格读取失败：${escapeHtml(productError)}</p>` : ''}<div class="table-wrap"><table class="region-price-table"><thead><tr><th>套餐</th><th>地区</th><th>平台默认</th><th>地区接口价格</th><th>产品推荐价（非地区价）</th><th>状态</th></tr></thead><tbody>${rows}</tbody></table></div>`,warning};
+    return { html: `<strong>地区查询完成 · ${checkedAt()}</strong><div class="table-wrap"><table><thead><tr><th>套餐</th><th>地区</th><th>平台默认</th><th>状态</th></tr></thead><tbody>${rows}</tbody></table></div>`, warning: Object.values(regions).some(result=>result.error) };
 });
 $('clearDiagnosticLog').onclick = () => { diagnosticLines.length = 0; $('diagnosticLog').textContent = '尚无调试记录。'; };
-$('refreshPrices').onclick = () => perform(loadPricePreview);
 $('refreshPaymentRegions').onclick = () => perform(loadPaymentRegions);
 for (const plan of Object.keys(cardPlans)) $(`paymentRegion_${plan}`).addEventListener('change', () => {
     $('paymentRegionState').textContent = '地区选择已更改，请点击下方“保存配置”后生效。';

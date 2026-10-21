@@ -388,6 +388,7 @@ app.get('/api/public/admin-paths', async (req, res) => {
 app.use('/api/admin', authenticateAdmin);
 require('./orbitcard-card-http')(app, { store, cardService, requireSecondaryAuth, audit: entry => runtimeLog.push(entry) });
 require('./orbitcard-manual-http')(app, { service: manualService, requireSecondaryAuth });
+require('./orbitcard-diagnostics-http')(app, { store, requireSecondaryAuth, logs: runtimeLog });
 app.get('/api/admin/runtime-logs', authenticateAdmin, (req, res) => {
     try {
         const wantTail = String(req.query.tail || '') === '1' || String(req.query.tail || '') === 'true';

@@ -162,6 +162,7 @@ test('admin product query previews generated opening fields without writing an o
     const server=app.listen(0,'127.0.0.1');await once(server,'listening');t.after(async()=>{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));});
     const data=await (await fetch(`http://127.0.0.1:${server.address().port}/api/admin/orbitcard/products`)).json();
     assert.deepEqual(data.automatic_application,{product_code:'p1',amount:'20.00',quantity:1});assert.equal(data.application_error,null);
+    assert.ok(data.products.every(product=>!Object.hasOwn(product,'prices') && Object.values(product.plans).every(plan=>!plan || !Object.hasOwn(plan,'price'))));
     assert.deepEqual(f.calls.map(c=>c.operation),['getProductCode']);assert.ok(!JSON.stringify(data).includes('api_key'));
 });
 
@@ -180,8 +181,8 @@ test('admin region choices are read separately for each plan and expose only val
     const data=await (await fetch(`http://127.0.0.1:${server.address().port}/api/admin/orbitcard/payment-regions`)).json();
     assert.deepEqual(calls,Object.values(plans));
     assert.deepEqual(data.regions.plus.options,[
-        {code:'PH',default:true,region_price:null,currency:''},
-        {code:'US',default:false,region_price:null,currency:''}
+        {code:'PH',default:true},
+        {code:'US',default:false}
     ]);
     assert.equal(data.regions.plus.trace.path,'/api/open/v1/getSubscriptionPaymentRegions');
     assert.equal(data.regions.plus.trace.success,true);

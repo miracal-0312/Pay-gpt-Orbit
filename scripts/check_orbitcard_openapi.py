@@ -237,10 +237,8 @@ def summarize(operation: str, data: Any) -> Any:
                 "product_code", "remaining_open_card_num", "min_initial_amount", "min_retained_balance"
             ) if key in item}
             prices = item.get("gpt_plan_prices")
-            product["gpt_plan_prices"] = [{key: price.get(key) for key in (
-                                           "id", "name", "price", "currency", "source", "observed_at", "updated_at")
-                                           if key in price}
-                                          for price in prices if isinstance(price, dict)] if isinstance(prices, list) else None
+            product["plan_ids_with_price"] = [price.get("id") for price in prices
+                                               if isinstance(price, dict) and price.get("price") is not None] if isinstance(prices, list) else []
             products.append(product)
         return {"count": len(items), "products": products,
                 "price_field_present": any(isinstance(item.get("gpt_plan_prices"), list) for item in items)}

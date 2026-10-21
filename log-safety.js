@@ -1,17 +1,17 @@
 'use strict';
 
-const SECRET_KEY = /^(?:access_?token|refresh_?token|session(?:_json|_payload)?|cookies?|cookieHeader|authorization|api[_-]?key|api[_-]?secret|secret|password|card_number|card_cvc|cvv|cvc|captcha|signature)$/i;
+const SECRET_KEY = /^(?:access_?token|refresh_?token|session_?token|session(?:_json|_payload)?|cookies?|cookieHeader|authorization|(?:x[-_])?api[_-]?key|api[_-]?(?:key[_-]?)?secret|secret|password|card_?number|card_cvc|cvv|cvc|captcha|(?:x[-_])?signature)$/i;
 
 function redactLine(value) {
     let text = String(value ?? '');
     // Complete structured Session payloads are never log messages.
-    if (/"(?:accessToken|access_token|session_json|cookieHeader)"\s*:/.test(text)) {
+    if (/"(?:accessToken|access_token|sessionToken|session_token|session_json|cookieHeader)"\s*:/.test(text)) {
         return '[REDACTED_SESSION_PAYLOAD]';
     }
     text = text
         .replace(/\bBearer\s+[^\s"',;]+/gi, 'Bearer [REDACTED]')
         .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[REDACTED_JWT]')
-        .replace(/((?:api[_-]?(?:key|secret)|access[_-]?token|refresh[_-]?token|password|secret|cvc|cvv|captcha[_-]?token|signature|client_secret)\s*[:=]\s*)[^\s,;&]+/gi, '$1[REDACTED]')
+        .replace(/((?:api[_-]?(?:key|secret)|access[_-]?token|refresh[_-]?token|session[_-]?token|password|secret|cvc|cvv|captcha[_-]?token|signature|client_secret)\s*[:=]\s*)[^\s,;&]+/gi, '$1[REDACTED]')
         .replace(/(https?:\/\/)[^/\s:@]+:[^/\s@]+@/gi, '$1[REDACTED]@')
         .replace(/\b(?:\d[ -]?){13,19}\b/g, value => `****${value.replace(/\D/g, '').slice(-4)}`);
     return text;

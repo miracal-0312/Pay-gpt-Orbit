@@ -24,7 +24,7 @@ async function request(cfg, operation, body = {}, idempotencyKey = '') {
     const record = (event, details = {}) => audit.push({
         jobKey: cfg.auditJobKey || '', source: 'orbitcard', event,
         text: `${operation} ${event}`,
-        data: { operation, plan_type: body.plan_type, card_id: body.card_id,
+        data: { operation, method: 'POST', path, plan_type: body.plan_type, card_id: body.card_id,
             card_ids: Array.isArray(body.card_ids) ? body.card_ids.filter(Number.isSafeInteger).slice(0, 20) : undefined,
             client_order_no: body.client_order_no, task_no: body.task_no,
             payment_region: body.payment_region, max_service_fee: body.max_service_fee,

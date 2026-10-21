@@ -25,9 +25,6 @@
 .config-section .config-note{margin-top:14px}
 .card-preview{border:1px solid var(--line);background:#f8fbff;border-radius:10px;padding:14px 16px;margin:18px 0}
 .card-preview p{margin-bottom:0}.config-footer{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:20px}
-.price-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
-.price-card{border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:#f8fbff;min-width:0}
-.price-card strong{display:block;font-size:18px}.price-card small{display:block;overflow-wrap:anywhere}
 .payment-region-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-top:16px}
 .payment-regions-section .row h3{margin-bottom:6px}.payment-regions-section .row p{margin:0}
 .payment-region-grid label{min-width:0;padding:14px;border:1px solid var(--line);border-radius:10px;background:#f8fbff}
@@ -42,8 +39,8 @@
 .diagnostic-output.error{background:#fff0f1;color:var(--danger)}
 .diagnostic-output.success{background:#e7f6ef;color:var(--success)}
 .diagnostic-output ul{margin:8px 0 0;padding-left:18px}.diagnostic-output li+li{margin-top:5px}
-@media(max-width:900px){.account-forms{grid-template-columns:repeat(2,minmax(0,1fr))}.diagnostic-grid{grid-template-columns:1fr 1fr}.price-grid{grid-template-columns:1fr 1fr}.checkbox-grid{grid-template-columns:1fr 1fr}}
-@media(max-width:640px){.unlock-panel{display:block}.unlock-form{margin-top:14px}.unlock-form label,.settings-inline-form label:not(.check){min-width:100%;max-width:none}.account-forms,.diagnostic-grid,.price-grid,.checkbox-grid{grid-template-columns:1fr}.config-footer{align-items:stretch}.config-footer button{width:100%}}
+@media(max-width:900px){.account-forms{grid-template-columns:repeat(2,minmax(0,1fr))}.diagnostic-grid{grid-template-columns:1fr 1fr}.checkbox-grid{grid-template-columns:1fr 1fr}}
+@media(max-width:640px){.unlock-panel{display:block}.unlock-form{margin-top:14px}.unlock-form label,.settings-inline-form label:not(.check){min-width:100%;max-width:none}.account-forms,.diagnostic-grid,.checkbox-grid{grid-template-columns:1fr}.config-footer{align-items:stretch}.config-footer button{width:100%}}
 
 /* Shared public and administrator page polish. */
 body{min-width:320px}h1,h2,h3{overflow-wrap:anywhere}button,.button{font-weight:600;transition:background-color .15s ease,transform .15s ease}
@@ -53,6 +50,11 @@ input,textarea,select{min-width:0}pre,code{overflow-wrap:anywhere}.panel{box-sha
 .admin-tabs{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:thin;white-space:nowrap}.admin-tabs button{flex:0 0 auto}
 .credential-status strong[data-state="missing"]{color:var(--danger)}
 .diagnostic-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.diagnostic-region-card{grid-column:1/-1}
+.debug-actions{display:flex;flex-wrap:wrap;gap:10px}.debug-steps{margin:0;padding-left:24px;display:grid;gap:8px}.debug-passed{color:var(--success)}.debug-failed{color:var(--danger)}
+.debug-payment{border:1px solid #e9c4c9;border-radius:10px;padding:18px;background:#fff9f9;display:grid;gap:12px}.debug-payment h3,.debug-payment p{margin:0}
+.debug-log-controls{display:flex;gap:10px;flex-wrap:wrap;align-items:end}.debug-log-controls>label:not(.check){flex:1;min-width:240px}.debug-log-controls .check{align-self:center}
+#diagTraceLog{max-height:600px;margin:0}#diagResult{max-height:300px}.payment-debug-panel p,.payment-debug-panel small{overflow-wrap:anywhere}
+@media(max-width:640px){.debug-actions>button{flex:1 1 100%}.debug-log-controls{align-items:stretch}.debug-log-controls>label:not(.check){min-width:100%}}
 .diagnostic-region-card .diagnostic-output{max-height:580px}.region-price-table{min-width:780px}
 .region-price-table td{overflow-wrap:anywhere}.region-price-table td:nth-child(5){min-width:180px}
 .diagnostic-output.warning{background:#fff8e6;color:#6e4b0b}
