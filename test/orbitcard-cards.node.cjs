@@ -520,6 +520,80 @@ test('eligible cards are inspected in one batch without per-card rereads',async 
     assert.equal(f.calls.filter(call=>call.operation==='rechargeCard'||call.operation==='createCard').length,0);
 });
 
+test('live V1 items/data batch updates balances, status and masked tail without resetting quota',async () => {
+    const f=serviceFixture({cardDetail:async () => ({success:true,data:{total:2,succeeded:2,failed:0,items:[
+        {index:1,card_id:42,success:true,data:{card_id:42,card_type:'save',status:'ACTIVE',product_code:'p1',
+            available_amount:'0.03000000',card_number_masked:'400052******4139',billing_address:'private-address'}},
+        {index:2,card_id:43,success:true,data:{card_id:43,card_type:'save',status:'CANCELLED',product_code:'p1',
+            available_amount:'20.00000000',card_number_masked:'400052******7464'}}]}})});
+    const a=await f.addCard(42),b=await f.addCard(43); f.db.cards[0].successful_plus=2;
+    f.setCards([{...a,status:'ACTIVE',balance:20},{...b,status:'ACTIVE',balance:20}]);
+    const result=await f.service.synchronize(cfg);
+    assert.deepEqual(result.synced_ids,[42,43]); assert.deepEqual(result.failed_ids,[]);
+    assert.equal(f.db.cards[0].balance,0.03); assert.equal(f.db.cards[0].currency,'USD');
+    assert.equal(f.db.cards[0].last4,'4139'); assert.equal(f.db.cards[0].successful_plus,2);
+    assert.equal(f.db.cards[1].provider_status,'CANCELLED');
+    assert.ok(!JSON.stringify(f.db.cards).includes('private-address'));
+    assert.ok(f.calls.every(call=>['getCardList','cardDetail'].includes(call.operation)));
+});
+
+test('partial batch failure syncs confirmed cards and identifies stale card snapshots',async () => {
+    const f=serviceFixture({cardDetail:async () => ({success:true,data:{items:[
+        {card_id:42,success:true,data:{card_id:42,status:'ACTIVE',balance:'0.03',currency:'USD'}},
+        {card_id:43,success:false,error:{code:'provider_unavailable'}}]}})});
+    const a=await f.addCard(42),b=await f.addCard(43);f.setCards([{...a,status:'ACTIVE'},{...b,status:'ACTIVE'}]);
+    const result=await f.service.synchronize(cfg);
+    assert.deepEqual(result.synced_ids,[42]);assert.deepEqual(result.failed_ids,[43]);
+    assert.equal(f.db.cards[0].balance,0.03);assert.equal(f.db.cards[1].balance,b.balance);
+    // Failed card 43 must never be accepted merely because its cached balance is sufficient.
+    await f.api.cardDetails(cfg,[42,43],{allowPartial:true}).then(cards=>assert.deepEqual(cards.map(c=>c.card_id),[42]));
+    await assert.rejects(f.api.cardDetails(cfg,[42,43]),/43.*失败/);
+});
+
+test('actual V1 balance shape chooses funded card over stale cached balance without a topup',async()=>{
+    const live=[
+        {card_id:42,card_type:'save',product_code:'p1',status:'ACTIVE',available_amount:'0.03000000'},
+        {card_id:43,card_type:'save',product_code:'p1',status:'ACTIVE',available_amount:'25.00000000'}
+    ];
+    const f=serviceFixture({cardDetail:async body=>({success:true,data:{items:body.card_ids.map(id=>({
+        card_id:id,success:true,data:live.find(card=>card.card_id===id)}))}})});
+    await f.addCard(42);await f.addCard(43);f.setCards(live);
+    const task=await f.claim();assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),43);
+    assert.equal(f.db.cards.find(card=>card.card_id===42).balance,0.03);
+    assert.ok(!f.calls.some(call=>['rechargeCard','createCard'].includes(call.operation)));
+});
+
+test('batch wrappers reject foreign and duplicate IDs and never trust wrapper success as card status',async () => {
+    for(const items of [
+        [{card_id:42,success:true,data:{card_id:99,status:'ACTIVE'}}],
+        [{card_id:42,success:true,data:{card_id:42,status:'ACTIVE'}},{card_id:42,success:true,data:{card_id:42,status:'ACTIVE'}}],
+        [{card_id:99,success:false,error:{code:'missing'}}]
+    ]) {
+        const f=serviceFixture({cardDetail:async()=>({success:true,data:{items}})});
+        await assert.rejects(f.api.cardDetails(cfg,[42,43],{allowPartial:true}),/ID|归属/);
+    }
+    const f=serviceFixture({cardDetail:async()=>({success:true,data:{items:[{card_id:42,success:true,status:'ACTIVE',data:{card_id:42}}]}})});
+    assert.deepEqual(await f.api.cardDetails(cfg,[42,43],{allowPartial:true}),[]);
+});
+
+test('save-card USD compatibility preserves explicit currency and rejects invalid balance aliases',()=>{
+    const f=serviceFixture();
+    assert.equal(f.api.normalizeCard({card_type:'save',available_amount:'0.00',product_code:'p1'}).currency,'USD');
+    assert.equal(f.api.normalizeCard({card_type:'save',available_amount:'20',product_code:'p1',currency:'EUR'}).currency,'EUR');
+    assert.equal(f.api.normalizeCard({balance:'20'}).currency,'');
+    assert.equal(f.api.normalizeCard({available_amount:true}).balance,null);
+    assert.equal(f.api.normalizeCard(null).balance,null);
+});
+
+test('full batch sync failure is audited without presenting old balances as synchronized',async()=>{
+    const f=serviceFixture({cardDetail:async()=>({success:true,data:{unexpected:'secret'}})});
+    const a=await f.addCard(42),b=await f.addCard(43);f.setCards([{...a,status:'ACTIVE'},{...b,status:'ACTIVE'}]);
+    await assert.rejects(f.service.synchronize(cfg),/响应结构/);
+    assert.ok(f.events.some(event=>event.event==='cards_sync_failed'));
+    assert.ok(!f.events.some(event=>event.event==='cards_synchronized'));
+    assert.ok(!JSON.stringify(f.events).includes('secret'));
+});
+
 test('incomplete batch selects its valid card without per-card fallback',async () => {
     const f=serviceFixture({cardDetail:async () => ({success:true,data:{list:[
         {card_id:42,status:'ACTIVE',balance:50,currency:'USD'}]}})});

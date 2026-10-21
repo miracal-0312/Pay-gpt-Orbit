@@ -13,20 +13,51 @@ function requestFailure(result, fallback) {
     return new CardPreparationError(fallback);
 }
 function normalizeCard(row = {}) {
-    const source = row.card && typeof row.card === 'object' ? { ...row, ...row.card } : row;
+    if (!row || typeof row !== 'object' || Array.isArray(row)) row = {};
+    const source = row.card && typeof row.card === 'object' && !Array.isArray(row.card) ? { ...row, ...row.card } : row;
     const values = [source.available_amount, source.availableAmount, source.available_balance, source.availableBalance,
         source.card_balance, source.cardBalance, source.current_balance, source.currentBalance, source.balance,
         source.remaining_balance, source.remainingBalance, source.balance_info?.available_balance,
         source.balance_info?.balance, source.funds?.available_balance, source.funds?.balance];
-    const rawBalance = values.find(value => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value)));
-    const last4 = String(source.last4 || source.card_last4 || source.cardLast4 || source.card_number || source.cardNumber || '').slice(-4);
+    const rawBalance = values.find(value => (typeof value === 'string' && /^-?\d+(?:\.\d+)?$/.test(value)
+        || typeof value === 'number') && Number.isFinite(Number(value)));
+    const last4 = String(source.last4 || source.card_last4 || source.cardLast4 || source.masked_card_number
+        || source.card_number_masked || source.card_number || source.cardNumber || '').slice(-4);
+    // V1 save cards expose available_amount in USD without a currency field.
+    // Restrict this compatibility default to that shape; explicit currencies win.
+    const currency = source.currency || source.balance_currency || source.balanceCurrency || source.balance_info?.currency;
+    const saveUsd = source.card_type === 'save' && source.available_amount != null && source.product_code;
     return { card_id: positiveId(source.card_id ?? source.cardId ?? source.id),
         provider_status: String(source.status || source.card_status || '').trim().toUpperCase(),
         product_code: String(source.product_code || source.productCode || '').trim().slice(0, 128),
         bin: String(source.bin || source.card_bin || source.cardBin || '').replace(/\D/g, '').slice(0, 8),
         last4: /^\d{4}$/.test(last4) ? last4 : '',
         balance: rawBalance === undefined ? null : Number(rawBalance), balance_amount: rawBalance === undefined ? null : String(rawBalance),
-        currency: String(source.currency || source.balance_currency || source.balanceCurrency || source.balance_info?.currency || '').trim().toUpperCase().slice(0, 8) };
+        currency: String(currency || (saveUsd ? 'USD' : '')).trim().toUpperCase().slice(0, 8) };
+}
+
+function detailRows(data) {
+    if (Array.isArray(data)) return data;
+    for (const key of ['list', 'items', 'cards']) if (Array.isArray(data?.[key])) return data[key];
+    return null;
+}
+
+// Batch item success is independent of the outer HTTP/code success. Never use
+// an item's position or its wrapper status as evidence of a usable payment card.
+function detailItem(row) {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) throw new CardDataError('卡片详情条目格式无效');
+    if (Object.hasOwn(row, 'success') && typeof row.success !== 'boolean') throw new CardDataError('卡片详情条目成功标记无效');
+    if (row.success === false) return { card: normalizeCard({ card_id: row.card_id ?? row.cardId }), failed: true };
+    if (Object.hasOwn(row, 'data')) {
+        if (!row.data || typeof row.data !== 'object' || Array.isArray(row.data)) throw new CardDataError('卡片详情条目缺少有效 data');
+        const card = normalizeCard(row.data), outerId = row.card_id ?? row.cardId;
+        if (outerId != null && (!positiveId(outerId) || card.card_id && card.card_id !== positiveId(outerId))) {
+            throw new CardDataError('卡片详情条目内外卡 ID 不一致');
+        }
+        card.card_id ||= positiveId(outerId);
+        return { card, failed: false };
+    }
+    return { card: normalizeCard(row), failed: false };
 }
 
 async function listCards(cfg) {
@@ -60,7 +91,8 @@ async function cardDetail(cfg, cardId) {
     if (!id) throw new CardPreparationError('无效的平台卡 ID');
     const result = await api.request(cfg, 'cardDetail', { card_id: id, reveal_sensitive: false });
     if (!result.success) throw requestFailure(result, '卡片详情读取失败，已停止选卡');
-    const card = normalizeCard(result.data || {});
+    const { card, failed } = detailItem(result.data || {});
+    if (failed) throw new CardDataError('卡片详情查询失败，不能使用旧记录付款');
     if (card.card_id && card.card_id !== id) throw new CardDataError('卡片详情归属不一致');
     if (!card.provider_status) throw new CardDataError('卡片详情缺少状态');
     return { ...card, card_id: id };
@@ -74,17 +106,22 @@ async function cardDetails(cfg, cardIds, { allowPartial = false } = {}) {
     if(cardIds.length===1) return [await cardDetail(cfg,cardIds[0])];
     const result=await api.request(cfg,'cardDetail',{card_ids:cardIds.map(Number),reveal_sensitive:false});
     if(!result.success) throw requestFailure(result, '批量卡片详情读取失败，已停止选卡');
-    const rows=Array.isArray(result.data)?result.data:Array.isArray(result.data?.list)?result.data.list:
-        Array.isArray(result.data?.cards)?result.data.cards:null;
-    if(!rows || rows.length>cardIds.length || (!allowPartial && rows.length!==cardIds.length))
-        throw new CardDataError('批量卡片详情缺项或数量异常，已停止选卡');
+    const rows=detailRows(result.data);
+    if(!rows) throw new CardDataError('批量卡片详情响应缺少数组/list/items/cards，请检查 cardDetail 响应结构日志');
+    if(rows.length>cardIds.length || (!allowPartial && rows.length!==cardIds.length))
+        throw new CardDataError(`批量卡片详情数量异常：请求 ${cardIds.length} 张，返回 ${rows.length} 项，已停止选卡`);
     const expected=new Set(cardIds.map(Number)),seen=new Set(),cards=[];
     for(const row of rows) {
-        const card=normalizeCard(row);
-        if(!card.card_id || !expected.has(card.card_id) || seen.has(card.card_id) || !card.provider_status) {
-            throw new CardDataError('批量卡片详情归属或状态无效，已停止选卡');
+        const { card, failed }=detailItem(row);
+        if(!card.card_id || !expected.has(card.card_id) || seen.has(card.card_id)) {
+            throw new CardDataError('批量卡片详情归属无效或重复，已停止选卡');
         }
-        seen.add(card.card_id);cards.push(card);
+        seen.add(card.card_id);
+        if (failed || !card.provider_status) {
+            if (allowPartial) continue;
+            throw new CardDataError(`卡片 ${card.card_id} 详情查询失败或缺少状态，已停止选卡`);
+        }
+        cards.push(card);
     }
     return cards;
 }

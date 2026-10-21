@@ -259,11 +259,28 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
 
     async function synchronize(cfg) {
         return store.withCardAllocationLock(cfg.base_url, async locked => {
-            const listed = await cardsApi.listCards(cfg);
-            const detailed = await cardsApi.cardDetailsInBatches(cfg,listed.map(card=>card.card_id));
-            await locked.syncCards(detailed);
-            record('', 'cards_synchronized', '已同步平台卡片摘要，历史次数及绑定保持不变', { count: detailed.length });
-            return detailed.length;
+            try {
+                const listed = await cardsApi.listCards(cfg);
+                const detailed = await cardsApi.cardDetailsInBatches(cfg,listed.map(card=>card.card_id),{allowPartial:true});
+                const live = new Map(listed.map(card => [card.card_id, card]));
+                // List metadata can fill identification fields, never the detail balance/status.
+                for (const card of detailed) {
+                    card.product_code ||= live.get(card.card_id)?.product_code || '';
+                    card.bin ||= live.get(card.card_id)?.bin || '';
+                    card.last4 ||= live.get(card.card_id)?.last4 || '';
+                }
+                await locked.syncCards(detailed);
+                const confirmed = new Set(detailed.map(card => card.card_id));
+                const result = { count: detailed.length, listed_ids: listed.map(card => card.card_id),
+                    synced_ids: [...confirmed], failed_ids: listed.filter(card => !confirmed.has(card.card_id)).map(card => card.card_id),
+                    checked_at: new Date(now()).toISOString() };
+                record('', 'cards_synchronized', '已同步可读取的平台卡片摘要；缺失详情保留本地快照并标记未同步', result);
+                return result;
+            } catch (error) {
+                record('', 'cards_sync_failed', '平台卡片同步失败，本地快照未确认，请勿视为实时余额', {
+                    reason: error instanceof CardPreparationError ? error.message : 'local_sync_error' });
+                throw error;
+            }
         });
     }
     async function apply(cfg, planType) {

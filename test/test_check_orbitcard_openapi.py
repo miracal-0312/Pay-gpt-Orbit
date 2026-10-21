@@ -48,6 +48,22 @@ class FakeClient:
 
 
 class OpenApiProbeTests(unittest.TestCase):
+    def test_live_batch_items_are_unwrapped_and_sensitive_fields_are_removed(self):
+        data = {"total": 2, "succeeded": 2, "failed": 0, "items": [
+            {"index": 1, "card_id": 42, "success": True, "data": {"card_id": 42, "status": "ACTIVE",
+                "available_amount": "0.03000000", "card_type": "save", "product_code": "p1",
+                "card_number_masked": "400052******4139", "billing_address": "private-address"}},
+            {"index": 2, "card_id": 43, "success": True, "data": {"card_id": 43, "status": "CANCELLED",
+                "available_amount": "20.00000000", "card_type": "save", "product_code": "p1"}}]}
+        result = probe.summarize("cardDetail", data)
+        self.assertEqual(result["cards"][0]["available_balance"], "0.03000000")
+        self.assertEqual(result["cards"][0]["currency"], "USD")
+        self.assertEqual(result["cards"][1]["status"], "CANCELLED")
+        self.assertNotIn("private-address", json.dumps(result))
+        self.assertNotIn("400052", json.dumps(result))
+        data["items"][0]["card_id"] = 99
+        self.assertIsNone(probe.summarize("cardDetail", data))
+
     def test_config_reads_credentials_only_from_environment(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "probe.json"

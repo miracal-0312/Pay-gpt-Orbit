@@ -1,5 +1,14 @@
 # Orbitcard 选卡、自动补款与申请卡
 
+## 卡片读取与后台快照
+
+- `POST /api/open/v1/getCardList` 用于分页列出卡 ID；`POST /api/open/v1/cardDetail` 使用 `card_id` 查询单卡，或 `card_ids` 批量查询最多 20 张，始终发送 `reveal_sensitive: false`。
+- 2026-10-21 实测批量响应为 `data: {total, succeeded, failed, items: [{index, card_id, success, data}]}`。必须展开每项 `data`，再检查内外卡 ID、重复 ID、逐项 `success` 和卡状态；不能把外层 `code=0` 当作每张卡详情成功。也兼容数组、`list`、`cards` 扁平结果。
+- 平台脱敏卡号字段为 `card_number_masked`，只保留最后四位。储值卡 `card_type=save` 的 `available_amount` 按当前 V1 美元余额约定处理，缺少 `currency` 时补齐 USD；平台显式返回的其他币种不会被覆盖，其他缺失币种的数据仍不可用于支付。
+- 后台“刷新本地记录”只查询数据库，明确标注“本地快照”；“同步平台卡片”先读平台列表和详情，再更新可确认的卡片。逐项失败的卡显示“详情读取失败 / 旧快照”，同步整体失败显示失败提示；平台本次未返回的历史卡也不会被标为本次同步成功。
+- `ACTIVE` 对应平台“正常”，`CANCELLED` 对应“冻结”。平台余额同步不会自动推断会员成功次数，也不会修改已登记次数或正在占用的任务。
+- 运行日志新增 `card_response` 结构摘要（容器类型、返回项数、包装项数、失败项数）及 `cards_sync_failed`，不写入原始卡详情、卡号、CVV 或账单地址。付款选卡使用本次平台详情，不能回退到旧快照的状态或余额。
+
 ## 规则
 
 - Plus 一张平台卡最多成功充值 4 次。

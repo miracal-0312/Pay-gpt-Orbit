@@ -32,7 +32,8 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
             'funding_key','job_key','plan_type','card_id','amount','target_balance','state','order_no','provider_status',
             'fee_snapshot','retry_at','message','created_at','updated_at'
         ].map(key => [key,funding[key]])));
-        res.json({ success: true, cards, issues, fundings });
+        res.set('Cache-Control', 'no-store');
+        res.json({ success: true, source: 'local_snapshot', cards, issues, fundings });
     }));
     app.get('/api/admin/orbitcard/cards/preview', handler(async (req, res) => {
         const cards = await cardsApi.listCards(await config());
@@ -43,7 +44,9 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
                 status: card.provider_status, last4: card.last4 })) });
     }));
     app.post('/api/admin/orbitcard/cards/sync', handler(async (req, res) => {
-        res.json({ success: true, count: await cardService.synchronize(await config()), message: '卡片摘要已同步，历史次数及套餐绑定保持不变' });
+        const result = await cardService.synchronize(await config());
+        res.set('Cache-Control', 'no-store');
+        res.json({ success: true, ...result, message: `已同步 ${result.count} 张卡片详情${result.failed_ids.length ? `，${result.failed_ids.length} 张详情读取失败，仅保留旧快照` : ''}` });
     }));
     app.get('/api/admin/orbitcard/products', handler(async (req, res) => {
         const cfg = await config(), products = await cardsApi.products(cfg);

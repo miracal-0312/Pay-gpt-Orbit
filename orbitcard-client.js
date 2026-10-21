@@ -23,6 +23,7 @@ async function request(cfg, operation, body = {}, idempotencyKey = '') {
         jobKey: cfg.auditJobKey || '', source: 'orbitcard', event,
         text: `${operation} ${event}`,
         data: { operation, plan_type: body.plan_type, card_id: body.card_id,
+            card_ids: Array.isArray(body.card_ids) ? body.card_ids.filter(Number.isSafeInteger).slice(0, 20) : undefined,
             client_order_no: body.client_order_no, task_no: body.task_no,
             payment_region: body.payment_region, max_service_fee: body.max_service_fee,
             product_code: body.product_code, amount: body.amount, quantity: body.quantity,
@@ -58,6 +59,7 @@ async function request(cfg, operation, body = {}, idempotencyKey = '') {
         if(response.status===429) accountCooldowns.set(accountIdentity,Date.now()+Math.max(5000,retryAfterMs));
         const requestError = envelope?.request_error || envelope?.data?.request_error;
         record('request_finished', { http_status: response.status, platform_code: envelope?.code,
+            card_response: ['getCardList', 'cardDetail'].includes(operation) ? cardResponseShape(envelope?.data) : undefined,
             success, order: summary(envelope?.data), request_error: requestError ? {
                 code: typeof requestError.code === 'string' ? requestError.code : undefined,
                 submission_outcome: typeof requestError.submission_outcome === 'string' ? requestError.submission_outcome : undefined,
@@ -75,6 +77,16 @@ async function request(cfg, operation, body = {}, idempotencyKey = '') {
         record('request_failed', { outcome: 'unknown', error: 'network_or_audit_failure' });
         return { success: false, error: 'Orbitcard 网络请求失败，结果待确认' };
     }
+}
+
+// Structure only: no card numbers, CVV, credentials or raw provider messages.
+function cardResponseShape(data) {
+    const container = Array.isArray(data) ? 'array' : ['list', 'items', 'cards'].find(key => Array.isArray(data?.[key]));
+    const rows = container === 'array' ? data : container ? data[container] : [];
+    return { container: container || (data && typeof data === 'object' ? 'object' : typeof data),
+        returned_count: container ? rows.length : null,
+        wrapped_count: rows.filter(row => row?.data && typeof row.data === 'object').length,
+        failed_count: rows.filter(row => row?.success === false).length };
 }
 
 async function fetchPlans(cfg) {

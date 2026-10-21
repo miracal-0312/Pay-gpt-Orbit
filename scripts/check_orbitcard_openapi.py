@@ -179,14 +179,29 @@ def rows(data: Any) -> list[dict[str, Any]] | None:
     return value if isinstance(value, list) and all(isinstance(row, dict) for row in value) else None
 
 
+def card_data(row: dict[str, Any]) -> dict[str, Any]:
+    if row.get("success") is False:
+        return {}
+    if "data" in row:
+        if not isinstance(row["data"], dict):
+            return {}
+        source = card_data(row["data"])
+        outer_id = row.get("card_id", row.get("cardId"))
+        inner_id = source.get("card_id", source.get("cardId", source.get("id")))
+        if outer_id is not None and (positive_int(outer_id) is None or
+                                    inner_id is not None and positive_int(outer_id) != positive_int(inner_id)):
+            return {}
+        return {**source, "card_id": inner_id if inner_id is not None else outer_id}
+    return {**row, **row["card"]} if isinstance(row.get("card"), dict) else row
+
+
 def card_id(row: dict[str, Any]) -> int | None:
-    source = {**row, **row["card"]} if isinstance(row.get("card"), dict) else row
+    source = card_data(row)
     return positive_int(source.get("card_id", source.get("cardId", source.get("id"))))
 
 
 def safe_card(row: dict[str, Any]) -> dict[str, Any]:
-    nested = row.get("card")
-    source = {**row, **nested} if isinstance(nested, dict) else row
+    source = card_data(row)
     balance = next((source[key] for key in (
         "available_amount", "availableAmount", "available_balance", "availableBalance",
         "card_balance", "cardBalance", "balance",
@@ -196,7 +211,9 @@ def safe_card(row: dict[str, Any]) -> dict[str, Any]:
     return {"card_id": card_id(source), "status": str(source.get("status") or source.get("card_status") or "")[:32],
             "product_code": str(source.get("product_code") or "")[:128],
             "available_balance": balance,
-            "currency": str(source.get("currency") or source.get("balance_currency") or "")[:8]}
+            "currency": str(source.get("currency") or source.get("balance_currency") or
+                            ("USD" if source.get("card_type") == "save" and source.get("available_amount") is not None
+                             and source.get("product_code") else ""))[:8]}
 
 
 def summarize(operation: str, data: Any) -> Any:
