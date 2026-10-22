@@ -1,6 +1,6 @@
 'use strict';
 const $ = id => document.getElementById(id);
-let activeCdk = '', activeJob = '', generation = 0, timer, expiryTimer, trackingStarted = 0, busy = false;
+let activeCdk = '', activeJob = '', activePlanLabel = '', generation = 0, timer, expiryTimer, trackingStarted = 0, busy = false;
 const statusNames = { success: '订阅成功', failed: '充值失败', retry: '请重新提交 Session', manual: '处理中 / 结果待确认', running: '正在充值', processing: '正在充值', used: '卡密已使用', unused: '卡密可使用' };
 function message(text, type = '') { $('statusMessage').textContent = text; $('statusMessage').className = `message ${type}`; }
 async function post(url, body) {
@@ -8,6 +8,12 @@ async function post(url, body) {
     const data = await response.json();
     if (!response.ok) throw new Error(data.message || '请求失败，请稍后查询');
     return data;
+}
+function showRedeemStep(step) {
+    for (const item of document.querySelectorAll('[data-redeem-step]')) {
+        if (Number(item.dataset.redeemStep) === step) item.setAttribute('aria-current', 'step');
+        else item.removeAttribute('aria-current');
+    }
 }
 function clearChallenge() { clearTimeout(expiryTimer); $('captchaBox').replaceChildren(); }
 function challenge(value) {
@@ -24,10 +30,14 @@ function challenge(value) {
 function display(data) {
     if (data.jobKey && activeJob && data.jobKey !== activeJob) return false;
     activeJob = data.jobKey || activeJob;
+    showRedeemStep(3);
+    if (activePlanLabel) $('planInfo').textContent = `${activePlanLabel} · ${statusNames[data.status] || data.status}`;
     $('redeemForm').hidden = true;
     $('refreshBtn').hidden = data.provider !== 'orbitcard';
     $('progressBox').hidden = false;
     const progress = Math.max(0, Math.min(100, Number(data.progress) || 0));
+    $('progressBox').setAttribute('aria-label', statusNames[data.status] || data.status);
+    $('progressBar').parentElement.setAttribute('aria-valuenow', String(data.status === 'success' ? 100 : progress));
     $('progressBar').style.width = `${data.status === 'success' ? 100 : progress}%`;
     $('progressText').textContent = statusNames[data.status] || data.status;
     message(data.message || statusNames[data.status] || '等待查询', data.status === 'success' ? 'success' : data.status === 'failed' ? 'error' : '');
@@ -56,7 +66,8 @@ async function refresh(auto = false, expected = generation) {
 }
 function startTracking() { clearTimeout(timer); trackingStarted = Date.now(); $('refreshBtn').hidden = false; refresh(true); }
 $('cdkInput').addEventListener('input', () => {
-    generation++; clearTimeout(timer); clearChallenge(); activeCdk = ''; activeJob = '';
+    showRedeemStep(1);
+    generation++; clearTimeout(timer); clearChallenge(); activeCdk = ''; activeJob = ''; activePlanLabel = '';
     $('redeemForm').hidden = true; $('refreshBtn').hidden = true; $('progressBox').hidden = true;
     $('orderInfo').textContent = ''; $('trackingHint').textContent = ''; $('planInfo').textContent = ''; message('');
 });
@@ -67,8 +78,11 @@ $('verifyForm').addEventListener('submit', async event => {
         const result = await post('/api/verify-cdk', { cdk });
         if (current !== generation) return;
         activeCdk = cdk;
-        const data = result.data; $('planInfo').textContent = `${data.plan_label || data.plan_type} · ${statusNames[data.status] || data.status}`;
+        const data = result.data; activePlanLabel = data.plan_label || data.plan_type;
+        $('planInfo').textContent = `${activePlanLabel} · ${statusNames[data.status] || data.status}`;
         $('redeemForm').hidden = !['unused','retry'].includes(data.status) || data.type !== '自助';
+        showRedeemStep($('redeemForm').hidden ? 3 : 2);
+        if (!$('redeemForm').hidden) $('sessionInput').focus();
         message(data.message || statusNames[data.status]);
         if (data.jobKey && data.provider === 'orbitcard') { activeJob = data.jobKey; startTracking(); }
         else if (data.provider === 'history') message(data.message || '历史充值记录需联系管理员人工核对');
@@ -85,6 +99,8 @@ $('redeemForm').addEventListener('submit', async event => {
         $('sessionInput').value = '';
         if (current !== generation) return;
         activeJob = result.jobKey;
+        showRedeemStep(3);
+        $('planInfo').textContent = `${activePlanLabel} · 订单已提交`;
         $('redeemForm').hidden = true; message(result.message);
         if (result.provider === 'orbitcard') startTracking();
     } catch (error) { if (current === generation) message(error instanceof SyntaxError ? 'Session 不是有效的 JSON' : error.message, 'error'); }

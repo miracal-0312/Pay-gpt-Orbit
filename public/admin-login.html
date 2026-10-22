@@ -5,140 +5,20 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>后台登录 · Pay-gpt-Orbit</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-    <style>
-        :root {
-            --primary: #245be4;
-            --primary-hover: #1d4ed8;
-            --primary-soft: #eff6ff;
-            --bg: #f3f6fa;
-            --panel: #ffffff;
-            --border: #dbe3ee;
-            --text: #0f172a;
-            --text-dim: #64748b;
-            --error: #ef4444;
-            --success: #059669;
-            --shadow-lg: 0 12px 32px rgba(15, 23, 42, 0.10);
-            --shadow-focus: 0 0 0 4px rgba(37, 99, 235, 0.14);
-        }
-        * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif; }
-        body {
-            min-height: 100vh;
-            display: grid;
-            place-items: center;
-            background:
-                radial-gradient(circle at 12% 8%, rgba(37, 99, 235, 0.10), transparent 45%),
-                radial-gradient(circle at 90% 92%, rgba(14, 165, 233, 0.08), transparent 45%),
-                var(--bg);
-            color: var(--text);
-            padding: 24px;
-        }
-        .card {
-            width: 100%;
-            max-width: 460px;
-            background: var(--panel);
-            border: 1px solid var(--border);
-            border-radius: 16px;
-            padding: 36px;
-            box-shadow: var(--shadow-lg);
-        }
-        h1 { font-size: 24px; font-weight: 700; margin-bottom: 8px; }
-        .brand { color: var(--primary); font-size: 13px; font-weight: 800; letter-spacing: .08em; margin-bottom: 22px; }
-        p { color: var(--text-dim); margin-bottom: 20px; line-height: 1.55; font-size: 14px; }
-        label { display: block; font-size: 13px; color: var(--text-dim); margin-bottom: 8px; font-weight: 600; }
-        input {
-            width: 100%;
-            padding: 12px 14px;
-            border-radius: 12px;
-            border: 1px solid var(--border);
-            background: var(--panel);
-            color: var(--text);
-            outline: none;
-            font-size: 14px;
-            margin-bottom: 14px;
-        }
-        input:focus { border-color: var(--primary); box-shadow: var(--shadow-focus); }
-        button {
-            width: 100%;
-            margin-top: 6px;
-            padding: 12px 16px;
-            border: 1px solid var(--primary);
-            border-radius: 12px;
-            background: var(--primary);
-            color: #fff;
-            font-size: 14px;
-            font-weight: 600;
-            cursor: pointer;
-        }
-        button.secondary {
-            background: #fff;
-            color: var(--primary);
-            margin-top: 10px;
-        }
-        button:disabled { opacity: 0.6; cursor: not-allowed; }
-        button:focus-visible { outline: 3px solid #bfd0ff; outline-offset: 2px; }
-        .message { margin-top: 14px; min-height: 22px; font-size: 13px; color: var(--error); }
-        .message.success { color: var(--success); }
-        .step { display: none; }
-        .step.active { display: block; }
-        .method-tabs {
-            display: flex;
-            gap: 8px;
-            margin-bottom: 14px;
-            padding: 4px;
-            background: #f8fafc;
-            border: 1px solid var(--border);
-            border-radius: 12px;
-        }
-        .method-tab {
-            flex: 1;
-            margin: 0;
-            padding: 10px 8px;
-            border: 1px solid transparent;
-            border-radius: 10px;
-            background: transparent;
-            color: var(--text-dim);
-            font-size: 13px;
-            font-weight: 600;
-        }
-        .method-tab.active {
-            background: #fff;
-            color: var(--primary);
-            border-color: #bfdbfe;
-            box-shadow: 0 2px 8px rgba(37, 99, 235, 0.12);
-        }
-        .method-single {
-            margin-bottom: 14px;
-            padding: 10px 12px;
-            border-radius: 10px;
-            background: var(--primary-soft);
-            color: var(--primary);
-            font-size: 13px;
-            font-weight: 600;
-        }
-        .method-hint {
-            margin: -6px 0 14px;
-            font-size: 13px;
-            color: var(--text-dim);
-            line-height: 1.55;
-        }
-        .hint { margin-top: 12px; font-size: 12px; color: var(--text-dim); line-height: 1.55; }
-        @media (max-width: 480px) { body { padding: 16px; } .card { padding: 26px 22px; } }
-    </style>
+    <link rel="stylesheet" href="/style.css">
 </head>
-<body>
-    <main class="card">
-        <div class="brand">PAY-GPT-ORBIT · 管理后台</div>
-        <div id="stepLogin" class="step active">
+<body class="login-page"><div class="login-layout"><aside class="login-brand-panel"><a href="/" class="brand-link"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="5" stroke="currentColor" stroke-width="1.5"/><ellipse cx="12" cy="12" rx="11" ry="4" transform="rotate(-35 12 12)" stroke="currentColor" stroke-width="1.5"/><circle cx="19.5" cy="5.8" r="2" fill="currentColor"/></svg></span><span><span class="brand-name">Pay-gpt-Orbit</span><span class="brand-caption">SUBSCRIPTION CONSOLE</span></span></a><div><h2>管理每一笔订阅，<br>掌握每一步进度。</h2><p>卡密、订单、支付卡片与链路日志，在一个工作空间内完成管理。</p></div><span class="login-footnote">PAY-GPT-ORBIT / ADMINISTRATION</span></aside><main class="login-card">
+        <form id="stepLogin" class="step active">
             <h1>后台登录</h1>
             <p>使用管理员邮箱和密码登录。若已启用二次验证，登录后还需验证。</p>
             <label for="email">管理员邮箱</label>
             <input id="email" type="email" placeholder="请输入管理员邮箱" autocomplete="username">
             <label for="password">登录密码</label>
             <input id="password" type="password" placeholder="请输入登录密码" autocomplete="current-password">
-            <button id="loginBtn" type="button">继续</button>
-        </div>
+            <button id="loginBtn" type="submit">登录管理后台</button>
+        </form>
 
-        <div id="step2fa" class="step">
+        <form id="step2fa" class="step">
             <h1>二次验证</h1>
             <p id="step2faHint">请选择验证方式并输入验证码。</p>
             <div id="methodTabs" class="method-tabs" style="display:none;"></div>
@@ -147,13 +27,14 @@
             <label for="code">验证码</label>
             <input id="code" type="text" inputmode="numeric" maxlength="8" placeholder="6 位验证码" autocomplete="one-time-code">
             <button id="sendTgBtn" type="button" class="secondary" style="display:none;">发送 Telegram 验证码</button>
-            <button id="verifyBtn" type="button">验证并登录</button>
+            <button id="verifyBtn" type="submit">验证并登录</button>
             <button id="backBtn" type="button" class="secondary">返回</button>
-        </div>
+        </form>
 
         <div id="message" class="message" role="status" aria-live="polite"></div>
         <div class="hint">登录失败 5 次将锁定 30 分钟。登录后可在「接单与安全」切换验证方式。</div>
-    </main>
+        <a href="/" class="login-back">← 返回用户兑换页</a>
+    </main></div>
 
     <script>
         const TOKEN_KEY = 'plus_admin_token';
@@ -203,6 +84,7 @@
         function showStep(name) {
             document.querySelectorAll('.step').forEach((el) => el.classList.remove('active'));
             document.getElementById(name === '2fa' ? 'step2fa' : 'stepLogin').classList.add('active');
+            document.getElementById(name === '2fa' ? 'code' : 'email').focus();
         }
 
         function updateMethodUi() {
@@ -388,12 +270,10 @@
             }
         }
 
-        document.getElementById('loginBtn').addEventListener('click', login);
-        document.getElementById('verifyBtn').addEventListener('click', verify2fa);
+        document.getElementById('stepLogin').addEventListener('submit', event => { event.preventDefault(); login(); });
+        document.getElementById('step2fa').addEventListener('submit', event => { event.preventDefault(); verify2fa(); });
         document.getElementById('sendTgBtn').addEventListener('click', sendTelegramCode);
         document.getElementById('backBtn').addEventListener('click', () => showStep('login'));
-        document.getElementById('password').addEventListener('keydown', (e) => { if (e.key === 'Enter') login(); });
-        document.getElementById('code').addEventListener('keydown', (e) => { if (e.key === 'Enter') verify2fa(); });
 
         loadAdminPaths().then(() => verifyExistingToken());
     </script>

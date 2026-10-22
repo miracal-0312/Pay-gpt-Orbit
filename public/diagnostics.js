@@ -149,12 +149,12 @@ $('diagDownload').onclick = () => perform(async () => {
 });
 document.addEventListener('click', event => {
     const button = event.target.closest('[data-debug-trace]'); if (!button) return;
-    document.querySelector('[data-tab="orbitcard"]').click();
+    document.querySelector('[data-tab="diagnostics"]').click();
     diagFollow(button.dataset.debugTrace);
     perform(async () => { await diagReadLogs(); $('diagTraceId').scrollIntoView({ behavior: 'smooth', block: 'center' }); });
 });
 setInterval(async () => {
-    if (document.hidden || selected !== 'orbitcard' || !$('diagAutoLogs').checked || !localStorage.getItem(SECONDARY_KEY)) return;
+    if (document.hidden || selected !== 'diagnostics' || !$('diagAutoLogs').checked || !localStorage.getItem(SECONDARY_KEY)) return;
     if ($('diagTraceId').value.trim()) await diagReadLogs().catch(() => {});
     if ($('diagRequestId').value && !diagPayBusy && (!diagOrder || ['submitting','pending','manual'].includes(diagOrder.state))) {
         await diagQueryOrder().catch(() => {});

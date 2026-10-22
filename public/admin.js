@@ -268,7 +268,7 @@ async function loadSecurity() {
 }
 async function loadSelected() {
     if (selected === 'overview') await loadOverview();
-    if (selected === 'orbitcard') await loadApi();
+    if (selected === 'orbitcard' || (selected === 'diagnostics' && !savedBaseUrl)) await loadApi();
     if (selected === 'cards') await loadCards();
     if (selected === 'logs') await loadLogs();
     if (selected === 'settings') await Promise.all([loadOverview(), loadSecurity()]);
@@ -277,15 +277,23 @@ async function loadSelected() {
         await Promise.all([loadManualCatalog(), loadManualOrders()]);
     }
 }
-$('tabs').addEventListener('click', event => {
-    const button = event.target.closest('[data-tab]'); if (!button) return;
-    selected = button.dataset.tab;
+function selectView(tab) {
+    const button = [...$('tabs').querySelectorAll('[data-tab]')].find(item => item.dataset.tab === tab);
+    if (!button) return;
+    selected = tab;
     for (const section of document.querySelectorAll('.view')) section.hidden = section.id !== selected;
     for (const item of $('tabs').querySelectorAll('button')) {
         item.classList.toggle('active', item === button);
         if (item === button) item.setAttribute('aria-current','page'); else item.removeAttribute('aria-current');
     }
+    $('viewTitle').textContent = button.textContent.trim();
+    $('viewDescription').textContent = button.dataset.description;
+    document.title = button.textContent.trim() + ' · Pay-gpt-Orbit';
+    history.replaceState(null, '', '#' + selected);
     perform(loadSelected);
+}
+$('tabs').addEventListener('click', event => {
+    const button = event.target.closest('[data-tab]'); if (button) selectView(button.dataset.tab);
 });
 $('logout').onclick = logout; $('reload').onclick = () => perform(loadSelected);
 function form(id, handler) {
@@ -551,8 +559,11 @@ document.addEventListener('click', event => {
     if (remove && confirm(`确定删除未使用的卡密 ${remove.dataset.deleteCdk}？`)) perform(async () => { await request(`/api/admin/cdks/${encodeURIComponent(remove.dataset.deleteCdk)}`, undefined, 'DELETE'); await loadCdks(); });
 });
 perform(async () => {
+    if (localStorage.getItem(SECONDARY_KEY)) $('unlockState').textContent = '验证已保存';
     const paths = await (await fetch('/api/public/admin-paths')).json(); if (paths.success) loginUrl = paths.loginUrl;
     const session = await request('/api/admin/session'); if (session.token) localStorage.setItem(TOKEN_KEY, session.token);
     await Promise.all([loadOverview(), loadSecurity()]);
+    const initialView = location.hash.slice(1);
+    if (initialView && initialView !== 'overview') selectView(initialView);
 });
 setInterval(() => { if (!document.hidden && ['overview','logs'].includes(selected)) perform(loadSelected); }, 15000);

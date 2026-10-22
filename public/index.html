@@ -1,11 +1,9 @@
 <!doctype html>
-<html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>订阅兑换 · Pay-gpt-Orbit</title><link rel="icon" href="/favicon.svg"><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
-<body>
-<header class="recharge recharge-hero"><div><div class="brand">PAY-GPT-ORBIT</div><h1>兑换 ChatGPT 订阅</h1><p class="muted">验证卡密后确认套餐，提交目标账号 Session，并在这里查询原订单结果。</p></div><span class="hero-badge">Orbitcard 自动充值</span></header>
-<main class="recharge">
-<section class="panel"><div class="section-heading"><h2>支持的套餐</h2><p class="muted">具体套餐由卡密决定，充值前会核对平台当前是否开放。</p></div><div class="grid plan-grid"><div class="plan" data-plan="plus"><small>01 · PLUS</small><h3>ChatGPT Plus</h3></div><div class="plan" data-plan="pro100"><small>02 · PRO</small><h3>ChatGPT Pro 100</h3></div><div class="plan" data-plan="pro200"><small>03 · PRO</small><h3>ChatGPT Pro 200</h3></div><div class="plan" data-plan="pro500"><small>04 · PRO</small><h3>ChatGPT Pro 500</h3></div></div></section>
-<section class="panel redeem-panel">
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#375bd2"><title>订阅兑换 · Pay-gpt-Orbit</title><link rel="icon" href="/favicon.svg"><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body class="recharge-page"><a class="skip-link" href="#mainContent">跳到卡密兑换</a>
+<header class="public-header"><a href="/" class="brand-link"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="5" stroke="currentColor" stroke-width="1.5"/><ellipse cx="12" cy="12" rx="11" ry="4" transform="rotate(-35 12 12)" stroke="currentColor" stroke-width="1.5"/><circle cx="19.5" cy="5.8" r="2" fill="currentColor"/></svg></span><span><span class="brand-name">Pay-gpt-Orbit</span><span class="brand-caption">ChatGPT 订阅兑换</span></span></a><span class="public-header-note">卡密兑换 · 原订单查询</span></header>
+<main class="recharge" id="mainContent" tabindex="-1"><section class="recharge-hero"><span class="hero-badge">由 Orbitcard 提供充值服务</span><h1>让每一次兑换，都清晰可查。</h1><p>输入卡密，确认你的订阅套餐。提交目标账号 Session 后，即可在这里跟踪充值进度。</p></section>
+<div class="redeem-layout"><section class="panel redeem-panel">
 <div class="section-heading"><h2>卡密兑换与查询</h2><p class="muted">输入卡密即可继续充值，或查询已经提交的原订单。</p></div>
 <form id="verifyForm" class="stack"><label>你的卡密<input id="cdkInput" maxlength="32" autocomplete="off" placeholder="输入充值卡密" required></label><div><button id="verifyBtn">验证卡密 / 查询订单</button></div></form>
 <p id="planInfo" class="muted"></p>
@@ -14,12 +12,11 @@
 <small>先登录目标 ChatGPT 账号，再<a href="https://chatgpt.com/api/auth/session" target="_blank" rel="noopener noreferrer">获取 Session</a>。Session 包含敏感凭据，请勿分享给其他人。</small>
 <div><button id="startBtn">确认充值</button></div>
 </form>
-<div id="progressBox" hidden><p id="progressText"></p><div class="progress"><div id="progressBar" style="width:0%"></div></div></div>
+<div id="progressBox" hidden><p id="progressText"></p><div class="progress" role="progressbar" aria-label="充值进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="progressBar" style="width:0%"></div></div></div>
 <p id="statusMessage" class="message" role="status" aria-live="polite"></p>
 <p id="orderInfo" class="muted"></p><div id="captchaBox" class="captcha"></div>
 <div class="row"><button id="refreshBtn" class="secondary" type="button" hidden>查询原订单</button><small id="trackingHint"></small></div>
 </section>
-<details class="panel"><summary>充值与卡密状态说明</summary><p>确认充值后卡密会被占用。订阅成功后核销；只有平台明确拒绝首笔提交并确认未受理时才会释放。支付失败需换卡重试或人工处理时，卡密仍会保持占用。</p><p>超时、网络异常和“待确认”不代表失败。请用原卡密查询原订单，避免重复充值。需要人机验证时，会显示有时效的验证链接。</p><p>服务端不保存本次提交的完整 Session。重新打开页面后，输入原卡密即可恢复订单查询。</p></details>
-<p id="runtimeInfo" class="muted"></p>
-</main><footer class="recharge">Pay-gpt-Orbit · 充值结果以原订单的订阅状态为准。</footer>
-</body></html>
+<aside class="redeem-guide" aria-label="兑换步骤"><h2>三步完成订阅兑换</h2><ol class="redeem-steps"><li data-redeem-step="1" aria-current="step"><span class="step-number">01</span><div><strong>验证卡密</strong>核对卡密对应的套餐与使用状态。</div></li><li data-redeem-step="2"><span class="step-number">02</span><div><strong>提交账号 Session</strong>使用需要开通会员的目标账号。</div></li><li data-redeem-step="3"><span class="step-number">03</span><div><strong>查询充值结果</strong>保留原卡密，随时查看同一笔订单。</div></li></ol><p class="guide-note">结果待确认时请继续查询原订单。遇到异常，可联系管理员协助处理。</p></aside></div>
+<section class="plans-section"><div class="section-heading"><h2>支持的订阅套餐</h2><p class="muted">具体套餐由卡密决定，提交前会核对平台是否开放。</p></div><div class="plan-grid"><div class="plan" data-plan="plus"><small>01 / PLUS</small><h3>ChatGPT Plus</h3></div><div class="plan" data-plan="pro100"><small>02 / PRO</small><h3>ChatGPT Pro 100</h3></div><div class="plan" data-plan="pro200"><small>03 / PRO</small><h3>ChatGPT Pro 200</h3></div><div class="plan" data-plan="pro500"><small>04 / PRO</small><h3>ChatGPT Pro 500</h3></div></div></section><details class="panel"><summary>充值与卡密状态说明</summary><p>确认充值后卡密会被占用。订阅成功后核销；只有平台明确拒绝首笔提交并确认未受理时才会释放。支付失败需换卡重试或人工处理时，卡密仍会保持占用。</p><p>超时、网络异常和“待确认”不代表失败。请用原卡密查询原订单，避免重复充值。需要人机验证时，会显示有时效的验证链接。</p><p>服务端不保存本次提交的完整 Session。重新打开页面后，输入原卡密即可恢复订单查询。</p></details>
+<p id="runtimeInfo" class="muted" role="status"></p></main><footer class="public-footer"><span>Pay-gpt-Orbit / 订阅兑换</span><span>充值结果以原订单的订阅状态为准</span></footer></body></html>
