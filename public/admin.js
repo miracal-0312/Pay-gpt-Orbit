@@ -298,7 +298,7 @@ function selectView(tab) {
     }
     $('viewTitle').textContent = button.textContent.trim();
     $('viewDescription').textContent = button.dataset.description;
-    document.title = button.textContent.trim() + ' · Pay-gpt-Orbit';
+    document.title = button.textContent.trim() + ' · YZWAI';
     history.replaceState(null, '', '#' + selected);
     perform(loadSelected);
 }
