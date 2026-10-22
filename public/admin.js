@@ -7,7 +7,17 @@ let loginUrl = '/admin-login', selected = 'overview', savedBaseUrl = '';
 let cdkPlanFilter = '', cdkLoadSequence = 0, cdkLoadedFilter = null;
 let manualCatalog = { plans: [] }, manualOrders = [];
 let paymentRegionLoadSequence = 0;
-function notice(text, type = '') { $('notice').textContent = text; $('notice').className = `message ${type}`; }
+function notice(text, type = '') {
+    const content = String(text ?? '');
+    $('notice').className = `message notice-banner ${type}`;
+    $('notice').hidden = !content;
+    $('noticeText').textContent = content;
+}
+$('closeNotice').addEventListener('click', () => {
+    const wasFocused = document.activeElement === $('closeNotice');
+    notice('');
+    if (wasFocused) $('viewTitle').focus({ preventScroll: true });
+});
 function escapeHtml(value) { return String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch])); }
 function logout() { localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(SECONDARY_KEY); location.assign(loginUrl); }
 async function request(url, body, method = body === undefined ? 'GET' : 'POST') {
