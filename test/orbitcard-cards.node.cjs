@@ -775,6 +775,31 @@ test('transaction query filters sensitive fields, rejects foreign ownership and 
     await assert.rejects(f.service.transactions(cfg,42),/格式无效/);
 });
 
+test('payment reconciliation fetches card details only once and preserves independent evidence on failure', async () => {
+    let unavailable = false;
+    const f = serviceFixture({ cardTransaction: async () => unavailable
+        ? { success: false } : { success: true, data: { list: [], total: 0 } } });
+    f.setCards([{ card_id: 42, status: 'ACTIVE', product_code: 'p1', balance: '22.00', currency: 'USD' }]);
+    const snapshot = await f.service.reconcile(cfg, 42, 'job-test');
+    assert.equal(snapshot.card_balance, '22.00');
+    assert.equal(snapshot.transaction_query_ok, true);
+    assert.deepEqual(f.calls.map(call => call.operation).sort(), ['cardDetail', 'cardTransaction', 'getAccountBalance']);
+    unavailable = true;
+    const partial = await f.service.reconcile(cfg, 42, 'job-test');
+    assert.equal(partial.card_balance, '22.00');
+    assert.equal(partial.transaction_query_ok, false);
+    assert.equal(partial.observed_transactions, null);
+});
+
+test('a different API account cannot unlock a balance-blocked CDK', async () => {
+    const f = serviceFixture();
+    const task = { orbitcard_base_url: cfg.base_url, orbitcard_required_balance: '20.00',
+        orbitcard_api_key_hash: require('node:crypto').createHash('sha256').update(cfg.api_key).digest('hex') };
+    await assert.rejects(f.service.canResumeBalance({ ...cfg, api_key: 'another-account' }, task), /API Key/);
+    assert.equal(f.calls.length, 0);
+    assert.equal(await f.service.canResumeBalance(cfg, task), true);
+});
+
 test('HTTP 429 cooldown is shared by API operations for one account but does not block another key',async () => {
     const previous=process.env.ORBITCARD_API_SECRET,previousKey=process.env.ORBITCARD_API_KEY;
     process.env.ORBITCARD_API_SECRET='fixture';process.env.ORBITCARD_API_KEY='fixture';

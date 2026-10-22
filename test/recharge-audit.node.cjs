@@ -77,6 +77,30 @@ test('sequential original-order requests honor cooldown and Retry-After', async 
     await Promise.all([query.refresh(input), query.refresh(input)]);
     const result = await query.refresh(input); assert.equal(calls, 1); assert.ok(result.retryAfterMs > 15000);
 });
+
+test('malformed retry hints cannot discard a valid Retry-After header or nested hint', async t => {
+    const oldSecret = process.env.ORBITCARD_API_SECRET, oldKey = process.env.ORBITCARD_API_KEY;
+    process.env.ORBITCARD_API_SECRET = 'test-secret'; process.env.ORBITCARD_API_KEY = 'test-retry-key';
+    t.after(() => {
+        if (oldSecret === undefined) delete process.env.ORBITCARD_API_SECRET; else process.env.ORBITCARD_API_SECRET = oldSecret;
+        if (oldKey === undefined) delete process.env.ORBITCARD_API_KEY; else process.env.ORBITCARD_API_KEY = oldKey;
+    });
+    for (const headers of [{ 'retry-after': '120' }, {}]) {
+        let calls = 0;
+        const api = load('orbitcard-client.js', { './runtime-log': { push() {} }, axios: { request: async () => {
+            calls++;
+            return { status: 429, headers, data: { code: 59018,
+                request_error: { retry_after_seconds: 'invalid' },
+                data: { retry_after_seconds: 'invalid', request_error: { retry_after_seconds: 90 } } } };
+        } } });
+        const result = await api.request({ base_url: 'https://orbitcard.test' }, 'getSubscription');
+        const delay = headers['retry-after'] ? 120000 : 90000;
+        assert.equal(result.retryAfterMs, delay);
+        const deferred = await api.request({ base_url: 'https://orbitcard.test' }, 'getAccountBalance');
+        assert.equal(calls, 1);
+        assert.ok(deferred.retryAfterMs > delay - 5000);
+    }
+});
 test('task subscriptions require a matching CDK or a current administrator token', async () => {
     const deps = { store: { getTaskStatus: async () => ({ cdk_code: 'CDK-SECRET' }), getAdminAuthConfig: async () => ({ passwordVersion: 2 }) }, verifyAdminToken: token => token === 'valid' ? { pv: 2 } : token === 'old' ? { pv: 1 } : null };
     const { authorize } = require('../task-subscription');

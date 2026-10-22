@@ -30,9 +30,10 @@ function challenge(value) {
 function display(data) {
     if (data.jobKey && activeJob && data.jobKey !== activeJob) return false;
     activeJob = data.jobKey || activeJob;
-    showRedeemStep(3);
+    const retry = data.status === 'retry';
+    showRedeemStep(retry ? 2 : 3);
     if (activePlanLabel) $('planInfo').textContent = `${activePlanLabel} · ${statusNames[data.status] || data.status}`;
-    $('redeemForm').hidden = true;
+    $('redeemForm').hidden = !retry;
     $('refreshBtn').hidden = data.provider !== 'orbitcard';
     $('progressBox').hidden = false;
     const progress = Math.max(0, Math.min(100, Number(data.progress) || 0));
@@ -42,7 +43,7 @@ function display(data) {
     $('progressText').textContent = statusNames[data.status] || data.status;
     message(data.message || statusNames[data.status] || '等待查询', data.status === 'success' ? 'success' : data.status === 'failed' ? 'error' : '');
     $('orderInfo').textContent = `订单：${data.order_id || data.client_order_no || activeJob || '待分配'}`;
-    if (['success', 'failed', 'retry'].includes(data.status)) { clearTimeout(timer); clearChallenge(); $('trackingHint').textContent = data.status === 'retry' ? '请点击“验证卡密”，再提交最新 Session 继续。' : '结果已确认，仍可手动查询原订单。'; return false; }
+    if (['success', 'failed', 'retry'].includes(data.status)) { clearTimeout(timer); clearChallenge(); $('trackingHint').textContent = retry ? '请提交原目标账号的最新 Session 继续。' : '结果已确认，仍可手动查询原订单。'; return false; }
     return true;
 }
 async function refresh(auto = false, expected = generation) {
@@ -55,9 +56,9 @@ async function refresh(auto = false, expected = generation) {
         if (expected !== generation) return;
         delay = Math.max(5000, Number(data.retry_after_ms) || 0);
         if (data.data && !display(data.data)) auto = false;
-        if (!data.success) { message(data.message || '查询暂不可用，卡密仍保持原状态'); if (data.stop_tracking) auto = false; }
+        if (!data.success) { clearChallenge(); message(data.message || '查询暂不可用，卡密仍保持原状态'); if (data.stop_tracking) auto = false; }
         if (data.success) challenge(data.captcha);
-    } catch (error) { if (expected === generation) message(`${error.message}。请保留原卡密并继续查询。`, 'error'); delay = 10000; }
+    } catch (error) { if (expected === generation) { clearChallenge(); message(`${error.message}。请保留原卡密并继续查询。`, 'error'); } delay = 10000; }
     finally {
         busy = false; $('refreshBtn').disabled = false;
         if (expected === generation && auto && Date.now() - trackingStarted < 15 * 60 * 1000) timer = setTimeout(() => refresh(true, expected), delay);

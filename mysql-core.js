@@ -186,15 +186,6 @@ async function getAppConfigValue(configKey, fallbackValue = '') {
     return rows[0]?.config_value ?? fallbackValue;
 }
 
-async function setAppConfigValue(configKey, configValue) {
-    await runExecute(
-        `INSERT INTO app_config (config_key, config_value)
-         VALUES (?, ?)
-         ON DUPLICATE KEY UPDATE config_value = VALUES(config_value)`,
-        [String(configKey), String(configValue ?? '')]
-    );
-}
-
 async function getTelegramConfig() {
     const keys = [
         'telegram_bot_token',
@@ -248,18 +239,6 @@ async function getMaintenanceModeState() {
         enabled: String(configMap.maintenance_mode || '0') === '1',
         drain: String(configMap.maintenance_mode_drain || '0') === '1'
     };
-}
-
-async function setMaintenanceModeState(enabled, drain = false) {
-    await runExecute(
-        `INSERT INTO app_config (config_key, config_value)
-         VALUES (?, ?), (?, ?)
-         ON DUPLICATE KEY UPDATE config_value = VALUES(config_value)`,
-        [
-            'maintenance_mode', enabled ? '1' : '0',
-            'maintenance_mode_drain', drain ? '1' : '0'
-        ]
-    );
 }
 
 async function getAdminAuthConfig() {
@@ -462,4 +441,4 @@ async function updateAdminPassword(password) {
         passwordVersion: nextVersion
     };
 }
-module.exports = { getPool, openLockConnection, createPasswordHash, runQuery, runExecute, withTransaction, ensureGptApiConfigDefaults, getGptApiConfig, saveGptApiConfig, hasColumn, ensureColumn, getAppConfigValue, setAppConfigValue, getTelegramConfig, saveTelegramConfig, getMaintenanceModeState, setMaintenanceModeState, getAdminAuthConfig, saveAdmin2faLoginMode, getAdminPaths, saveAdminPaths, updateAdminEmail, updateAdminSecondaryPassword, saveAdminTotpConfig, insertAdminLoginLog, listAdminLoginLogs, updateAdminPassword, close: async () => { if (pool) await pool.end(); }, connectionInfo: { host: DB_HOST, port: DB_PORT, database: DB_NAME, user: DB_USER } };
+module.exports = { getPool, openLockConnection, createPasswordHash, runQuery, runExecute, withTransaction, ensureGptApiConfigDefaults, getGptApiConfig, saveGptApiConfig, hasColumn, ensureColumn, getAppConfigValue, getTelegramConfig, saveTelegramConfig, getMaintenanceModeState, getAdminAuthConfig, saveAdmin2faLoginMode, getAdminPaths, saveAdminPaths, updateAdminEmail, updateAdminSecondaryPassword, saveAdminTotpConfig, insertAdminLoginLog, listAdminLoginLogs, updateAdminPassword, close: async () => { if (pool) await pool.end(); }, connectionInfo: { host: DB_HOST, port: DB_PORT, database: DB_NAME, user: DB_USER } };

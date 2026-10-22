@@ -71,11 +71,6 @@ module.exports = function createRecovery({ store, query, activeJobs, audit, noti
             return { success: true, querySkipped: true, waitMs:60000 };
         }
         if (task.orbitcard_state === 'prepared') {
-            if (Number(task.orbitcard_retry_attempt_no || 1) > 1) {
-                const result = await lockSupport(task.job_key, 'prepared',
-                    '支付重试在订阅提交前中断，CDK 已锁定；请联系人工售后');
-                return { success: true, applied: result.applied, querySkipped: true };
-            }
             let preparedIssue = null;
             const preparedFunding=store.getCardFundingForTask?await store.getCardFundingForTask(task.job_key):null;
             if(preparedFunding && !['ready','failed'].includes(preparedFunding.state)) {
@@ -90,6 +85,11 @@ module.exports = function createRecovery({ store, query, activeJobs, audit, noti
                         orbitcardState: 'card_pending', expectedState: 'prepared', message: '原支付卡申请仍待确认，会员充值未提交；保留 CDK 并继续确认原申请' });
                     return { success: true, applied: result.applied, querySkipped: true };
                 }
+            }
+            if (Number(task.orbitcard_retry_attempt_no || 1) > 1) {
+                const result = await lockSupport(task.job_key, 'prepared',
+                    '支付重试在订阅提交前中断，CDK 已锁定；请联系人工售后');
+                return { success: true, applied: result.applied, querySkipped: true };
             }
             const fundingFailed=preparedFunding?.state==='failed';
             const cardReady = !fundingFailed && (preparedIssue?.state === 'ready' || preparedFunding?.state==='ready');

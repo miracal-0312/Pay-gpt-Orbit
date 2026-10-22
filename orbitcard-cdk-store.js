@@ -2,6 +2,14 @@
 
 // Transaction boundaries keep task creation, order linkage and CDK ownership consistent.
 module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, runExecute, createTaskLog, settleCardUse = async () => {} }) {
+    async function hasPendingPreparation(task, options) {
+        const funding = await runQuery(`SELECT funding_key FROM orbitcard_card_fundings WHERE job_key=?
+            AND state IN ('prepared','submitting','pending','unknown') FOR UPDATE`, [task.job_key], options);
+        const issue = task.orbitcard_issue_key ? await runQuery(`SELECT issue_key FROM orbitcard_card_issues WHERE issue_key=?
+            AND state IN ('prepared','submitting','pending','unknown') FOR UPDATE`, [task.orbitcard_issue_key], options) : [];
+        return Boolean(funding.length || issue.length);
+    }
+
     async function createOrbitcardTask({ cdk, planType, email, baseUrl, apiKeyHash = null }) {
         return withTransaction(async connection => {
             const options = { connection };
@@ -58,11 +66,7 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
             if (task.orbitcard_state === 'prepared' && ['failed','rejected'].includes(orbitcardState)) {
                 // Recheck inside the transaction: a recovery snapshot can predate
                 // a funding/issuance intent committed by a worker losing its lock.
-                const funding = await runQuery(`SELECT funding_key FROM orbitcard_card_fundings WHERE job_key=?
-                    AND state IN ('prepared','submitting','pending','unknown') FOR UPDATE`, [jobKey], options);
-                const issue = task.orbitcard_issue_key ? await runQuery(`SELECT issue_key FROM orbitcard_card_issues WHERE issue_key=?
-                    AND state IN ('prepared','submitting','pending','unknown') FOR UPDATE`, [task.orbitcard_issue_key], options) : [];
-                if (funding.length || issue.length) return { applied: false, status: task.status };
+                if (await hasPendingPreparation(task, options)) return { applied: false, status: task.status };
             }
             await runExecute(`UPDATE task_logs SET status = ?, progress = GREATEST(progress, ?), message = ?,
                 orbitcard_state = ?, gpt_api_order_id = COALESCE(?, gpt_api_order_id),
@@ -179,6 +183,9 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
             const selectionExhausted = details.cardSelectionExhausted === true && expectedState === 'prepared';
             if (!task || latest[0]?.job_key !== jobKey || task.orbitcard_state !== expectedState
                 || (Number(task.orbitcard_retry_attempt_no || 1) < 2 && !selectionExhausted)) return { applied: false };
+            // Support escalation releases the card too, so it needs the same
+            // transactional funding check as ordinary preparation failure.
+            if (await hasPendingPreparation(task, options)) return { applied: false };
             await runExecute(`UPDATE task_logs SET status = 'failed', orbitcard_state = 'support_locked', message = ?,
                 gpt_api_order_id = COALESCE(?,gpt_api_order_id), gpt_api_raw = COALESCE(?,gpt_api_raw)
                 WHERE job_key = ?`, [message, details.orderId || null, details.raw || null, jobKey], options);

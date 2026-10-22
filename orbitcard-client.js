@@ -57,7 +57,9 @@ async function request(cfg, operation, body = {}, idempotencyKey = '') {
         const retryHeader = response.headers?.['retry-after'];
         const headerSeconds = retryHeader && !Number.isFinite(Number(retryHeader))
             ? Math.max(0, (Date.parse(retryHeader) - Date.now()) / 1000) : Number(retryHeader || 0);
-        const seconds = Math.max(headerSeconds || 0, Number(envelope?.request_error?.retry_after_seconds || envelope?.data?.request_error?.retry_after_seconds || 0), Number(envelope?.data?.retry_after_seconds || 0));
+        const retryHints = [headerSeconds, envelope?.request_error?.retry_after_seconds,
+            envelope?.data?.request_error?.retry_after_seconds, envelope?.data?.retry_after_seconds];
+        const seconds = Math.max(0, ...retryHints.map(Number).filter(Number.isFinite));
         const retryAfterMs=Number.isFinite(seconds)?Math.max(0,seconds*1000):0;
         if(response.status===429) accountCooldowns.set(accountIdentity,Date.now()+Math.max(5000,retryAfterMs));
         const requestError = envelope?.request_error || envelope?.data?.request_error;
@@ -138,11 +140,6 @@ function captcha(data) {
     return { id: cap.id, url: cap.url, expires_at: cap.expires_at };
 }
 
-function maskApiKey(value) {
-    const key = String(value || '').trim();
-    return !key ? '' : key.length <= 8 ? '****' : `${key.slice(0, 6)}…${key.slice(-4)}`;
-}
-
 async function queryBalance(cfg) {
     return request(cfg, 'getAccountBalance');
 }
@@ -169,5 +166,5 @@ async function testConnection(cfg) {
         balanceError: balance.success ? null : balance.error, checks };
 }
 
-module.exports = { DEFAULT_BASE_URL, normalizeBaseUrl, maskApiKey, request, fetchPlans, queryBalance,
+module.exports = { DEFAULT_BASE_URL, normalizeBaseUrl, request, fetchPlans, queryBalance,
     testConnection, outcome, summary, captcha, PLAN_MAP };

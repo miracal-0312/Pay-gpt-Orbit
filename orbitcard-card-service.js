@@ -304,6 +304,10 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
         const id=cardsApi.positiveId(cardId),number=Number(page);
         if(!id || !Number.isSafeInteger(number) || number<1 || number>10000) throw new CardPreparationError('交易查询参数无效');
         const card=await cardsApi.cardDetail(cfg,id);
+        return {card_id:id,card_status:card.provider_status,card_balance:card.balance_amount,currency:card.currency,
+            ...await transactionRows(cfg,id,number)};
+    }
+    async function transactionRows(cfg,id,number) {
         const result=await api.request(cfg,'cardTransaction',{card_id:id,page:number,page_size:50});
         if(!result.success) throw new CardPreparationError(result.error || '平台消费交易读取失败，请检查交易读取权限');
         if(!Array.isArray(result.data?.list)) throw new CardPreparationError('平台消费交易响应格式无效');
@@ -320,13 +324,14 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
         }
         const total=result.data.total==null?null:Number(result.data.total);
         if(total!=null && (!Number.isSafeInteger(total) || total<list.length)) throw new CardPreparationError('消费交易分页总数无效');
-        return {card_id:id,card_status:card.provider_status,card_balance:card.balance_amount,currency:card.currency,
-            page:number,total,transactions:list};
+        return {page:number,total,transactions:list};
     }
     async function reconcile(cfg,cardId,jobKey) {
+        cardId=cardsApi.positiveId(cardId);
+        if(!cardId) throw new CardPreparationError('交易查询参数无效');
         const identity={...cfg,auditJobKey:jobKey};
         const [card,balance,flows]=await Promise.allSettled([
-            cardsApi.cardDetail(identity,cardId),account(identity),transactions(identity,cardId,1)]);
+            cardsApi.cardDetail(identity,cardId),account(identity),transactionRows(identity,cardId,1)]);
         const snapshot={card_id:cardId,card_status:card.status==='fulfilled'?card.value.provider_status:null,
             card_balance:card.status==='fulfilled'?card.value.balance_amount:null,
             account_available:balance.status==='fulfilled'?money.decimal(balance.value):null,
@@ -337,6 +342,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
     }
     async function canResumeBalance(cfg,task) {
         if(String(cfg.base_url || '').replace(/\/+$/,'')!==String(task.orbitcard_base_url || '').replace(/\/+$/,'')) throw new CardPreparationError('余额锁定任务的平台地址与原配置不同');
+        if(task.orbitcard_api_key_hash && task.orbitcard_api_key_hash!==credentialHash(cfg)) throw new CardPreparationError('余额锁定任务的 API Key 与原配置不同，请恢复原凭据后核对');
         const identity=`${cfg.base_url}:${credentialHash(cfg)}`;
         if(!balanceCache || balanceCache.identity!==identity || balanceCache.until<=now()) balanceCache={identity,until:now()+5000,pending:account(cfg)};
         let available;

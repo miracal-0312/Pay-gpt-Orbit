@@ -144,3 +144,36 @@ test('funding intent creation rejects a stale reservation, and recovery cannot r
     await assert.rejects(methods.createFunding({...intent,funding_key:'fund-stale'}),/支付任务已变更/);
     assert.equal(f.db.fundings.length,1);
 });
+
+test('retry recovery keeps the card reserved until its original funding or issuance is resolved', async () => {
+    for (const kind of ['funding', 'issue']) {
+        const f = cardFixture(); await f.addCard(); const task = await f.claim();
+        const methods = f.store.cardMethods(f.base);
+        await methods.reserveCard(42, task.jobKey, 'plus');
+        f.db.tasks[0].orbitcard_retry_attempt_no = 2;
+        if (kind === 'funding') {
+            await methods.createFunding({ funding_key: 'fund-retry', job_key: task.jobKey, plan_type: 'plus', card_id: 42,
+                credential_hash: 'test', request_body: '{}', amount: '1.00', target_balance: '21.00' });
+            f.db.fundings[0].state = 'unknown';
+        } else {
+            await methods.createIssue({ issue_key: 'issue-retry', job_key: task.jobKey, plan_type: 'plus',
+                product_code: 'p1', amount: '20.00', credential_hash: 'test', request_body: '{}' });
+            await methods.attachIssue(task.jobKey, 'issue-retry');
+            f.db.issues[0].state = 'unknown';
+        }
+        // The transaction must also protect callers holding a stale preparation snapshot.
+        assert.equal((await f.store.lockOrbitcardSupport(task.jobKey, 'prepared', 'support')).applied, false);
+        const recovery = require('../order-recovery')({ store: f.store, activeJobs: new Set(), audit() {},
+            query: { refresh: async () => assert.fail('unsubmitted orders cannot be queried as subscriptions') } });
+        await recovery.refreshTask(f.db.tasks[0]);
+        assert.equal(f.db.tasks[0].orbitcard_state, kind === 'funding' ? 'funding_pending' : 'card_pending');
+        assert.equal(f.db.cards[0].active_job, task.jobKey);
+        assert.equal(f.db.uses[0].state, 'reserved');
+        assert.ok(f.db.cdks[0].used_at);
+        (kind === 'funding' ? f.db.fundings : f.db.issues)[0].state = 'failed';
+        await recovery.refreshTask(f.db.tasks[0]);
+        assert.equal(f.db.tasks[0].orbitcard_state, 'support_locked');
+        assert.equal(f.db.cards[0].active_job, null);
+        assert.ok(f.db.cdks[0].used_at);
+    }
+});

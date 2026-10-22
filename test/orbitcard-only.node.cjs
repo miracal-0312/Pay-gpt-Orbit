@@ -22,7 +22,7 @@ test('third-party client always uses the signed Orbitcard routes, ignoring obsol
         return { status: 200, data: { code: 0, data: args.url.endsWith('getSubscriptionPlans')
             ? { enabled: true, plans: [{ type: 'gpt-plus', name: 'Plus', service_fee: '0.15' }] } : { balance: '10.00' } } };
     } } });
-    const client = load('gpt-api-client.js', { './orbitcard-client': api });
+    const client = api;
     const original = process.env.ORBITCARD_API_SECRET, originalKey = process.env.ORBITCARD_API_KEY;
     process.env.ORBITCARD_API_SECRET = 'test-secret';
     process.env.ORBITCARD_API_KEY = 'test-key';

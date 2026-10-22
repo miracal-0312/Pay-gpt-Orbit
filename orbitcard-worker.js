@@ -5,7 +5,7 @@ const { clientOrderNo: makeClientOrderNo } = require('./orbitcard-cdk');
 const subscription = require('./orbitcard-subscription-service')(api, entry => require('./runtime-log').push(entry));
 
 async function run({ cfg, planType, session, cdk, setProgress, onSubmission, broadcast, sleep,
-    maxPolls = 180, intervalMs = 5000, onOutcome = () => {}, onConfirmedFailure, onRejectedSubmission,
+    maxPolls = 180, intervalMs = 5000, onConfirmedFailure, onRejectedSubmission,
     clientOrderNo, attemptKey = 'legacy', selectCard }) {
     const plan = api.PLAN_MAP[planType];
     if (!plan) throw new Error(`Orbitcard 尚不支持当前 CDK 套餐: ${planType}`);
@@ -67,7 +67,6 @@ async function run({ cfg, planType, session, cdk, setProgress, onSubmission, bro
             await setProgress(status, status === 'success' ? 100 : 99,
                 status === 'success' ? 'Orbitcard 订阅成功，CDK 已核销' : 'Orbitcard 已确认订阅失败，CDK 已释放，可更新 Session 后重试',
                 { orbitcardState: status, gptApiOrderId: orderId, gptApiRaw: JSON.stringify(last) });
-            onOutcome(status);
             return status === 'failed';
         }
         await setProgress('running', Math.min(95, 40 + poll),
