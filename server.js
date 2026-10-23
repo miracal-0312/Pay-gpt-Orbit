@@ -86,7 +86,7 @@ app.post('/api/cdk/orbitcard/status', async (req, res, next) => {
         const latest = await store.getOrbitcardTaskByCdk(cdk);
         const same = latest?.job_key === task.job_key;
         res.json({ success: result.success, data: publicOrder(latest || task), message: result.error,
-            retry_after_ms: result.retryAfterMs, stop_tracking: result.stopTracking,
+            retry_after_ms: Math.max(result.retryAfterMs || 0, result.waitMs || 0), stop_tracking: result.stopTracking,
             captcha: same ? result.applied ? result.captcha : activeChallenges.get(task.job_key) || null : null });
     } catch (error) { next(error); }
 });

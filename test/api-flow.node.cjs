@@ -180,9 +180,12 @@ test('API-only HTTP server serves the new UI, protects management and has no ret
         getAdminAuthConfig: async () => ({ passwordVersion: 1 }), getMaxConcurrentActivations: async () => 1,
         verifyCdkDetails: async () => ({ cdk_code: 'CDK-TEST',type: '自助',plan_type: 'plus' }), getRunningTaskByCdk: async () => null,
         getMaintenanceModeState: async () => ({}), getGptApiConfig: async () => ({ enabled: false }),
+        getOrbitcardTaskByCdk: async () => ({ job_key:'waiting', orbitcard_client_order_no:'waiting-order', orbitcard_state:'funding_pending', status:'manual' }),
+        safeOrder: () => ({}),
         runQuery: async () => [{ ok: 1 }], getAdminData: async () => ({ stats: { total: 0 },config: {},logs: [] })
     };
-    const { app } = load('server.js', { './mysql-store': fakeStore, './runtime-log': { push() {}, initialize() {} } });
+    const { app } = load('server.js', { './mysql-store': fakeStore, './runtime-log': { push() {}, initialize() {} },
+        './order-recovery': () => ({ refreshTask: async () => ({ success:true, querySkipped:true, waitMs:60000 }) }) });
     const server = app.listen(0,'127.0.0.1'); await once(server,'listening');
     t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); if (old === undefined) delete process.env.ADMIN_TOKEN_SECRET; else process.env.ADMIN_TOKEN_SECRET=old; });
     const base = `http://127.0.0.1:${server.address().port}`;
@@ -196,6 +199,9 @@ test('API-only HTTP server serves the new UI, protects management and has no ret
     assert.equal((await fetch(base+'/api/public/payment-region')).status,404);
     assert.equal((await fetch(base+'/subscription')).status,404);
     assert.equal((await fetch(base+'/api/health')).status,200);
+    const waiting = await (await fetch(base+'/api/cdk/orbitcard/status', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({cdk:'CDK-TEST'}) })).json();
+    assert.equal(waiting.retry_after_ms,60000);
+    assert.equal(waiting.data.cdk_state,'reserved');
     const rejected = await fetch(base+'/api/run-process',{ method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ cdk:'CDK-TEST',session:JSON.stringify(session) }) });
     assert.equal(rejected.status,503); assert.ok((await rejected.json()).message.includes('Orbitcard'));
 });

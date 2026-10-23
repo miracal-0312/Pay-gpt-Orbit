@@ -51,7 +51,11 @@ function renderTasks(tasks) {
         const order = task.order || {}, fee = order.fee_status ? `${order.service_fee ?? '—'} ${order.currency || 'USDT'} / ${order.fee_status}` : '—';
         const payment = order.payment ? `${order.payment.amount} ${order.payment.currency}` : '—';
         const refresh = task.provider === 'orbitcard' ? `<button class="secondary" data-refresh-order="${escapeHtml(task.jobKey)}">查原单</button>` : '<small>历史记录</small>';
-        return `<tr><td>${escapeHtml(task.time)}<br><code>${escapeHtml(task.cdk)}</code></td><td>${escapeHtml(task.provider === 'orbitcard' ? task.token : '历史账号')}<br><code>${escapeHtml(task.order_id || task.client_order_no || task.jobKey)}</code><br>卡 ID：${escapeHtml(task.card_id || '历史未绑定')}</td><td>${status(task.status)}<br>${escapeHtml(task.message)}</td><td>${escapeHtml(fee)}</td><td>${escapeHtml(payment)}</td><td>${refresh} <button class="secondary" data-download-audit="${escapeHtml(task.jobKey)}">下载日志</button> <button class="secondary" data-debug-trace="${escapeHtml(task.jobKey)}">链路日志</button></td></tr>`;
+        const cardLabel = task.card_id || (task.provider !== 'orbitcard' ? '历史未绑定'
+            : ['prepared','rejected','balance_blocked','card_pending'].includes(task.orbitcard_state) ? '尚未分配支付卡' : '未记录支付卡');
+        const historyAction = task.provider === 'orbitcard' && /旧卡历史次数尚未确认/.test(task.message || '')
+            ? ' <button type="button" class="secondary" data-manage-card-history>登记历史次数</button>' : '';
+        return `<tr><td>${escapeHtml(task.time)}<br><code>${escapeHtml(task.cdk)}</code></td><td>${escapeHtml(task.provider === 'orbitcard' ? task.token : '历史账号')}<br><code>${escapeHtml(task.order_id || task.client_order_no || task.jobKey)}</code><br>卡 ID：${escapeHtml(cardLabel)}</td><td>${status(task.status)}<br>${escapeHtml(task.message)}</td><td>${escapeHtml(fee)}</td><td>${escapeHtml(payment)}</td><td>${refresh}${historyAction} <button class="secondary" data-download-audit="${escapeHtml(task.jobKey)}">下载日志</button> <button class="secondary" data-debug-trace="${escapeHtml(task.jobKey)}">链路日志</button></td></tr>`;
     }).join('') || '<tr><td colspan="6">暂无任务</td></tr>';
 }
 async function loadOverview() {
@@ -161,7 +165,7 @@ function renderCardRow(card, sync = null) {
     }).join('');
     const history = card.history_confirmed
         ? '<span class="card-history-confirmed">历史次数已确认</span>'
-        : `<details class="card-history-editor"><summary>登记历史次数</summary><p class="muted">填写这张卡已成功开通的次数，确认后不能清零。</p><div class="card-history-grid">${Object.entries(cardPlans).map(([plan, label]) => `<label>${escapeHtml(label)}<input data-card-uses="${id}-${plan}" type="number" inputmode="numeric" min="0" max="${plan === 'plus' ? 4 : 1}" step="1" required placeholder="0–${plan === 'plus' ? 4 : 1}"></label>`).join('')}</div><button type="button" data-bind-card="${id}" class="secondary">确认历史次数</button></details>`;
+        : `<details id="card-history-${id}" class="card-history-editor"><summary>登记历史次数</summary><p class="muted">填写这张卡已成功开通的次数，确认后不能清零。</p><div class="card-history-grid">${Object.entries(cardPlans).map(([plan, label]) => `<label>${escapeHtml(label)}<input data-card-uses="${id}-${plan}" type="number" inputmode="numeric" min="0" max="${plan === 'plus' ? 4 : 1}" step="1" required placeholder="0–${plan === 'plus' ? 4 : 1}"></label>`).join('')}</div><button type="button" data-bind-card="${id}" class="secondary">确认历史次数</button></details>`;
     const last4 = card.last4 ? `****${escapeHtml(card.last4)}` : '尾号未提供';
     const confirmed = sync?.synced_ids?.includes(Number(card.card_id));
     const snapshot = confirmed ? `本次同步：${sync.checked_at}` : sync?.failed ? '同步失败 · 以下为旧快照'
@@ -178,6 +182,10 @@ async function loadCards(sync = null) {
     for (const card of data.cards) $('transactionCardId').add(new Option(`${card.card_id} / ${card.last4 ? `****${card.last4}` : '尾号未提供'}`, card.card_id));
     if (data.cards.some(card => String(card.card_id) === currentCardId)) $('transactionCardId').value = currentCardId;
     $('cardRows').innerHTML = data.cards.map(card => renderCardRow(card, sync)).join('') || '<tr><td colspan="5">尚无卡片，请同步或申请。</td></tr>';
+    const unconfirmed = data.cards.filter(card => !card.history_confirmed);
+    $('cardHistoryState').hidden = !unconfirmed.length;
+    $('cardHistoryState').innerHTML = unconfirmed.length
+        ? `<p>本地记录有 ${unconfirmed.length} 张卡待登记历史次数，尚不能参与自动选卡。请同步平台卡片、核对使用记录后如实填写。</p><div class="row">${unconfirmed.slice(0,20).map(card => `<button type="button" class="secondary" data-open-card-history="${escapeHtml(card.card_id)}">登记卡 ${escapeHtml(card.card_id)}</button>`).join('')}</div>${unconfirmed.length > 20 ? '<p>其余待登记卡片请在下方列表查看。</p>' : ''}` : '';
     $('cardSyncState').textContent = sync?.failed ? '平台同步失败，下面显示旧的本地快照，不能用于确认当前状态和余额。'
         : sync?.checked_at ? `查询完成：${sync.checked_at}，同步 ${sync.count} 张，详情读取失败 ${sync.failed_ids.length} 张。数值为本次查询时的快照。`
             : '当前显示本地快照。点击“同步平台卡片”查询当前状态和余额；“刷新本地记录”不会调用平台。';
@@ -504,6 +512,12 @@ $('cdkFilters').addEventListener('click', event => {
 });
 $('clearLogs').onclick = () => perform(async () => { await request('/api/admin/runtime-logs/clear', {}); await loadLogs(); notice('显示缓存已清空，磁盘历史保留', 'success'); });
 document.addEventListener('click', event => {
+    if (event.target.closest('[data-manage-card-history]')) selectView('cards');
+    const historyButton = event.target.closest('[data-open-card-history]');
+    if (historyButton) {
+        const editor = $(`card-history-${historyButton.dataset.openCardHistory}`);
+        if (editor) { editor.open = true; editor.scrollIntoView({ block: 'center' }); editor.querySelector('input')?.focus(); }
+    }
     const retryManual = event.target.closest('[data-retry-manual]');
     if (retryManual) {
         const order = manualOrders.find(item => item.request_id === retryManual.dataset.retryManual);
