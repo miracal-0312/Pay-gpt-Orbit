@@ -87,6 +87,8 @@ docker compose logs --tail=100 app
 
 ## 环境更新与存储
 
+对接 dujiao-next 核销通知时，需要同时发布商城接收端及本程序，并在两端配置相同的独立签名密钥。先启用商城接收端，再设置本程序的 `CDK_REDEMPTION_WEBHOOK_URL`、`CDK_REDEMPTION_SOURCE`、`CDK_REDEMPTION_WEBHOOK_SECRET` 并重建应用。商城 URL 是实际部署域名下的 `/api/v1/card-secrets/redemption-callback`，不是 GitHub 地址。首次启用仅发送之后新确认的核销，不自动回填历史数据。完整部署与排查见 [README 核销回调说明](README.md#主动通知-dujiao-next-商城核销)。
+
 ```bash
 # 更新源码、依赖或 Dockerfile
 docker compose up -d --build app

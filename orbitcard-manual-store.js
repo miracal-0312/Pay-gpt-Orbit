@@ -4,7 +4,7 @@ const { cardScope, LIMITS } = require('./orbitcard-card-policy');
 
 const { PROVIDER_TO_PLAN: COUNTED_PLANS } = require('./plan-registry');
 
-module.exports = function createManualStore({ runQuery, runExecute, withTransaction }) {
+module.exports = function createManualStore({ runQuery, runExecute, withTransaction, enqueueRedemption = async () => {} }) {
     async function getManualOrder(requestId) {
         const rows = await runQuery('SELECT * FROM orbitcard_admin_orders WHERE request_id = ? LIMIT 1', [requestId]);
         return rows[0] || null;
@@ -240,6 +240,9 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
                 await runExecute(`UPDATE orbitcard_managed_cards SET active_job = NULL, active_plan = NULL${increment}
                     WHERE scope = ? AND card_id = ? AND active_job = ?`,
                 [order.scope, order.card_id, order.client_order_no], options);
+            }
+            if (state === 'success' && order.cdk_code) {
+                await enqueueRedemption({ cdk: order.cdk_code, orderId: order.client_order_no }, options);
             }
             return getManualOrderInTransaction(requestId, options);
         });

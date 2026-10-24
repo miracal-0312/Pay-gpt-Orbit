@@ -266,10 +266,13 @@ async function getAdminData() {
 }
 
 const cardStore = require('./orbitcard-card-store')({ withTransaction, runQuery, runExecute, openLockConnection: core.openLockConnection });
-const orbitcardCdkStore = require('./orbitcard-cdk-store')({ withTransaction, runQuery, runExecute, createTaskLog, settleCardUse: cardStore.settleCardUse });
-const manualStore = require('./orbitcard-manual-store')({ runQuery, runExecute, withTransaction });
+const redemptionWebhook = require('./cdk-redemption-webhook')({ runQuery, runExecute });
+const orbitcardCdkStore = require('./orbitcard-cdk-store')({ withTransaction, runQuery, runExecute, createTaskLog,
+    settleCardUse: cardStore.settleCardUse, enqueueRedemption: redemptionWebhook.enqueue });
+const manualStore = require('./orbitcard-manual-store')({ runQuery, runExecute, withTransaction, enqueueRedemption: redemptionWebhook.enqueue });
 const acquirePaymentLock = require('./payment-execution-lock').createExecutionLocks({
     openConnection: core.openLockConnection, namespace: core.connectionInfo?.database || '' });
 module.exports = { ...core, ...cardStore, ...orbitcardCdkStore, ...manualStore, acquirePaymentLock, ensureReady, initializeBaseData, createTaskLog, getTaskStatus,
+    deliverRedemptionNotifications: redemptionWebhook.deliverPending,
     getRunningTaskByCdk, verifyCdkDetails, getCdkRedemptionStatus, listCdks, listCdksExportPage, insertCdks, markCdksShipped, deleteCdk,
     listAdminTaskLogs, listRecentGptApiOrders, listRecoverableOrbitcardTasks, noteQueryAttempt, getMaxConcurrentActivations, saveConfig, getAdminData, safeOrder };

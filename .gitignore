@@ -27,6 +27,7 @@ data/*
 !data/.gitkeep
 data-*/
 scratch/
+output/
 mail.txt
 
 # OS / editors

@@ -1,7 +1,7 @@
 'use strict';
 
 // Transaction boundaries keep task creation, order linkage and CDK ownership consistent.
-module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, runExecute, createTaskLog, settleCardUse = async () => {} }) {
+module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, runExecute, createTaskLog, settleCardUse = async () => {}, enqueueRedemption = async () => {} }) {
     async function hasPendingPreparation(task, options) {
         const funding = await runQuery(`SELECT funding_key FROM orbitcard_card_fundings WHERE job_key=?
             AND state IN ('prepared','submitting','pending','unknown') FOR UPDATE`, [task.job_key], options);
@@ -78,6 +78,9 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
                 await runExecute('UPDATE cdk_codes SET used_at = COALESCE(used_at, CURRENT_TIMESTAMP) WHERE cdk_code = ?', [cdk], options);
             }
             await settleCardUse(jobKey, orbitcardState, options);
+            if (status === 'success' && orbitcardState === 'success' && task.orbitcard_state !== 'success') {
+                await enqueueRedemption({ cdk, orderId: task.orbitcard_retry_root_job_key || jobKey }, options);
+            }
             return { applied: true, status };
         });
     }

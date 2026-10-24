@@ -20,6 +20,21 @@ CREATE TABLE IF NOT EXISTS cdk_codes (
     UNIQUE KEY uniq_cdk_codes_code (cdk_code)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS cdk_redemption_outbox (
+    event_id CHAR(64) NOT NULL PRIMARY KEY,
+    source VARCHAR(64) NOT NULL,
+    target_url VARCHAR(512) NOT NULL,
+    payload TEXT NOT NULL,
+    attempts INT UNSIGNED NOT NULL DEFAULT 0,
+    next_attempt_at BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    lease_token CHAR(36) NULL,
+    lease_until BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    last_error VARCHAR(64) NULL,
+    delivered_at TIMESTAMP NULL DEFAULT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY idx_redemption_delivery (delivered_at, next_attempt_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS task_logs (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
     job_key VARCHAR(64) NOT NULL,

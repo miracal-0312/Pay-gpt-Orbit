@@ -5,7 +5,7 @@ const cdkFactory = require('../../orbitcard-cdk-store');
 const { cardScope } = require('../../orbitcard-card-policy');
 const BASE = 'https://orbitcard.test';
 
-module.exports = function fixture() {
+module.exports = function fixture({ enqueueRedemption } = {}) {
     const db = { cards: [], uses: [], issues: [], fundings:[], tasks: [], cdks: [], failIncrement: false };
     let tail = Promise.resolve(), allocationTail = Promise.resolve(), sequence = 0;
     async function withTransaction(fn) {
@@ -100,7 +100,7 @@ module.exports = function fixture() {
         return { affectedRows:1 };
     }
     const cardStore=cardFactory({runQuery,runExecute,withTransaction,getPool() { throw new Error('Unexpected real connection'); }});
-    const cdkStore=cdkFactory({runQuery,runExecute,withTransaction,settleCardUse:cardStore.settleCardUse,
+    const cdkStore=cdkFactory({runQuery,runExecute,withTransaction,settleCardUse:cardStore.settleCardUse,enqueueRedemption,
         createTaskLog: async input => { const task={ id:++sequence,job_key:`job-${sequence}`,cdk_code:input.cdkCode,status:'running',progress:3 }; db.tasks.push(task); return {jobKey:task.job_key}; } });
     const store={...cardStore,...cdkStore,acquirePaymentLock:require('./payment-locks.cjs')().acquirePaymentLock,getTaskStatus:async key=>structuredClone(db.tasks.find(t=>t.job_key===key)),withCardAllocationLock(base, fn) {
         const pending=allocationTail.then(() => fn(cardStore.cardMethods(base))); allocationTail=pending.catch(() => {}); return pending;

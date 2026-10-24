@@ -143,6 +143,7 @@ app.use((error, req, res, next) => {
 
 async function start() {
     if (Buffer.byteLength(process.env.ADMIN_TOKEN_SECRET || '') < 32) throw new Error('请配置至少 32 字节的随机 ADMIN_TOKEN_SECRET');
+    require('./cdk-redemption-webhook').readConfig();
     runtimeLog.initialize();
     await ensureStoreReady();
     server = app.listen(port, () => log('', `Orbitcard 服务已启动，端口 ${port}`, 'server_ready'));
@@ -168,6 +169,7 @@ async function start() {
         ws.on('error', unsubscribe);
     });
     const tick = () => {
+        store.deliverRedemptionNotifications().catch(() => log('', '商城核销通知暂不可用，将自动重试', 'redemption_notification_error'));
         recovery.recover().catch(() => log('', '后台查单暂不可用，下次继续', 'recovery_error'));
         manualService.recover().catch(() => log('', '管理员订单查单暂不可用，下次继续', 'manual_recovery_error'));
         if (Date.now() >= cardRecoveryAt) {

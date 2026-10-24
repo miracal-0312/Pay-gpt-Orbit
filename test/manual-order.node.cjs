@@ -284,7 +284,7 @@ test('pending funding keeps the same manual request and never submits until it i
     assert.equal(calls.filter(x => x.operation === 'createSubscription').length, 1);
 });
 
-function storeFixture() {
+function storeFixture({ enqueueRedemption } = {}) {
     const scope = cardScope('https://orbitcard.cc');
     const db = { orders: [], cdks: [{ cdk_code: 'KC-READY', is_active: 1, type: '自助',
         plan_type: 'plus', used_at: null }], card: { scope, card_id: 12, history_confirmed: 1,
@@ -351,7 +351,7 @@ function storeFixture() {
         try { return await action({ transaction: true }); }
         catch (error) { Object.assign(db, backup); throw error; }
     };
-    return { db, store: createStore({ runQuery, runExecute, withTransaction }) };
+    return { db, store: createStore({ runQuery, runExecute, withTransaction, enqueueRedemption }) };
 }
 
 function manualInput(requestId, overrides = {}) {
@@ -360,6 +360,32 @@ function manualInput(requestId, overrides = {}) {
         adminEmail: 'admin@example.com', mode: 'fulfillment', cdkCode: 'KC-READY',
         acceptedCdkPlans: ['gpt-plus','plus'], ...overrides };
 }
+
+test('manual fulfillment emits a receipt atomically, while test orders and failures emit none', async () => {
+    for (const mode of ['fulfillment', 'test']) {
+        const receipts = []; let fail = mode === 'fulfillment';
+        const { db, store } = storeFixture({ enqueueRedemption: async (receipt, options) => {
+            assert.equal(options.connection.transaction, true);
+            if (fail) throw Error('outbox unavailable');
+            receipts.push(receipt);
+        } });
+        await store.createManualOrder(manualInput(id, { mode, cdkCode: mode === 'fulfillment' ? 'KC-READY' : null }));
+        await store.claimManualSubmission(id);
+        await store.settleManualOrder(id, { state: 'pending', message: 'pending' });
+        assert.equal(receipts.length, 0);
+        if (fail) {
+            await assert.rejects(store.settleManualOrder(id, { state: 'success', message: 'success' }), /outbox/);
+            assert.equal(db.orders[0].state, 'pending'); assert.equal(db.card.successful_plus, 0);
+            fail = false;
+        }
+        await store.settleManualOrder(id, { state: 'success', message: 'success' });
+        await store.settleManualOrder(id, { state: 'success', message: 'success' });
+        assert.equal(receipts.length, mode === 'fulfillment' ? 1 : 0);
+    }
+    const { store } = storeFixture({ enqueueRedemption: async () => { throw Error('failed order must not emit'); } });
+    await store.createManualOrder(manualInput(id)); await store.claimManualSubmission(id);
+    await store.settleManualOrder(id, { state: 'failed', message: 'failed' });
+});
 
 test('manual CDK and card reservation settle atomically on verified success or failure', async () => {
     const { db, store } = storeFixture();
