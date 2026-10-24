@@ -141,6 +141,13 @@ async function listCdks(planType = '') {
     return rows.map(mapCdkRow);
 }
 
+async function getCdkRedemptionStatus(cdk) {
+    const rows = await runQuery(`${CDK_LIST_SELECT} AND c.cdk_code = ? LIMIT 1`, [cdk]);
+    if (!rows[0]) return null;
+    const { status } = mapCdkRow(rows[0]);
+    return { status, redeemed: status === 'redeemed' };
+}
+
 async function listCdksExportPage(planType = '', beforeId = null) {
     const params = [], clauses = [];
     if (planType) { clauses.push('c.plan_type = ?'); params.push(planType); }
@@ -264,5 +271,5 @@ const manualStore = require('./orbitcard-manual-store')({ runQuery, runExecute, 
 const acquirePaymentLock = require('./payment-execution-lock').createExecutionLocks({
     openConnection: core.openLockConnection, namespace: core.connectionInfo?.database || '' });
 module.exports = { ...core, ...cardStore, ...orbitcardCdkStore, ...manualStore, acquirePaymentLock, ensureReady, initializeBaseData, createTaskLog, getTaskStatus,
-    getRunningTaskByCdk, verifyCdkDetails, listCdks, listCdksExportPage, insertCdks, markCdksShipped, deleteCdk,
+    getRunningTaskByCdk, verifyCdkDetails, getCdkRedemptionStatus, listCdks, listCdksExportPage, insertCdks, markCdksShipped, deleteCdk,
     listAdminTaskLogs, listRecentGptApiOrders, listRecoverableOrbitcardTasks, noteQueryAttempt, getMaxConcurrentActivations, saveConfig, getAdminData, safeOrder };

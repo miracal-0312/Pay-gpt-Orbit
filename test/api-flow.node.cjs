@@ -205,6 +205,75 @@ test('API-only HTTP server serves the new UI, protects management and has no ret
     const rejected = await fetch(base+'/api/run-process',{ method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ cdk:'CDK-TEST',session:JSON.stringify(session) }) });
     assert.equal(rejected.status,503); assert.ok((await rejected.json()).message.includes('Orbitcard'));
 });
+test('CDK status API distinguishes confirmed redemption from reservations and fails closed on lookup errors', async t => {
+    let row = null, fail = false;
+    const queries = [];
+    const cdkStore = load('mysql-store.js', { './mysql-core': {
+        runQuery: async (sql, args) => {
+            queries.push([sql, args]);
+            if (fail) throw new Error('private database failure');
+            return row ? [row] : [];
+        },
+        runExecute: async () => { throw new Error('status lookup must not write'); },
+        withTransaction: async () => { throw new Error('status lookup must not mutate orders'); }
+    } });
+    const { app } = load('server.js', { './mysql-store': {
+        ensureReady: async () => {},
+        getAdminPaths: async () => ({ loginPath: 'admin-login', panelPath: 'admin' }),
+        getCdkRedemptionStatus: cdkStore.getCdkRedemptionStatus
+    }, './runtime-log': { push() {}, initialize() {} } });
+    const server = app.listen(0, '127.0.0.1'); await once(server, 'listening');
+    t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
+    const request = body => fetch(`http://127.0.0.1:${server.address().port}/api/cdk/status`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    });
+    for (const cdk of [undefined, null, 1234, [], {}, '', 'abc', 'x'.repeat(33), "CODE' OR 1=1"]) {
+        const response = await request({ cdk });
+        assert.equal(response.status, 400);
+        assert.equal((await response.json()).success, false);
+    }
+    assert.equal(queries.length, 0);
+    const cases = [
+        [{}, 'unused'],
+        [{ task_status: 'failed', orbitcard_state: 'rejected' }, 'unused'],
+        [{ task_status: 'success', orbitcard_state: 'success', used_at: 'reserved' }, 'redeemed'],
+        [{ manual_state: 'success', used_at: 'reserved' }, 'redeemed'],
+        [{ task_status: 'success', orbitcard_state: null, used_at: 'reserved' }, 'redeemed'],
+        [{ used_at: 'reserved' }, 'processing'],
+        [{ task_status: 'running', orbitcard_state: 'pending' }, 'processing'],
+        [{ task_status: 'manual', orbitcard_state: 'manual', used_at: 'reserved' }, 'processing'],
+        [{ task_status: 'running', orbitcard_state: 'retry_waiting', used_at: 'reserved' }, 'processing'],
+        [{ task_status: 'failed', orbitcard_state: 'support_locked', used_at: 'reserved' }, 'processing'],
+        [{ task_status: 'manual', orbitcard_state: 'balance_blocked' }, 'processing'],
+        [{ manual_state: 'pending', used_at: 'reserved' }, 'processing'],
+        [{ task_status: 'success', orbitcard_state: 'pending', used_at: 'reserved' }, 'processing']
+    ];
+    for (const [fields, status] of cases) {
+        row = { cdk_code: 'CDK-TEST', plan_type: 'plus', orbitcard_email: 'private@example.test', session_payload: 'private-session', ...fields };
+        const response = await request({ cdk: '  CDK-TEST  ' });
+        assert.equal(response.status, 200);
+        assert.equal(response.headers.get('cache-control'), 'no-store');
+        const body = await response.json();
+        assert.equal(body.success, true);
+        assert.deepEqual(body.data, { status, redeemed: status === 'redeemed' });
+        if (status === 'redeemed') assert.equal(body.message, 'CDK 已核销');
+        assert.equal(JSON.stringify(body).includes('private'), false);
+        assert.deepEqual(queries.at(-1)[1], ['CDK-TEST']);
+        assert.match(queries.at(-1)[0], /WHERE c\.is_active = 1 AND c\.cdk_code = \? LIMIT 1/);
+    }
+    row = null;
+    const missing = await request({ cdk: 'CDK-MISSING' });
+    assert.equal(missing.status, 404);
+    assert.deepEqual(await missing.json(), { success: false, message: 'CDK 不存在或已停用' });
+    fail = true;
+    const unavailable = await request({ cdk: 'CDK-TEST' });
+    assert.equal(unavailable.status, 503);
+    const error = await unavailable.json();
+    assert.equal(error.success, false);
+    assert.equal(Object.hasOwn(error, 'data'), false);
+    assert.equal(JSON.stringify(error).includes('private'), false);
+});
+
 test('production dependency graph and Dockerfile contain no browser or Python runtimes', () => {
     const root = path.resolve(__dirname,'..'), lock = JSON.parse(fs.readFileSync(path.join(root,'package-lock.json'),'utf8'));
     assert.deepEqual(Object.keys(require('../package.json').dependencies).sort(),['axios','express','mysql2','ws']);

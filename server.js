@@ -109,6 +109,17 @@ async function describeCdk(cdk) {
         jobKey: task?.orbitcard_retry_root_job_key || task?.job_key, message: task?.message || (code.used_at ? 'CDK 已使用' : 'CDK 可兑换'),
         shipped: Boolean(code.shipped_at), usedAt: code.used_at };
 }
+app.post('/api/cdk/status', async (req, res, next) => {
+    const cdk = typeof req.body?.cdk === 'string' ? req.body.cdk.trim() : '';
+    if (!/^[a-zA-Z0-9_-]{4,32}$/.test(cdk)) return res.status(400).json({ success: false, message: '请输入有效 CDK' });
+    try {
+        await ensureStoreReady();
+        const data = await store.getCdkRedemptionStatus(cdk);
+        if (!data) return res.status(404).json({ success: false, message: 'CDK 不存在或已停用' });
+        const messages = { redeemed: 'CDK 已核销', processing: 'CDK 已占用，尚未确认核销', unused: 'CDK 未使用' };
+        res.json({ success: true, data, message: messages[data.status] });
+    } catch (error) { next(error); }
+});
 app.post('/api/verify-cdk', async (req, res, next) => {
     try {
         const data = await describeCdk(String(req.body?.cdk || '').trim());

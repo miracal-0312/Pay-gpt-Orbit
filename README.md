@@ -90,6 +90,38 @@ npm start
 
 升级不会删除旧数据库表、历史账单、Session 数据或宿主机文件。历史非 Orbitcard 运行任务转为人工核对并保留 CDK；这些数据不会被重新执行，也不再提供原有支付入口。
 
+### 查询 CDK 是否已核销
+
+`POST /api/cdk/status`，请求头 `Content-Type: application/json`，请求体为 `{"cdk":"你的卡密"}`。持有卡密即可查询，无需管理员登录或提供 Session。
+
+```bash
+curl -X POST 'https://你的域名/api/cdk/status' \
+  -H 'Content-Type: application/json' \
+  -d '{"cdk":"你的卡密"}'
+```
+
+已核销时返回 HTTP 200：
+
+```json
+{
+  "success": true,
+  "data": { "status": "redeemed", "redeemed": true },
+  "message": "CDK 已核销"
+}
+```
+
+| `data.status` | `data.redeemed` | 含义 |
+| --- | --- | --- |
+| `redeemed` | `true` | 已确认充值成功并核销，包含自助兑换和管理员人工交付 |
+| `processing` | `false` | 已占用但尚未确认核销，包括处理中、待确认、重试或售后锁定 |
+| `unused` | `false` | 未使用或已释放 |
+
+`success` 表示查询成功，不表示充值成功；请以 `data.redeemed === true` 判断已核销。`redeemed: false` 不代表可以再次兑换，应结合 `status` 判断。
+
+接口只读取本地数据库的已保存状态，与后台 CDK 列表一致，不主动向平台查单，也不会发起充值或改变 CDK 状态。平台刚完成充值时，需等待后台查单同步后才会显示已核销。响应不包含账号、Session 或支付资料，并设置 `Cache-Control: no-store`。
+
+CDK 格式错误返回 HTTP 400，不存在或已停用返回 HTTP 404，服务异常返回 HTTP 503；错误响应为 `{"success":false,"message":"错误说明"}`，不返回 `redeemed: false`，避免将查询失败误判为未核销。
+
 ## 验证
 
 并发保护分为两层：MySQL 行锁保证 CDK、订单、卡片计次原子结算；数据库连接持有的命名执行锁协调受理、后台支付和恢复查询。自助兑换按 CDK 锁定，管理员订单按请求编号锁定，人工交付同时锁定所用 CDK。锁覆盖异步订阅提交，重复请求只读取原单或返回处理中；恢复任务取锁后重新读取订单状态，不能使用旧快照释放另一执行者的订单。
