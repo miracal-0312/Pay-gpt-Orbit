@@ -8,8 +8,16 @@
 <form id="verifyForm" class="stack"><label>你的卡密<input id="cdkInput" maxlength="32" autocomplete="off" placeholder="输入充值卡密" required></label><div><button id="verifyBtn">验证卡密 / 查询订单</button></div></form>
 <p id="planInfo" class="muted"></p>
 <form id="redeemForm" class="stack" hidden>
-<label>完整 Session JSON<textarea id="sessionInput" rows="7" autocomplete="off" spellcheck="false" placeholder="粘贴包含 user、account、accessToken 的完整 JSON" required></textarea></label>
-<small>先登录目标 ChatGPT 账号，再<a href="https://chatgpt.com/api/auth/session" target="_blank" rel="noopener noreferrer">获取 Session</a>。Session 包含敏感凭据，请勿分享给其他人。</small>
+<section id="sessionGuide" class="session-guide" aria-labelledby="sessionGuideTitle" tabindex="-1">
+<div class="session-guide-heading"><span class="session-guide-badge">使用方法</span><h3 id="sessionGuideTitle">先登录要充值的账号，再获取 Session</h3><p>请按以下顺序操作，确保充值到正确的 ChatGPT 账号。</p></div>
+<ol class="session-guide-steps">
+<li><span class="session-step-number" aria-hidden="true">1</span><div><strong>登录目标 ChatGPT 账号</strong><p>打开 ChatGPT，确认当前登录的是需要充值的账号；如不是，请先切换账号。</p><a class="button secondary" href="https://chatgpt.com/" target="_blank" rel="noopener noreferrer">前往 ChatGPT 登录 <span aria-hidden="true">↗</span><span class="session-link-hint">（新标签页）</span></a></div></li>
+<li><span class="session-step-number" aria-hidden="true">2</span><div><strong>获取并复制完整 Session</strong><p>登录后，在同一浏览器中打开下方链接，复制页面显示的全部 JSON 内容。</p><a class="button" href="https://chatgpt.com/api/auth/session" target="_blank" rel="noopener noreferrer">获取 Session <span aria-hidden="true">↗</span><span class="session-link-hint">（新标签页）</span></a></div></li>
+<li><span class="session-step-number" aria-hidden="true">3</span><div><strong>粘贴到下方，确认充值</strong><p>返回本页，粘贴完整 JSON，核对目标账号后点击“确认充值”。</p></div></li>
+</ol>
+</section>
+<label>完整 Session JSON<textarea id="sessionInput" rows="7" autocomplete="off" spellcheck="false" aria-describedby="sessionPrivacy" placeholder="完成上方步骤后，在此粘贴包含 user、account、accessToken 的完整 JSON" required></textarea></label>
+<p id="sessionPrivacy" class="session-privacy"><strong>隐私提醒：</strong>Session 包含敏感凭据，请勿分享给其他人。</p>
 <div><button id="startBtn">确认充值</button></div>
 </form>
 <div id="progressBox" hidden><p id="progressText"></p><div class="progress" role="progressbar" aria-label="充值进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="progressBar" style="width:0%"></div></div></div>

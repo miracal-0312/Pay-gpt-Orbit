@@ -117,7 +117,7 @@ async function verifyCurrentCdk(event) {
         $('planInfo').textContent = `${activePlanLabel} · ${statusNames[data.status] || data.status}`;
         $('redeemForm').hidden = !['unused','retry'].includes(data.status) || data.type !== '自助';
         showRedeemStep($('redeemForm').hidden ? 3 : 2);
-        if (!$('redeemForm').hidden) $('sessionInput').focus();
+        if (!$('redeemForm').hidden) $('sessionGuide').focus();
         message(data.message || statusNames[data.status]);
         if (data.jobKey && data.provider === 'orbitcard') { activeJob = data.jobKey; startTracking(); }
         else if (data.provider === 'history') message(data.message || '历史充值记录需联系管理员人工核对');
