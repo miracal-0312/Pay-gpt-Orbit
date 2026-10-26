@@ -13,7 +13,7 @@
 
 - Plus 一张平台卡最多成功充值 4 次。
 - Pro 100、Pro 200、Pro 500 各自最多成功充值 1 次，互不占用对方额度。
-- 同一卡可混用四种套餐，合计最多 7 次（4+1+1+1）。某套餐已满不影响其他套餐；历史次数确认后不提供清零或提高上限入口。历史 `pro_5x` 对应 Pro 100，`pro_20x` 对应 Pro 200。
+- 同一卡可混用四种套餐，合计最多 7 次（4+1+1+1）。某套餐已满不影响其他套餐；历史次数确认后可由管理员核对修正，但不能提高套餐上限。历史 `pro_5x` 对应 Pro 100，`pro_20x` 对应 Pro 200。
 - 每张卡同一时间只处理一笔充值。预占不是成功；等待上游、验证、超时和未知结果保持占用。明确失败或确认提交被拒绝后释放本次预占，不增加成功次数。
 - 成功次数和占用持久化在 MySQL，刷新、重启或同步列表均不清零。卡片计次、任务结果和 CDK 结算在同一事务提交；重复成功响应不会重复计次。
 
@@ -81,6 +81,8 @@ Plus 每卡最多成功 4 次；Pro 100、Pro 200、Pro 500 各最多成功 1 �
 
 原固定 `orbitcard_card_id` 配置保留为历史兼容数据，不再作为充值卡源，不会自动将其次数视为 0。旧订单仍查询其原平台身份。原开卡订单明确成功的新卡自动登记四项零历史次数，不需要人工操作。
 
+已确认的空闲卡可展开「修改历史次数」，填写核对后的四档累计成功次数（包含本系统成功次数）及修改原因，通过二级验证后保存。支持上调、下调或修正为 0，范围仍为 Plus 0–4、各档 Pro 0–1。修改即时影响后续选卡，不修改平台余额、已有订单或交易结果，也不会触发支付。任务占用、未结算使用记录或旧版本未确认订单会阻止修改；编辑期间次数变化须刷新后重填。修改使用分配锁和数据库事务，前后次数、原因、登录管理员及时间持久保存在 `orbitcard_card_usage_changes`，审计写入失败则整笔修改回滚。启动时自动创建该表。
+
 手动申请卡、历史次数确认均要求管理员登录和二级验证；自动申请由已接单的兑换任务触发。同步只读取摘要，不引入本地 Stripe 卡池和浏览器支付逻辑。
 
 ## 平台 API 与权限
@@ -111,6 +113,7 @@ API Key 需要 `subscriptions:read`、`subscriptions:create`、`account:read`、
 | `GET /api/admin/orbitcard/products` | 查询产品、套餐单价和首充预算，返回 `automatic_application` 与 `application_error`；只读预览不实际开卡 |
 | `GET /api/admin/orbitcard/payment-regions` | 按四档套餐查询可用支付地区及平台默认标记，供默认地区配置和只读调试；指定地区的订单在资金操作前再次校验 |
 | `POST /api/admin/orbitcard/cards/:cardId/bind` | `{usage:{plus:0,pro100:0,pro200:0,pro500:0}}`；一次性确认历史，需二级验证 |
+| `POST /api/admin/orbitcard/cards/:cardId/usage` | `{usage:{plus:2,pro100:0,pro200:0,pro500:0},expected_usage:{plus:3,pro100:0,pro200:0,pro500:0},reason:"人工核对修正"}`；修正累计成功次数，需二级验证，原值须匹配 |
 | `GET /api/admin/orbitcard/cards/:cardId/transactions?page=1` | 管理员只读查询该卡脱敏消费交易；每页 50 条，不获取完整卡号、CVV 或 Session |
 | `POST /api/admin/orbitcard/cards/apply` | `{plan_type:"plus"或"pro100"或"pro200"或"pro500"}`；需二级验证 |
 | `POST /api/admin/orbitcard/issues/refresh` | 确认已有原开卡及补款，不创建新的申请身份 |

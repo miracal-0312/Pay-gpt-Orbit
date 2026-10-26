@@ -127,6 +127,18 @@ CREATE TABLE IF NOT EXISTS orbitcard_managed_cards (
     PRIMARY KEY (scope, card_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS orbitcard_card_usage_changes (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    scope CHAR(64) NOT NULL,
+    card_id BIGINT UNSIGNED NOT NULL,
+    before_usage JSON NOT NULL,
+    after_usage JSON NOT NULL,
+    reason VARCHAR(255) NOT NULL,
+    admin_email VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY idx_oc_usage_changes (scope, card_id, id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS orbitcard_card_uses (
     job_key VARCHAR(64) NOT NULL PRIMARY KEY,
     scope CHAR(64) NOT NULL,

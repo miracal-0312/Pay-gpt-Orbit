@@ -56,6 +56,40 @@ test('unconfirmed cards expose registration links and disappear from the reminde
     assert.equal(f.$('cardHistoryState').hidden,true);
     assert.equal(f.$('cardHistoryState').innerHTML,'');
     assert.doesNotMatch(f.$('cardRows').innerHTML,/id="card-history-42"/);
+    assert.match(f.$('cardRows').innerHTML,/修改历史次数/);
+    assert.match(f.$('cardRows').innerHTML,/data-update-card-usage="42"/);
+});
+
+test('confirmed history correction pre-fills counts and is unavailable for occupied cards',async()=>{
+    const f=setup(()=>{});
+    f.card.usage.plus.successful=3;
+    await f.api.loadCards();
+    assert.match(f.$('cardRows').innerHTML,/data-previous-usage="3" value="3"/);
+    assert.match(f.$('cardRows').innerHTML,/修改原因/);
+    f.card.active_job='running-job';
+    await f.api.loadCards();
+    assert.match(f.$('cardRows').innerHTML,/任务占用中，暂不可修改/);
+    assert.doesNotMatch(f.$('cardRows').innerHTML,/data-update-card-usage/);
+});
+
+test('history editor sends all totals, original values and reason; failed saves preserve edits for retry',async()=>{
+    const source=fs.readFileSync(path.join(__dirname,'../public/admin.js'),'utf8');
+    const block=source.slice(source.indexOf('async function saveCardUsage('),source.indexOf('async function loadCards('));
+    const plans={plus:'Plus',pro100:'Pro 100',pro200:'Pro 200',pro500:'Pro 500'};
+    const inputs=Object.fromEntries(Object.keys(plans).map(plan=>[plan,{value:plan==='plus'?'2':'0',dataset:{previousUsage:plan==='plus'?'4':'1'},checkValidity:()=>true}]));
+    const reason={value:' 人工修正 '},button={disabled:false,dataset:{updateCardUsage:'42'}};
+    const requests=[]; let refreshes=0, fail=false;
+    const save=new Function('document','$','cardPlans','request','loadCards','notice',block+'\nreturn saveCardUsage;')(
+        {querySelector:selector=>inputs[selector.match(/42-(\w+)/)[1]]},()=>reason,plans,
+        async(url,body)=>{requests.push({url,body});if(fail)throw new Error('卡片次数已发生变化');return {message:'已修改'};},
+        async()=>{refreshes++;},()=>{});
+    reason.value=''; await assert.rejects(save(button),/修改原因/); assert.equal(requests.length,0);
+    reason.value=' 人工修正 '; await save(button);
+    assert.deepEqual(requests[0],{url:'/api/admin/orbitcard/cards/42/usage',body:{usage:{plus:2,pro100:0,pro200:0,pro500:0},
+        expected_usage:{plus:4,pro100:1,pro200:1,pro500:1},reason:'人工修正'}});
+    assert.equal(refreshes,1); assert.equal(button.disabled,false);
+    fail=true; await assert.rejects(save(button),/已发生变化/);
+    assert.equal(refreshes,1); assert.equal(button.disabled,false); assert.equal(inputs.plus.value,'2');
 });
 
 test('task rows distinguish unallocated payments from legacy records and link history failures to registration',()=>{

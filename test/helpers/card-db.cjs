@@ -6,7 +6,7 @@ const { cardScope } = require('../../orbitcard-card-policy');
 const BASE = 'https://orbitcard.test';
 
 module.exports = function fixture({ enqueueRedemption } = {}) {
-    const db = { cards: [], uses: [], issues: [], fundings:[], tasks: [], cdks: [], failIncrement: false };
+    const db = { cards: [], uses: [], issues: [], fundings:[], tasks: [], cdks: [], usageChanges: [], failIncrement: false, failUsageAudit: false };
     let tail = Promise.resolve(), allocationTail = Promise.resolve(), sequence = 0;
     async function withTransaction(fn) {
         const pending = tail.then(async () => {
@@ -26,7 +26,8 @@ module.exports = function fixture({ enqueueRedemption } = {}) {
         }
         if (q.includes('LEFT JOIN orbitcard_card_uses')) return db.tasks.filter(t => ['running','manual'].includes(t.status) && !db.uses.some(u => u.job_key === t.job_key));
         if (q.includes('FROM orbitcard_managed_cards')) return structuredClone(db.cards.filter(c => c.scope === p[0] && (!q.includes('card_id=?') || c.card_id === Number(p[1]))).sort((a,b) => b.successful_plus-a.successful_plus || a.card_id-b.card_id));
-        if (q.includes('FROM orbitcard_card_uses')) return structuredClone(db.uses.filter(u => u.job_key === p[0]));
+        if (q.includes('FROM orbitcard_card_uses')) return structuredClone(db.uses.filter(u => q.includes('WHERE scope=')
+            ? u.scope === p[0] && u.card_id === p[1] && u.state === 'reserved' : u.job_key === p[0]));
         if (q.includes('FROM orbitcard_card_issues')) return structuredClone(db.issues.filter(i => (q.includes('WHERE issue_key=') ? i.issue_key === p[0] : i.scope === p[0]) && (!q.includes('plan_type=?') || i.plan_type === p[1])
             && (!q.includes('job_key=?') || i.job_key === p[1])
             && (!q.includes('state IN') || ['prepared','submitting','pending','unknown'].includes(i.state))));
@@ -42,7 +43,10 @@ module.exports = function fixture({ enqueueRedemption } = {}) {
     }
     async function runExecute(sql, p = []) {
         const q = clean(sql);
-        if(q.startsWith('INSERT INTO orbitcard_card_fundings')) {
+        if(q.startsWith('INSERT INTO orbitcard_card_usage_changes')) {
+            if (db.failUsageAudit) throw new Error('injected usage audit failure');
+            db.usageChanges.push({scope:p[0],card_id:p[1],before:JSON.parse(p[2]),after:JSON.parse(p[3]),reason:p[4],admin_email:p[5]});
+        } else if(q.startsWith('INSERT INTO orbitcard_card_fundings')) {
             assert.ok(!db.fundings.some(f => f.job_key===p[2]));db.fundings.push({funding_key:p[0],scope:p[1],job_key:p[2],plan_type:p[3],card_id:p[4],credential_hash:p[5],request_body:p[6],amount:p[7],target_balance:p[8],state:'prepared',retry_at:0});
         } else if(q.startsWith('UPDATE orbitcard_card_fundings SET state=')) {
             const funding=db.fundings.find(f => f.funding_key===p[6] && f.scope===p[7]);

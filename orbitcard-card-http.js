@@ -6,7 +6,7 @@ const { LIMITS, CardPreparationError } = require('./orbitcard-card-policy');
 const { PLAN_TYPES: CANONICAL_PLAN_TYPES } = require('./plan-registry');
 
 // Mounted after the administrator authentication middleware. Mutating monetary
-// operations and the one-time declaration of imported usage also require 2FA.
+// operations and declarations/corrections of usage also require 2FA.
 module.exports = function registerCardRoutes(app, { store, cardService, requireSecondaryAuth, audit }) {
     const handler = fn => async (req, res) => {
         try { await fn(req, res); }
@@ -98,7 +98,19 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
         const cfg = await config();
         await store.withCardAllocationLock(cfg.base_url, locked => locked.bindCard(id, counts));
         audit({ source: 'orbitcard', event: 'card_history_confirmed', text: '管理员确认卡片四种套餐历史次数', data: { card_id: id, usage: counts } });
-        res.json({ success: true, message: '历史次数已确认；后续四种套餐独立计数，不能清零重置' });
+        res.json({ success: true, message: '历史次数已确认；后续四种套餐独立计数' });
+    }));
+    app.post('/api/admin/orbitcard/cards/:cardId/usage', requireSecondaryAuth, handler(async (req, res) => {
+        const id = cardsApi.positiveId(req.params.cardId);
+        if (!id) throw new CardPreparationError('请填写有效卡 ID');
+        const cfg = await config();
+        const result = await store.withCardAllocationLock(cfg.base_url, locked => locked.updateCardUsage(id, {
+            usage: req.body?.usage, expected_usage: req.body?.expected_usage,
+            reason: req.body?.reason, adminEmail: req.admin?.email
+        }));
+        if (result.changed) audit({ source: 'orbitcard', event: 'card_usage_corrected', text: '管理员修改卡片历史次数',
+            data: { card_id: id, before: result.before, usage: result.usage, reason: req.body.reason, admin_email: req.admin?.email } });
+        res.json({ success: true, ...result, message: result.changed ? '历史次数已修改，后续选卡将使用新次数' : '次数未变化，无需修改' });
     }));
     app.post('/api/admin/orbitcard/issues/refresh', handler(async (req, res) => {
         await cardService.recover(await config());
