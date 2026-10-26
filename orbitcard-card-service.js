@@ -7,11 +7,33 @@ const cardsApi = require('./orbitcard-cards-client');
 const { planFor, cardScope, LIMITS } = require('./orbitcard-card-policy');
 const money = require('./orbitcard-money');
 const { decideCards } = require('./orbitcard-payment-decision');
+const { PaymentStoppedError } = require('./payment-automation');
 
 module.exports = function createCardService({ store, audit, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), maxIssuePolls = 3, now = Date.now }) {
     function record(jobKey, event, text, data) { audit({ jobKey: jobKey || '', source: 'orbitcard', event, text, data }); }
     const credentialHash = cfg => crypto.createHash('sha256').update(String(cfg.api_key || '').trim()).digest('hex');
-    const fundingService = require('./orbitcard-funding-service')({api,cardsApi,audit,now,sleep,maxPolls:maxIssuePolls});
+    async function assertPaymentAllowed(cfg, jobKey) {
+        await cfg.executionGuard?.assertOwned();
+        await store.assertPaymentAllowed(jobKey);
+    }
+    async function withRecoveryOwner(cfg, entry, action) {
+        const owner = await store.paymentOwner(entry.job_key);
+        if (!owner.allowed) return false;
+        if (!owner.keys.length) { await action(cfg); return true; }
+        const guard = await store.acquirePaymentLock(owner.keys);
+        if (!guard) return false;
+        try {
+            const ownedCfg = { ...cfg, executionGuard: guard };
+            await assertPaymentAllowed(ownedCfg, entry.job_key);
+            await action(ownedCfg);
+            return true;
+        } catch (error) {
+            if (error instanceof PaymentStoppedError) return false;
+            throw error;
+        } finally { await guard.release(); }
+    }
+    const fundingService = require('./orbitcard-funding-service')({api,cardsApi,audit,now,sleep,maxPolls:maxIssuePolls,
+        assertPaymentAllowed, withRecoveryOwner});
     async function account(cfg) {
         const result=await api.request(cfg,'getAccountBalance');
         if(!result.success) throw new CardPreparationError(result.error || '账户可用余额查询失败，已停止选卡、开卡和补款');
@@ -34,7 +56,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
     }
 
     async function confirmIssue(cfg, locked, issue, polls = maxIssuePolls) {
-        await cfg.executionGuard?.assertOwned();
+        await assertPaymentAllowed(cfg, issue.job_key);
         if (issue.credential_hash !== credentialHash(cfg)) throw new CardPreparationError('原开卡申请的 API Key 与当前配置不同，请恢复原凭据后确认，禁止换身份重开');
         if (Number(issue.retry_at || 0) > now()) throw new CardPreparationError('原开卡申请处于重查间隔内，请稍后确认原申请');
         let body;
@@ -46,6 +68,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
         await locked.updateIssue(issue.issue_key, { state: 'submitting', message: '正在确认原开卡请求' });
         const deadline = now() + 120000;
         for (let attempt = 0; attempt < polls && now() < deadline; attempt++) {
+            await assertPaymentAllowed(cfg, issue.job_key);
             const result = await api.request({ ...cfg, auditJobKey: issue.job_key || cfg.auditJobKey || '' }, 'createCard', body, issue.issue_key);
             const detail = cardsApi.issueResult(result.data);
             if ((issue.order_no && detail.order_no && issue.order_no !== detail.order_no)
@@ -87,6 +110,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
     }
 
     async function issueFor(cfg, locked, planType, jobKey = null, products = null) {
+        await assertPaymentAllowed(cfg, jobKey);
         const plan = planFor(planType);
         let issue = await locked.pendingIssue(plan);
         if (issue && (issue.job_key || null) !== (jobKey || null)) {
@@ -99,6 +123,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
             const body = cardsApi.createCardBody(selected);
             const budget = jobKey ? money.units(selected.price) : money.units('20');
             await requireFunds(locked,jobKey,await account(cfg),budget>money.units('20')?budget:money.units('20'),budget);
+            await assertPaymentAllowed(cfg, jobKey);
             issue = await locked.createIssue({ issue_key: `card-${crypto.randomUUID()}`, job_key: jobKey, ...selected,
                 plan_type:plan,
                 credential_hash: credentialHash(cfg), request_body: JSON.stringify(body) });
@@ -170,7 +195,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
 
     async function allocate(cfg, jobKey, planType, selection = {}) {
         return store.withCardAllocationLock(cfg.base_url, async cardMethods => {
-            await cfg.executionGuard?.assertOwned();
+            await assertPaymentAllowed(cfg, jobKey);
             const locked = selection.manualRequestId ? {
                 ...cardMethods,
                 reserveCard: (cardId, key, plan) => store.reserveManualCard(selection.manualRequestId, cardId, key, plan),
@@ -284,17 +309,21 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
                     if(issue && Number(issue.retry_at || 0)<=now()) candidates.push(issue);
                 }
                 candidates.sort((a,b) => new Date(a.updated_at || a.created_at || 0)-new Date(b.updated_at || b.created_at || 0));
-                for(const issue of candidates.slice(0,1)) {
-                    // Prepared means the remote-write marker was never committed.
-                    if (issue.state === 'prepared') {
-                        await locked.updateIssue(issue.issue_key, { state: 'failed', message: '服务在开卡提交前中断，未发送该申请' });
-                        continue;
-                    }
-                    try { await confirmIssue(cfg, locked, issue, 1); }
-                    catch (_) {
-                        await locked.updateIssue(issue.issue_key,{state:'unknown',retry_at:Math.max(Number(issue.retry_at || 0),now()+60000),message:'原开卡申请尚待确认或人工核对，保留原身份'});
-                        record(issue.job_key, 'card_issue_pending', '原开卡申请尚待确认，保留原幂等身份', { issue_key: issue.issue_key });
-                    }
+                for(const issue of candidates) {
+                    const handled = await withRecoveryOwner(cfg, issue, async ownedCfg => {
+                        // Prepared means the remote-write marker was never committed.
+                        if (issue.state === 'prepared') {
+                            await locked.updateIssue(issue.issue_key, { state: 'failed', message: '服务在开卡提交前中断，未发送该申请' });
+                            return;
+                        }
+                        try { await confirmIssue(ownedCfg, locked, issue, 1); }
+                        catch (error) {
+                            if (error instanceof PaymentStoppedError) throw error;
+                            await locked.updateIssue(issue.issue_key,{state:'unknown',retry_at:Math.max(Number(issue.retry_at || 0),now()+60000),message:'原开卡申请尚待确认或人工核对，保留原身份'});
+                            record(issue.job_key, 'card_issue_pending', '原开卡申请尚待确认，保留原幂等身份', { issue_key: issue.issue_key });
+                        }
+                    });
+                    if (handled) break;
                 }
             });
         } finally { recovering = false; }

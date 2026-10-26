@@ -14,6 +14,16 @@ function fixture({ unknown = false, pendingAllocation = false, now = Date.now } 
         { type: 'gpt-credits-250', name: '250 credits' }
     ];
     const store = { acquirePaymentLock: require('./helpers/payment-locks.cjs')().acquirePaymentLock,
+        assertPaymentAllowed: async jobKey => {
+            const order = [...orders.values()].find(item => item.client_order_no === jobKey);
+            if (!order || !['preparing','prepared','submitting','pending'].includes(order.state)) {
+                throw new (require('../payment-automation').PaymentStoppedError)('任务已转人工处理');
+            }
+        },
+        pauseManualPreparation: async (requestId, _key, message) => {
+            const order = orders.get(requestId);
+            if (order?.state === 'preparing') Object.assign(order, { state: 'support_locked', message });
+        },
         getGptApiConfig: async () => cfg,
         getMaxConcurrentActivations: async () => 5,
         getManualOrder: async id => orders.get(id) || null,
@@ -230,7 +240,7 @@ test('manual preparation is never queried as a submitted subscription', async ()
     process.env.ORBITCARD_API_KEY='key';process.env.ORBITCARD_API_SECRET='secret';
     const f=fixture({pendingAllocation:true});
     await assert.rejects(f.service.create({requestId:id,planType:'gpt-plus',mode:'test',session,authorized:true}),/原补款/);
-    assert.equal((await f.service.refresh(id)).state,'preparing');
+    assert.equal((await f.service.refresh(id)).state,'support_locked');
     assert.equal(f.calls.length,0);
 });
 
@@ -271,17 +281,17 @@ test('manual query respects server Retry-After without creating another order', 
     await f.service.refresh(id);assert.equal(f.calls.length,2);
 });
 
-test('pending funding keeps the same manual request and never submits until it is confirmed', async () => {
+test('pending funding hands the administrator order to support and repeated submission cannot resume payment', async () => {
     process.env.ORBITCARD_API_KEY = 'key'; process.env.ORBITCARD_API_SECRET = 'secret';
     const { service, allocations, calls, orders } = fixture({ pendingAllocation: true });
     const input = { requestId: id, planType: 'gpt-plus', mode: 'test', session, authorized: true };
     await assert.rejects(service.create(input), /原补款结果待确认/);
-    assert.equal(orders.get(id).state, 'preparing');
+    assert.equal(orders.get(id).state, 'support_locked');
     assert.equal(calls.filter(x => x.operation === 'createSubscription').length, 0);
     await service.create(input);
-    await until(() => orders.get(id).state === 'success');
-    assert.equal(allocations.length, 2);
-    assert.equal(calls.filter(x => x.operation === 'createSubscription').length, 1);
+    assert.equal(orders.get(id).state, 'support_locked');
+    assert.equal(allocations.length, 1);
+    assert.equal(calls.filter(x => x.operation === 'createSubscription').length, 0);
 });
 
 function storeFixture({ enqueueRedemption } = {}) {
@@ -426,6 +436,17 @@ test('late manual-order failure preserves a support-redeemed CDK while releasing
     assert.equal(db.cdks[0].used_at, 'reserved');
     assert.equal(db.card.active_job, null);
     assert.equal(db.card.successful_plus, 0);
+});
+
+test('manual-order handoff persists through pending queries and confirmed failure cannot release its CDK for recharge', async () => {
+    const { db, store } = storeFixture();
+    await store.createManualOrder(manualInput(id)); await store.claimManualSubmission(id);
+    await store.settleManualOrder(id, { state: 'manual', message: 'support' });
+    await store.settleManualOrder(id, { state: 'pending', message: 'upstream pending' });
+    assert.equal(db.orders[0].state, 'manual');
+    await store.settleManualOrder(id, { state: 'failed', message: 'confirmed failure' });
+    assert.equal(db.orders[0].state, 'support_locked'); assert.ok(db.cdks[0].used_at);
+    assert.equal(db.card.active_job, null); assert.equal(db.card.successful_plus, 0);
 });
 
 test('a prepared order interrupted before submission releases its CDK and card without a platform call', async () => {

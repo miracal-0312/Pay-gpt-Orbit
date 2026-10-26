@@ -1,5 +1,6 @@
 'use strict';
 const { cdkLockKey } = require('./payment-execution-lock');
+const { requiresManualHandling } = require('./payment-automation');
 
 // Both interactive refresh and restart recovery query the same durable identity.
 module.exports = function createRecovery({ store, query, activeJobs, audit, notify = async () => {}, reconcileCards = async () => {}, checkBalance = async () => false }) {
@@ -21,6 +22,9 @@ module.exports = function createRecovery({ store, query, activeJobs, audit, noti
         const lockSupport = (...args) => mutate('lockOrbitcardSupport', args);
         const recordFailure = (...args) => mutate('recordOrbitcardPaymentFailure', args);
         if (activeJobs.has(task.job_key)) return { success: true, querySkipped: true };
+        if (requiresManualHandling(task) && !['submitting', 'pending', 'manual'].includes(task.orbitcard_state)) {
+            return { success: true, querySkipped: true };
+        }
         if (['retry_waiting','support_locked'].includes(task.orbitcard_state)) return { success: true, querySkipped: true };
         if(task.orbitcard_state==='balance_blocked') {
             if(!await checkBalance(task)) return {success:true,querySkipped:true,waitMs:60000};
@@ -75,14 +79,14 @@ module.exports = function createRecovery({ store, query, activeJobs, audit, noti
             const preparedFunding=store.getCardFundingForTask?await store.getCardFundingForTask(task.job_key):null;
             if(preparedFunding && !['ready','failed'].includes(preparedFunding.state)) {
                 const result=await settle(task.job_key,{status:'manual',progress:10,orbitcardState:'funding_pending',expectedState:'prepared',
-                    message:'原卡片补款仍待确认，会员充值未提交；已锁定卡片和 CDK'});
+                    message:'原卡片补款仍待确认，已转人工处理并停止自动支付；会员充值未提交，保留卡片和 CDK'});
                 return {success:true,applied:result.applied,querySkipped:true};
             }
             if (task.orbitcard_issue_key) {
                 preparedIssue = await store.getCardIssueForTask(task.job_key);
                 if (preparedIssue && !['ready','failed'].includes(preparedIssue.state)) {
                     const result = await settle(task.job_key, { status: 'manual', progress: 10,
-                        orbitcardState: 'card_pending', expectedState: 'prepared', message: '原支付卡申请仍待确认，会员充值未提交；保留 CDK 并继续确认原申请' });
+                        orbitcardState: 'card_pending', expectedState: 'prepared', message: '原支付卡申请仍待确认，已转人工处理并停止自动支付；会员充值未提交，保留 CDK 和原申请' });
                     return { success: true, applied: result.applied, querySkipped: true };
                 }
             }

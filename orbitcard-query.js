@@ -32,7 +32,8 @@ async function refresh({ cfg, task, persist, onConfirmedFailure }) {
                 orderId: result.orderId, raw: JSON.stringify(result.snapshot)
             });
             require('./runtime-log').push({ jobKey: task.job_key, source: 'orbitcard', event: 'payment_attempt_failed',
-                text: recorded.exhausted ? '三张卡支付均已明确失败，CDK 已锁定并转人工售后' : '原支付订单已明确失败，等待下一次尝试',
+                text: recorded.supportStopped ? '原订单已确认失败，任务已转人工处理，不再换卡或充值'
+                    : recorded.exhausted ? '三张卡支付均已明确失败，CDK 已锁定并转人工售后' : '原支付订单已明确失败，等待下一次尝试',
                 data: { attempt: Number(task.orbitcard_retry_attempt_no || 1), card_id: Number(task.orbitcard_card_id),
                     order_id: result.orderId, applied: recorded.applied } });
             return { success: true, applied: recorded.applied, retrying: !recorded.exhausted };

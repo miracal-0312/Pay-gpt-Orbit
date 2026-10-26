@@ -1,4 +1,5 @@
 'use strict';
+const { requiresManualHandling } = require('./payment-automation');
 
 // Transaction boundaries keep task creation, order linkage and CDK ownership consistent.
 module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, runExecute, createTaskLog, settleCardUse = async () => {}, enqueueRedemption = async () => {} }) {
@@ -39,10 +40,11 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
         return rows[0] || null;
     }
 
-    async function settleOrbitcardTask(jobKey, { status, progress, message, orbitcardState, gptApiOrderId, gptApiRaw, expectedState, expectedClientOrderNo }) {
+    async function settleOrbitcardTask(jobKey, input) {
         const initial = await runQuery('SELECT cdk_code FROM task_logs WHERE job_key = ?', [jobKey]);
         if (!initial[0]) throw new Error('兑换任务不存在');
         return withTransaction(async connection => {
+            let { status, progress, message, orbitcardState, gptApiOrderId, gptApiRaw, expectedState, expectedClientOrderNo } = input;
             const options = { connection };
             const cdk = initial[0].cdk_code;
             // Every transaction takes CDK then task locks in the same order.
@@ -63,6 +65,24 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
             if (task.orbitcard_state === 'success' && orbitcardState !== 'success') return { applied: false, status: 'success' };
             if (task.orbitcard_state === 'support_locked') return { applied: false, status: 'failed' };
             if (['failed', 'rejected'].includes(task.orbitcard_state)) return { applied: false, status: task.status };
+            const manual = requiresManualHandling(task);
+            const paymentState = orbitcardState;
+            if (manual) {
+                // Handoff is durable: a pending query cannot put the task back in the payment loop.
+                if (!['submitting', 'pending', 'manual'].includes(task.orbitcard_state)
+                    || !['pending', 'manual', 'success', 'failed', 'rejected'].includes(orbitcardState)) {
+                    return { applied: false, status: task.status };
+                }
+                if (['failed', 'rejected'].includes(orbitcardState)) {
+                    orbitcardState = 'support_locked';
+                    status = 'failed';
+                    message = '原订单已确认失败，自动支付已停止；CDK 保持锁定，请人工售后处理';
+                } else if (orbitcardState !== 'success') {
+                    orbitcardState = 'manual';
+                    status = 'manual';
+                    message = '已转人工处理，自动支付已停止；仅核对原订单结果，勿重复充值';
+                }
+            }
             if (task.orbitcard_state === 'prepared' && ['failed','rejected'].includes(orbitcardState)) {
                 // Recheck inside the transaction: a recovery snapshot can predate
                 // a funding/issuance intent committed by a worker losing its lock.
@@ -77,7 +97,7 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
             } else {
                 await runExecute('UPDATE cdk_codes SET used_at = COALESCE(used_at, CURRENT_TIMESTAMP) WHERE cdk_code = ?', [cdk], options);
             }
-            await settleCardUse(jobKey, orbitcardState, options);
+            await settleCardUse(jobKey, paymentState, options);
             if (status === 'success' && orbitcardState === 'success' && task.orbitcard_state !== 'success') {
                 await enqueueRedemption({ cdk, orderId: task.orbitcard_retry_root_job_key || jobKey }, options);
             }
@@ -128,10 +148,12 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
                 || (failure.card_id != null && Number(failure.card_id) !== card)) {
                 throw new Error('失败订单归属不一致，不能自动重试');
             }
-            const exhausted = attempt === 3 || Boolean(code?.manual_redeemed_at);
+            const manual = requiresManualHandling(task);
+            const exhausted = attempt === 3 || manual || Boolean(code?.manual_redeemed_at);
             await runExecute(`UPDATE task_logs SET status = ?, progress = 99, message = ?, orbitcard_state = ?,
                 gpt_api_order_id = ?, gpt_api_raw = ?, session_payload = NULL WHERE job_key = ?`,
-            ['failed', code?.manual_redeemed_at ? '原平台订单支付失败；卡密已由人工售后核销，不再重试' : exhausted
+            ['failed', code?.manual_redeemed_at ? '原平台订单支付失败；卡密已由人工售后核销，不再重试'
+                : manual ? '原订单已确认失败，任务已转人工处理，不再换卡或充值' : exhausted
                 ? '三张卡支付均已明确失败，CDK 已锁定；请联系人工售后'
                 : `第 ${attempt} 次支付已明确失败，正在准备下一次尝试`,
             exhausted ? 'support_locked' : 'failed', orderId, raw, jobKey], options);
@@ -141,7 +163,7 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
             }
             await settleCardUse(jobKey, 'failed', options);
             await runExecute('UPDATE cdk_codes SET used_at = COALESCE(used_at, CURRENT_TIMESTAMP) WHERE cdk_code = ?', [cdk], options);
-            if (exhausted) return { applied: true, exhausted: true };
+            if (exhausted) return { applied: true, exhausted: true, supportStopped: manual || Boolean(code?.manual_redeemed_at) };
             const next = await createTaskLog({ tokenPreview: task.orbitcard_email || 'Orbitcard', cdkCode: cdk, status: 'running', progress: 3 }, options);
             const identity = require('./orbitcard-cdk').clientOrderNo(cdk, next.jobKey);
             const first = Number(task.orbitcard_retry_first_card_id || (attempt === 1 ? card : 0)) || null;
@@ -169,7 +191,7 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
             if (code?.manual_redeemed_at) return false;
             const task = (await runQuery('SELECT * FROM task_logs WHERE job_key = ? FOR UPDATE', [jobKey], options))[0];
             const latest = await runQuery('SELECT job_key FROM task_logs WHERE cdk_code = ? ORDER BY id DESC LIMIT 1', [cdk], options);
-            if (!task || latest[0]?.job_key !== jobKey || task.orbitcard_state !== 'retry_waiting'
+            if (!task || requiresManualHandling(task) || latest[0]?.job_key !== jobKey || task.orbitcard_state !== 'retry_waiting'
                 || task.orbitcard_client_order_no !== clientOrderNo) return false;
             await runExecute("UPDATE task_logs SET orbitcard_state = 'prepared', message = '正在准备下一次支付尝试' WHERE job_key = ?", [jobKey], options);
             return true;

@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const { parseSession } = require('./session-input');
 const config = require('./orbitcard-config');
 const { cdkLockKey } = require('./payment-execution-lock');
+const { requiresManualHandling } = require('./payment-automation');
 
 // The only redemption entry point. Reservation is acquired before any remote create.
 module.exports = function createActivationHandler({ store, ensureStoreReady, activeJobs, runWorker, log, isDraining = () => false }) {
@@ -19,7 +20,7 @@ module.exports = function createActivationHandler({ store, ensureStoreReady, act
             const code = await store.verifyCdkDetails(cdk);
             if (code?.manual_redeemed_at) return res.status(403).json({ success: false, message: '该卡密已由人工售后核销，不能再次充值' });
             const existing = code && await store.getRunningTaskByCdk(cdk);
-            const resume = existing?.orbitcard_state === 'retry_waiting' && !activeJobs.has(existing.job_key);
+            const resume = existing?.orbitcard_state === 'retry_waiting' && !requiresManualHandling(existing) && !activeJobs.has(existing.job_key);
             if (existing && !resume) return res.json({ success: true,
                 jobKey: existing.orbitcard_retry_root_job_key || existing.job_key,
                 provider: existing.orbitcard_client_order_no ? 'orbitcard' : 'history',

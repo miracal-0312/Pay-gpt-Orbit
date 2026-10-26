@@ -228,7 +228,8 @@ async function listRecentGptApiOrders(limit = 10) {
 async function listRecoverableOrbitcardTasks(limit = 50) {
     return runQuery(`SELECT t.* FROM task_logs t JOIN cdk_codes c ON c.cdk_code = t.cdk_code AND c.is_active = 1
         WHERE t.orbitcard_client_order_no IS NOT NULL
-          AND t.orbitcard_state IN ('prepared','balance_blocked','funding_pending','card_pending','submitting','pending','manual','success')
+          AND t.orbitcard_state IN ('prepared','balance_blocked','submitting','pending','manual','success')
+          AND (t.status <> 'manual' OR t.orbitcard_state IN ('submitting','pending','manual','success'))
           AND t.id = (SELECT MAX(id) FROM task_logs WHERE cdk_code = t.cdk_code)
           AND (t.orbitcard_state <> 'success' OR JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(t.gpt_api_raw), t.gpt_api_raw, '{}'), '$.fee_status')) = 'charge_pending')
         ORDER BY t.updated_at ASC LIMIT ?`, [Math.min(200, Math.max(1, Number(limit) || 50))]);
@@ -271,6 +272,7 @@ async function getAdminData() {
 }
 
 const cardStore = require('./orbitcard-card-store')({ withTransaction, runQuery, runExecute, openLockConnection: core.openLockConnection });
+const paymentAutomation = require('./payment-automation')({ runQuery });
 const redemptionWebhook = require('./cdk-redemption-webhook')({ runQuery, runExecute });
 const orbitcardCdkStore = require('./orbitcard-cdk-store')({ withTransaction, runQuery, runExecute, createTaskLog,
     settleCardUse: cardStore.settleCardUse, enqueueRedemption: redemptionWebhook.enqueue });
@@ -279,7 +281,7 @@ const acquirePaymentLock = require('./payment-execution-lock').createExecutionLo
     openConnection: core.openLockConnection, namespace: core.connectionInfo?.database || '' });
 const updateCdkStatus = require('./cdk-status-service')({ runQuery, runExecute, withTransaction,
     acquirePaymentLock, enqueueRedemption: redemptionWebhook.enqueue });
-module.exports = { ...core, ...cardStore, ...orbitcardCdkStore, ...manualStore, acquirePaymentLock, ensureReady, initializeBaseData, createTaskLog, getTaskStatus,
+module.exports = { ...core, ...cardStore, ...orbitcardCdkStore, ...manualStore, ...paymentAutomation, acquirePaymentLock, ensureReady, initializeBaseData, createTaskLog, getTaskStatus,
     updateCdkStatus,
     deliverRedemptionNotifications: redemptionWebhook.deliverPending,
     getRunningTaskByCdk, verifyCdkDetails, getCdkRedemptionStatus, listCdks, listCdksExportPage, insertCdks, markCdksShipped, deleteCdk,

@@ -44,7 +44,9 @@ async function run({ cfg, planType, session, cdk, setProgress, onSubmission, bro
     const deadline = Date.now() + 15 * 60 * 1000;
     let delay = Math.max(5000, intervalMs, created.retryAfterMs || 0);
     for (let poll = 0; poll < maxPolls && Date.now() < deadline; poll++) {
+        await cfg.paymentGuard?.assertAllowed();
         await sleep(Math.min(delay, Math.max(0, deadline - Date.now())));
+        await cfg.paymentGuard?.assertAllowed();
         if (Date.now() >= deadline) break;
         const result = await subscription.query(cfg, { ...prepared.expected, orderId });
         if (!result.success) {
@@ -75,7 +77,7 @@ async function run({ cfg, planType, session, cdk, setProgress, onSubmission, bro
         delay = Math.max(5000, intervalMs, result.retryAfterMs || 0);
     }
     broadcast(null);
-    await setProgress('manual', 99, 'Orbitcard 结果待确认，已保留订单和 CDK，请联系管理员查询原订单，勿重复支付',
+    await setProgress('manual', 99, 'Orbitcard 结果待确认，已转人工处理并退出自动支付；保留订单和 CDK，请联系管理员核对原单',
         { orbitcardState: 'manual', gptApiOrderId: orderId, gptApiRaw: JSON.stringify(last) });
     return false;
 }

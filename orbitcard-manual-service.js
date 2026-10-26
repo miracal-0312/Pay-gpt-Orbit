@@ -98,7 +98,8 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
         let session;
         try { session = parseSession(rawSession); }
         catch (error) { throw new ManualOrderError(error.message); }
-        const cfg = { ...await config(), auditJobKey: `manual-${requestId}`, executionGuard }, email = session.user.email.trim().toLowerCase();
+        const cfg = { ...await config(), auditJobKey: `manual-${requestId}`, executionGuard,
+            paymentGuard: { assertAllowed: () => store.assertPaymentAllowed(`manual-${requestId}`) } }, email = session.user.email.trim().toLowerCase();
         const keyHash = crypto.createHash('sha256').update(String(cfg.api_key || '')).digest('hex');
         let existing = await store.getManualOrder(requestId);
         if (existing && (!matches(existing, { planType, targetEmail: email, cfg })
@@ -151,7 +152,11 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
                     try {
                         await executionGuard.assertOwned();
                         await store.failManualPreparation(requestId, existing.client_order_no, `支付准备失败：${error.message}`);
-                    } catch (_) { /* another owner or an unresolved monetary intent must remain reserved */ }
+                    } catch (_) {
+                        await executionGuard.assertOwned();
+                        await store.pauseManualPreparation(requestId, existing.client_order_no,
+                            '支付准备结果待人工核对，已退出自动支付；停止开卡、补款和订阅充值');
+                    }
                     record(existing, 'manual_preparation_failed', '管理员订单支付准备未完成，请查询原准备记录', { error_type: error instanceof CardPreparationError ? 'card_preparation' : 'local_error' });
                     if (error instanceof ManualOrderError) throw error;
                     if (error instanceof CardPreparationError || /请求编号|待确认管理员订单|支付卡|CDK|卡密/.test(error.message)) {

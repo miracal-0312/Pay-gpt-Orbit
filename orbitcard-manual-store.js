@@ -121,6 +121,12 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
         await failManualPreparation(requestId, jobKey, message);
     }
 
+    async function pauseManualPreparation(requestId, jobKey, message) {
+        await runExecute(`UPDATE orbitcard_admin_orders SET state = 'support_locked', message = ?
+            WHERE request_id = ? AND client_order_no = ? AND state = 'preparing'`,
+        [String(message || '').slice(0, 255), requestId, jobKey]);
+    }
+
     async function markManualPrepared(requestId, jobKey, cardId) {
         const result = await runExecute(`UPDATE orbitcard_admin_orders SET state = 'prepared', message = ?
             WHERE request_id = ? AND client_order_no = ? AND state = 'preparing' AND card_id = ?`,
@@ -220,15 +226,21 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
             const [order] = await runQuery('SELECT * FROM orbitcard_admin_orders WHERE request_id = ? FOR UPDATE', [requestId], options);
             if (!order) throw new Error('管理员订单不存在');
             if (order.task_no && taskNo && order.task_no !== taskNo) throw new Error('平台订单号与原订单不一致');
-            if (['success', 'failed'].includes(order.state)) return order;
+            if (['success', 'failed', 'support_locked'].includes(order.state)) return order;
             if (!['submitting','pending','manual'].includes(order.state)) return order;
+            if (order.state === 'manual' && state === 'pending') {
+                state = 'manual';
+                message = '已转人工处理，自动支付已停止；仅核对原订单结果';
+            }
             const safeTaskNo = taskNo || order.task_no || null;
+            const supportLocked = order.state === 'manual' && state === 'failed';
+            if (supportLocked) message = '原订单已确认失败，自动支付已停止；CDK 保持锁定，请人工售后处理';
             await runExecute(`UPDATE orbitcard_admin_orders SET state = ?, task_no = COALESCE(task_no, ?),
                 snapshot = ?, message = ? WHERE request_id = ?`,
-            [state, safeTaskNo, snapshot ? JSON.stringify(snapshot) : order.snapshot,
+            [supportLocked ? 'support_locked' : state, safeTaskNo, snapshot ? JSON.stringify(snapshot) : order.snapshot,
                 String(message || '').slice(0, 255), requestId], options);
             if (['success', 'failed'].includes(state)) {
-                if (order.cdk_code && state === 'failed') {
+                if (order.cdk_code && state === 'failed' && !supportLocked) {
                     await runQuery('SELECT cdk_code FROM cdk_codes WHERE cdk_code = ? FOR UPDATE', [order.cdk_code], options);
                     await runExecute('UPDATE cdk_codes SET used_at = NULL WHERE cdk_code = ? AND manual_redeemed_at IS NULL', [order.cdk_code], options);
                 }
@@ -250,6 +262,6 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
 
     return { getManualOrder, listManualOrders, listRecoverableManualOrders,
         prepareManualOrder, reserveManualCard, attachManualIssue, blockManualBalance,
-        failManualPreparation, markManualPrepared,
+        failManualPreparation, pauseManualPreparation, markManualPrepared,
         createManualOrder, claimManualSubmission, abandonPreparedManualOrder, settleManualOrder };
 };

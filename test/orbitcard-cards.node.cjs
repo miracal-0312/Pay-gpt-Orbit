@@ -90,6 +90,50 @@ function serviceFixture(overrides={}) {
     return {...f,calls,events,api,service,advance:(ms=60000) => {clock+=ms;},setCards:cards => {providerCards=cards;},setAccount:balance => {accountBalance=balance;}};
 }
 
+test('handed-off tasks never enter allocation or resume an unknown card application', async () => {
+    for (const state of ['manual', 'support_locked', 'card_pending', 'funding_pending']) {
+        const f = serviceFixture(), task = await f.claim();
+        Object.assign(f.db.tasks[0], { status: 'manual', orbitcard_state: state });
+        await assert.rejects(f.service.allocate(cfg, task.jobKey, 'plus'), /转人工/);
+        assert.equal(f.calls.length, 0); assert.equal(f.db.issues.length, 0); assert.equal(f.db.fundings.length, 0);
+    }
+    const f = serviceFixture({ createCard: async () => ({ success: false, status: 502 }) }), task = await f.claim();
+    await assert.rejects(f.service.allocate(cfg, task.jobKey, 'plus'), /原开卡申请仍待确认/);
+    await f.settle(task, 'card_pending'); f.advance();
+    const before = f.calls.length, issue = structuredClone(f.db.issues[0]);
+    await f.service.recover(cfg); await f.service.recover(cfg);
+    assert.equal(f.calls.length, before); assert.deepEqual(f.db.issues[0], issue);
+    await assert.rejects(f.service.allocate(cfg, task.jobKey, 'plus'), /转人工/);
+});
+
+test('funding rechecks handoff after balance lookup and before sending money', async () => {
+    let checks = 0;
+    const f = serviceFixture({ getAccountBalance: async () => {
+        if (++checks === 2) f.db.tasks[0].status = 'manual';
+        return { success: true, data: { available_balance: '100.00' } };
+    } });
+    const card = await f.addCard(); f.setCards([{ ...card, status: 'ACTIVE', balance: 5 }]);
+    const task = await f.claim();
+    await assert.rejects(f.service.allocate(cfg, task.jobKey, 'plus'), /转人工/);
+    assert.equal(f.calls.filter(call => ['rechargeCard','createCard'].includes(call.operation)).length, 0);
+});
+
+test('background card recovery shares execution ownership and rechecks a handoff after acquiring it', async () => {
+    const f = serviceFixture({ createCard: async () => ({ success: false, status: 502 }) }), task = await f.claim();
+    await assert.rejects(f.service.allocate(cfg, task.jobKey, 'plus'));
+    f.advance(); const before = f.calls.length;
+    const guard = await f.store.acquirePaymentLock('cdk:code-1');
+    await f.service.recover(cfg); assert.equal(f.calls.length, before); await guard.release();
+    const acquire = f.store.acquirePaymentLock;
+    f.store.acquirePaymentLock = async keys => {
+        const owned = await acquire(keys);
+        f.db.tasks[0].status = 'manual';
+        return owned;
+    };
+    await f.service.recover(cfg); assert.equal(f.calls.length, before);
+    assert.equal(f.db.issues[0].state, 'unknown');
+});
+
 test('live inactive status overrides cached ACTIVE and the next active card is selected',async () => {
     const f=serviceFixture(),a=await f.addCard(42),b=await f.addCard(43);
     f.setCards([{...a,status:'FROZEN'},{...b,status:'ACTIVE'}]);const task=await f.claim();
@@ -352,14 +396,16 @@ test('a funded card is preferred to another eligible card needing a topup',async
     assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),43);assert.equal(f.db.fundings.length,0);assert.equal(f.db.issues.length,0);
 });
 
-test('unknown topup without an order number is recovered using the original key and exact body',async () => {
+test('unknown topup without an order number is never resent after handoff to support',async () => {
     let ready=false;
     const f=serviceFixture({rechargeCard:async body => ready?{success:true,data:{order_no:'FUND-ORIGINAL',amount:body.amount,status:'success'}}:{success:false,status:502}});
     const card=await f.addCard();f.setCards([{...card,status:'ACTIVE',balance:5}]);const task=await f.claim();
     await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/补款结果仍待确认/);assert.equal(f.db.fundings[0].state,'unknown');assert.equal(f.db.cards[0].active_job,task.jobKey);
     await f.settle(task,'funding_pending');f.advance();ready=true;f.setCards([{...card,status:'ACTIVE',balance:21}]);await f.service.recover(cfg);
-    const calls=f.calls.filter(c => c.operation==='rechargeCard');assert.equal(calls.length,2);assert.equal(calls[0].key,calls[1].key);assert.deepEqual(calls[0].body,calls[1].body);
-    assert.equal(f.db.fundings[0].state,'ready');assert.equal(f.db.fundings.length,1);assert.equal(f.db.cards[0].successful_plus,0);
+    const calls=f.calls.filter(c => c.operation==='rechargeCard');assert.equal(calls.length,1);
+    assert.equal(f.db.fundings[0].state,'unknown');assert.equal(f.db.fundings.length,1);assert.equal(f.db.cards[0].successful_plus,0);
+    await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/转人工/);
+    assert.equal(f.calls.filter(c => c.operation==='rechargeCard').length,1);
 });
 
 test('known topup order is confirmed by exact getCardFlow order number, not by unrelated successful flows',async () => {
@@ -396,7 +442,7 @@ test('quota-available cards with unsupported state or currency are skipped for a
     }
 });
 
-test('funding-pending restart never sends a subscription query and releases only after the original topup resolves',async () => {
+test('funding-pending handoff cannot return to automatic payment even when the original topup resolves',async () => {
     const f=serviceFixture({rechargeCard:async body => ({success:true,data:{order_no:'ORIGINAL',amount:body.amount,status:'pending_confirm'}})});
     const card=await f.addCard();f.setCards([{...card,status:'ACTIVE',balance:5}]);const task=await f.claim();
     await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'));
@@ -405,7 +451,7 @@ test('funding-pending restart never sends a subscription query and releases only
     await recovery.refreshTask({...f.db.tasks[0]});assert.equal(f.db.tasks[0].orbitcard_state,'funding_pending');assert.ok(f.db.cdks[0].used_at);
     await recovery.refreshTask({...f.db.tasks[0]});assert.equal(f.db.cards[0].active_job,task.jobKey);
     f.db.fundings[0].state='ready';await recovery.refreshTask({...f.db.tasks[0]});
-    assert.equal(f.db.tasks[0].status,'retry');assert.equal(f.db.cdks[0].used_at,null);assert.equal(f.db.cards[0].active_job,null);assert.equal(f.db.cards[0].successful_plus,0);
+    assert.equal(f.db.tasks[0].status,'manual');assert.ok(f.db.cdks[0].used_at);assert.equal(f.db.cards[0].active_job,task.jobKey);assert.equal(f.db.cards[0].successful_plus,0);
 });
 
 test('funding Retry-After and changed credential/body cannot cause duplicate topups',async () => {

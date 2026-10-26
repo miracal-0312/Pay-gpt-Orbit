@@ -145,7 +145,7 @@ test('funding intent creation rejects a stale reservation, and recovery cannot r
     assert.equal(f.db.fundings.length,1);
 });
 
-test('retry recovery keeps the card reserved until its original funding or issuance is resolved', async () => {
+test('retry preparation handoff remains stopped after the original funding or issuance is resolved', async () => {
     for (const kind of ['funding', 'issue']) {
         const f = cardFixture(); await f.addCard(); const task = await f.claim();
         const methods = f.store.cardMethods(f.base);
@@ -172,8 +172,9 @@ test('retry recovery keeps the card reserved until its original funding or issua
         assert.ok(f.db.cdks[0].used_at);
         (kind === 'funding' ? f.db.fundings : f.db.issues)[0].state = 'failed';
         await recovery.refreshTask(f.db.tasks[0]);
-        assert.equal(f.db.tasks[0].orbitcard_state, 'support_locked');
-        assert.equal(f.db.cards[0].active_job, null);
+        assert.equal(f.db.tasks[0].orbitcard_state, kind === 'funding' ? 'funding_pending' : 'card_pending');
+        assert.equal(f.db.tasks[0].status, 'manual');
+        assert.equal(f.db.cards[0].active_job, task.jobKey);
         assert.ok(f.db.cdks[0].used_at);
     }
 });

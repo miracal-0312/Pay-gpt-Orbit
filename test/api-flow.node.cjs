@@ -117,7 +117,7 @@ test('restart recovery releases only prepared tasks and never creates a replacem
     const store = { acquirePaymentLock: require('./helpers/payment-locks.cjs')().acquirePaymentLock,
         settleOrbitcardTask: async (key, state) => { states.push([key,state]); return { applied: true }; },
         getGptApiConfig: async () => ({ enabled: false, api_key: 'saved-key' }),
-        getTaskStatus: async key => ({ job_key: key, cdk_code: 'CDK-TEST', status: 'manual',
+        getTaskStatus: async key => ({ job_key: key, cdk_code: 'CDK-TEST', status: key === 'prepared' ? 'running' : 'manual',
             orbitcard_state: key === 'prepared' ? 'prepared' : 'manual', orbitcard_client_order_no: 'fixed-identity' })
     };
     const recovery = require('../order-recovery')({ store, activeJobs: new Set(), audit: event => audits.push(event),
@@ -302,6 +302,7 @@ test('HTTP redemption carries the Session only to Orbitcard and exposes live ver
     const events = [], writes = [], tasks = new Map();
     const task = { job_key: 'live-job', cdk_code: 'CDK-TEST', orbitcard_client_order_no: 'stable-client', orbitcard_state: 'prepared', status: 'running', orbitcard_email: session.user.email };
     const store = { acquirePaymentLock: require('./helpers/payment-locks.cjs')().acquirePaymentLock,
+        assertPaymentAllowed: async () => { assert.notEqual(task.status, 'manual'); },
         ensureReady: async () => {}, getAdminPaths: async () => ({ loginPath: 'admin-login',panelPath: 'admin' }),
         verifyCdkDetails: async () => ({ type: '自助',plan_type: 'plus' }), getRunningTaskByCdk: async () => null,
         getMaintenanceModeState: async () => ({}), getMaxConcurrentActivations: async () => 1,

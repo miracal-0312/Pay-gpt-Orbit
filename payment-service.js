@@ -1,5 +1,6 @@
 'use strict';
 const { CardPreparationError, CardSwitchExhaustedError, AccountBalanceError } = require('./orbitcard-card-policy');
+const { PaymentStoppedError } = require('./payment-automation');
 
 // CDK orchestration: owns local transitions, retry attempts and settlement.
 // HTTP/WebSocket registration stays in server.js.
@@ -13,6 +14,7 @@ module.exports = function createPaymentService({ store, cardService, worker, act
             await task.apiConfig.executionGuard?.assertOwned();
             const saved = await store.settleOrbitcardTask(jobKey, { status, progress, message, ...extra });
             if (!saved.applied) throw new Error('任务已结束或被替换');
+            if (saved.status === 'manual' && status !== 'manual') throw new PaymentStoppedError('任务已转人工处理');
             audit({ jobKey, source: 'orbitcard', event: 'task_state', text: message,
                 data: { status, progress, orbitcard_state: extra.orbitcardState } });
             broadcast(rootJobKey, { type: 'status', status, progress, message });
@@ -20,7 +22,9 @@ module.exports = function createPaymentService({ store, cardService, worker, act
         try {
             while (true) {
                 submitted = false;
-                task.apiConfig = { ...task.apiConfig, auditJobKey: jobKey };
+                task.apiConfig = { ...task.apiConfig, auditJobKey: jobKey,
+                    paymentGuard: { assertAllowed: () => store.assertPaymentAllowed(jobKey) } };
+                await task.apiConfig.paymentGuard.assertAllowed();
                 const attempt = Number(task.orbitcardRetryAttemptNo || 1);
                 if (!Number.isInteger(attempt) || attempt < 1 || attempt > 3) throw new Error('支付重试序号无效');
                 const selection = attempt === 2 ? { excludedCardIds: [task.orbitcardRetryFirstCardId] }
@@ -77,6 +81,10 @@ module.exports = function createPaymentService({ store, cardService, worker, act
                     .catch(() => log(jobKey,'订阅已成功，卡片资金只读核对暂不可用，请稍后在后台查询','payment_reconciliation_pending'));
             }
         } catch (error) {
+            if (error instanceof PaymentStoppedError) {
+                log(jobKey, '任务已退出自动支付，保留原记录供人工处理', 'payment_automation_stopped');
+                return;
+            }
             if (task.apiConfig.executionGuard) {
                 try { await task.apiConfig.executionGuard.assertOwned(); }
                 catch (_) { log(jobKey, '支付执行权已失效，保留原订单由恢复任务核对', 'execution_lock_lost'); return; }
@@ -113,10 +121,10 @@ module.exports = function createPaymentService({ store, cardService, worker, act
                 } catch (_) { preparationUnknown = true; }
             }
             const retryAttempt = Number(task.orbitcardRetryAttemptNo || 1);
-            const message = submitted ? 'Orbitcard 提交结果待确认，请查询原订单，勿重复充值' : preparationUnknown
-                ? '支付准备记录暂时无法核对，已保留 CDK 与支付卡；请继续查询原任务，勿重新付款' : fundingPending
-                ? '原支付卡补款仍在处理中或待核对；会员充值尚未提交，已锁定卡片和 CDK，请继续查询原任务' : cardPending
-                ? '支付卡申请仍在处理中或待核对；会员充值尚未提交，已保留 CDK，请继续查询原任务'
+            const message = submitted ? 'Orbitcard 提交结果待确认，已转人工处理并退出自动支付；请核对原订单，勿重复充值' : preparationUnknown
+                ? '支付准备记录暂时无法核对，已保留 CDK 与支付卡并停止自动支付；请人工核对原任务' : fundingPending
+                ? '原支付卡补款仍待核对，已转人工处理并停止自动支付；会员充值尚未提交，保留卡片和 CDK'
+                : cardPending ? '支付卡申请仍待核对，已转人工处理并停止自动支付；会员充值尚未提交，保留 CDK 和原申请'
                 : retryAttempt > 1 ? '支付重试未能安全完成，CDK 已锁定；请联系人工售后'
                 : error instanceof CardPreparationError
                     ? `${error.message}；本次会员充值未提交，CDK 已释放` : 'Orbitcard 提交前异常，请检查配置或查询原订单';

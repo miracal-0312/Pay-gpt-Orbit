@@ -105,7 +105,8 @@ module.exports = function fixture({ enqueueRedemption } = {}) {
     const cardStore=cardFactory({runQuery,runExecute,withTransaction,getPool() { throw new Error('Unexpected real connection'); }});
     const cdkStore=cdkFactory({runQuery,runExecute,withTransaction,settleCardUse:cardStore.settleCardUse,enqueueRedemption,
         createTaskLog: async input => { const task={ id:++sequence,job_key:`job-${sequence}`,cdk_code:input.cdkCode,status:'running',progress:3 }; db.tasks.push(task); return {jobKey:task.job_key}; } });
-    const store={...cardStore,...cdkStore,acquirePaymentLock:require('./payment-locks.cjs')().acquirePaymentLock,getTaskStatus:async key=>structuredClone(db.tasks.find(t=>t.job_key===key)),withCardAllocationLock(base, fn) {
+    const automation=require('../../payment-automation')({runQuery});
+    const store={...cardStore,...cdkStore,...automation,acquirePaymentLock:require('./payment-locks.cjs')().acquirePaymentLock,getTaskStatus:async key=>structuredClone(db.tasks.find(t=>t.job_key===key)),withCardAllocationLock(base, fn) {
         const pending=allocationTail.then(() => fn(cardStore.cardMethods(base))); allocationTail=pending.catch(() => {}); return pending;
     }};
     async function claim(plan='plus') {
@@ -116,7 +117,7 @@ module.exports = function fixture({ enqueueRedemption } = {}) {
         const card={card_id:id,provider_status:'ACTIVE',product_code:'p1',bin:'55565979',last4:'1234',balance:100,currency:'USD'};
         await cardStore.cardMethods(BASE).syncCards([card]); Object.assign(db.cards.find(c => c.card_id === id),{history_confirmed:confirmed?1:0,successful_plus:used}); return card;
     }
-    const settle=(task,state) => cdkStore.settleOrbitcardTask(task.jobKey,{status:state==='success'?'success':['failed','rejected'].includes(state)?'failed':'manual',orbitcardState:state,progress:90,message:state,
+    const settle=(task,state) => cdkStore.settleOrbitcardTask(task.jobKey,{status:state==='success'?'success':['failed','rejected'].includes(state)?'failed':state==='manual'?'manual':'running',orbitcardState:state,progress:90,message:state,
         ...(state==='submitting'?{expectedState:'prepared',expectedClientOrderNo:task.orbitcardClientOrderNo}:{})});
     return {db,store,claim,addCard,settle,base:BASE,scope:cardScope(BASE)};
 };

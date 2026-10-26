@@ -45,7 +45,7 @@ async function perform(action, success) {
     try { const result = await action(); if (success) notice(success, 'success'); return result; }
     catch (error) { notice(error.message, 'error'); return null; }
 }
-function status(value) { const text = { success: '成功', failed: '失败', retry: '待重新提交 Session', running: '处理中', preparing: '准备支付', prepared: '已保存', submitting: '提交中', manual: '待确认', pending: '待确认', unused: '未使用', used: '已使用', redeemed: '已核销', processing: '占用中' }[value] || value; return `<span class="pill ${escapeHtml(value)}">${escapeHtml(text)}</span>`; }
+function status(value) { const text = { success: '成功', failed: '失败', retry: '待重新提交 Session', running: '处理中', preparing: '准备支付', prepared: '已保存', submitting: '提交中', manual: '人工处理（支付已停止）', support_locked: '人工售后（支付已停止）', pending: '待确认', unused: '未使用', used: '已使用', redeemed: '已核销', processing: '占用中' }[value] || value; return `<span class="pill ${escapeHtml(value)}">${escapeHtml(text)}</span>`; }
 function renderTasks(tasks) {
     $('tasks').innerHTML = tasks.map(task => {
         const order = task.order || {}, fee = order.fee_status ? `${order.service_fee ?? '—'} ${order.currency || 'USDT'} / ${order.fee_status}` : '—';
