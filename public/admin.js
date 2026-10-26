@@ -5,6 +5,7 @@ const cardPlans = { plus: 'Plus', pro100: 'Pro 100', pro200: 'Pro 200', pro500: 
 let cdkPlans = {};
 let loginUrl = '/admin-login', selected = 'overview', savedBaseUrl = '';
 let cdkPlanFilter = '', cdkLoadSequence = 0, cdkLoadedFilter = null;
+let generatedCdkBatch = null;
 let manualCatalog = { plans: [] }, manualOrders = [];
 let paymentRegionLoadSequence = 0;
 function notice(text, type = '') {
@@ -276,6 +277,19 @@ async function redeemCdkAfterSupport(button) {
         await loadCdks();
     } finally { button.disabled = false; }
 }
+function exportGeneratedCdks() {
+    if (!generatedCdkBatch?.cdks.length) throw new Error('请先生成卡密');
+    const { cdks, plan, createdAt } = generatedCdkBatch;
+    const csv = '\uFEFFsecret\r\n' + cdks.map(code => '"' + String(code).replace(/"/g, '""') + '"').join('\r\n') + '\r\n';
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `cdks-${plan.replace(/[^a-zA-Z0-9_-]/g, '_')}-${cdks.length}-${createdAt}.csv`;
+    document.body.append(link);
+    try { link.click(); }
+    finally { link.remove(); setTimeout(() => URL.revokeObjectURL(url), 60000); }
+    notice(`已开始下载本次生成的 ${cdks.length} 个 CDK，请保存文件`, 'success');
+}
 async function exportCdks() {
     const button = $('exportCdks'), filter = cdkPlanFilter;
     const token = localStorage.getItem(TOKEN_KEY), secondary = localStorage.getItem(SECONDARY_KEY);
@@ -364,9 +378,15 @@ form('unlockForm', async () => {
     $('secondaryPassword').value = ''; localStorage.setItem(SECONDARY_KEY, data.secondaryToken); $('unlockState').textContent = '已验证'; await loadSelected(); notice('二级验证已通过', 'success');
 });
 form('generateForm', async () => {
-    const data = await request('/api/admin/cdks/generate', { count: Number($('cdkCount').value), plan_type: $('planType').value });
-    $('generated').hidden = false; $('generated').textContent = data.cdks.join('\n'); notice(data.message, 'success'); await loadCdks();
+    const plan = $('planType').value;
+    const data = await request('/api/admin/cdks/generate', { count: Number($('cdkCount').value), plan_type: plan });
+    generatedCdkBatch = { cdks: [...data.cdks], plan, createdAt: new Date().toISOString().replace(/[:.]/g, '-') };
+    $('generated').hidden = false;
+    $('generatedSummary').textContent = `已生成 ${cdkPlans[plan] || cardPlans[plan] || plan} 卡密 ${data.cdks.length} 个，可导出 CSV 后在 dujiao-next 商城导入。此按钮保留最近一次成功生成的批次，请在刷新页面前导出保存。`;
+    $('exportGeneratedCdks').disabled = !data.cdks.length;
+    notice(data.message, 'success'); await loadCdks();
 });
+$('exportGeneratedCdks').onclick = () => perform(exportGeneratedCdks);
 form('importForm', async () => {
     const data = await request('/api/admin/cdks/import', { cdks: $('cdkImport').value.split(/[\s,;]+/).filter(Boolean), plan_type: $('planType').value });
     $('cdkImport').value = ''; notice(data.message, 'success'); await loadCdks();
