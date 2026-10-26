@@ -17,6 +17,7 @@ module.exports = function createActivationHandler({ store, ensureStoreReady, act
         try {
             await ensureStoreReady();
             const code = await store.verifyCdkDetails(cdk);
+            if (code?.manual_redeemed_at) return res.status(403).json({ success: false, message: '该卡密已由人工售后核销，不能再次充值' });
             const existing = code && await store.getRunningTaskByCdk(cdk);
             const resume = existing?.orbitcard_state === 'retry_waiting' && !activeJobs.has(existing.job_key);
             if (existing && !resume) return res.json({ success: true,

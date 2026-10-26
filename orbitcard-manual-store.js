@@ -109,7 +109,7 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
                     [order.scope, order.card_id, jobKey], options);
             }
             if (order.cdk_code) {
-                await runExecute('UPDATE cdk_codes SET used_at = NULL WHERE cdk_code = ?', [order.cdk_code], options);
+                await runExecute('UPDATE cdk_codes SET used_at = NULL WHERE cdk_code = ? AND manual_redeemed_at IS NULL', [order.cdk_code], options);
             }
             await runExecute("UPDATE orbitcard_admin_orders SET state = 'failed', message = ? WHERE request_id = ? AND state = 'preparing'",
                 [String(message || '').slice(0,255), requestId], options);
@@ -201,7 +201,7 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
             if (!order) return null;
             if (order.cdk_code) {
                 await runQuery('SELECT cdk_code FROM cdk_codes WHERE cdk_code = ? FOR UPDATE', [order.cdk_code], options);
-                await runExecute('UPDATE cdk_codes SET used_at = NULL WHERE cdk_code = ?', [order.cdk_code], options);
+                await runExecute('UPDATE cdk_codes SET used_at = NULL WHERE cdk_code = ? AND manual_redeemed_at IS NULL', [order.cdk_code], options);
             }
             const [card] = await runQuery('SELECT * FROM orbitcard_managed_cards WHERE scope = ? AND card_id = ? FOR UPDATE',
                 [order.scope, order.card_id], options);
@@ -230,7 +230,7 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
             if (['success', 'failed'].includes(state)) {
                 if (order.cdk_code && state === 'failed') {
                     await runQuery('SELECT cdk_code FROM cdk_codes WHERE cdk_code = ? FOR UPDATE', [order.cdk_code], options);
-                    await runExecute('UPDATE cdk_codes SET used_at = NULL WHERE cdk_code = ?', [order.cdk_code], options);
+                    await runExecute('UPDATE cdk_codes SET used_at = NULL WHERE cdk_code = ? AND manual_redeemed_at IS NULL', [order.cdk_code], options);
                 }
                 const [card] = await runQuery('SELECT * FROM orbitcard_managed_cards WHERE scope = ? AND card_id = ? FOR UPDATE',
                     [order.scope, order.card_id], options);

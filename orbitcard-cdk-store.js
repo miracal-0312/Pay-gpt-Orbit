@@ -33,7 +33,7 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
     }
 
     async function getOrbitcardTaskByCdk(cdk) {
-        const rows = await runQuery(`SELECT t.* FROM task_logs t JOIN cdk_codes c ON c.cdk_code = t.cdk_code
+        const rows = await runQuery(`SELECT t.*, c.manual_redeemed_at FROM task_logs t JOIN cdk_codes c ON c.cdk_code = t.cdk_code
             WHERE t.cdk_code = ? AND c.is_active = 1 AND t.orbitcard_client_order_no IS NOT NULL
             ORDER BY t.id DESC LIMIT 1`, [cdk]);
         return rows[0] || null;
@@ -73,7 +73,7 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
                 gpt_api_raw = COALESCE(?, gpt_api_raw), session_payload = NULL WHERE job_key = ?`,
             [status, Number(progress || 0), message, orbitcardState, gptApiOrderId || null, gptApiRaw || null, jobKey], options);
             if (['failed', 'rejected'].includes(orbitcardState)) {
-                await runExecute('UPDATE cdk_codes SET used_at = NULL WHERE cdk_code = ?', [cdk], options);
+                await runExecute('UPDATE cdk_codes SET used_at = NULL WHERE cdk_code = ? AND manual_redeemed_at IS NULL', [cdk], options);
             } else {
                 await runExecute('UPDATE cdk_codes SET used_at = COALESCE(used_at, CURRENT_TIMESTAMP) WHERE cdk_code = ?', [cdk], options);
             }
@@ -90,7 +90,7 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
         if (!initial[0]) throw new Error('兑换任务不存在');
         return withTransaction(async connection => {
             const options = { connection }, cdk = initial[0].cdk_code;
-            await runQuery('SELECT cdk_code FROM cdk_codes WHERE cdk_code = ? FOR UPDATE', [cdk], options);
+            const [code] = await runQuery('SELECT * FROM cdk_codes WHERE cdk_code = ? FOR UPDATE', [cdk], options);
             const task = (await runQuery('SELECT * FROM task_logs WHERE job_key = ? FOR UPDATE', [jobKey], options))[0];
             const latest = await runQuery('SELECT job_key FROM task_logs WHERE cdk_code = ? ORDER BY id DESC LIMIT 1', [cdk], options);
             const card = Number(cardId), attempt = Number(task?.orbitcard_retry_attempt_no || 1);
@@ -128,10 +128,10 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
                 || (failure.card_id != null && Number(failure.card_id) !== card)) {
                 throw new Error('失败订单归属不一致，不能自动重试');
             }
-            const exhausted = attempt === 3;
+            const exhausted = attempt === 3 || Boolean(code?.manual_redeemed_at);
             await runExecute(`UPDATE task_logs SET status = ?, progress = 99, message = ?, orbitcard_state = ?,
                 gpt_api_order_id = ?, gpt_api_raw = ?, session_payload = NULL WHERE job_key = ?`,
-            ['failed', exhausted
+            ['failed', code?.manual_redeemed_at ? '原平台订单支付失败；卡密已由人工售后核销，不再重试' : exhausted
                 ? '三张卡支付均已明确失败，CDK 已锁定；请联系人工售后'
                 : `第 ${attempt} 次支付已明确失败，正在准备下一次尝试`,
             exhausted ? 'support_locked' : 'failed', orderId, raw, jobKey], options);
@@ -165,7 +165,8 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
         if (!initial[0]) return false;
         return withTransaction(async connection => {
             const options = { connection }, cdk = initial[0].cdk_code;
-            await runQuery('SELECT cdk_code FROM cdk_codes WHERE cdk_code = ? FOR UPDATE', [cdk], options);
+            const [code] = await runQuery('SELECT * FROM cdk_codes WHERE cdk_code = ? FOR UPDATE', [cdk], options);
+            if (code?.manual_redeemed_at) return false;
             const task = (await runQuery('SELECT * FROM task_logs WHERE job_key = ? FOR UPDATE', [jobKey], options))[0];
             const latest = await runQuery('SELECT job_key FROM task_logs WHERE cdk_code = ? ORDER BY id DESC LIMIT 1', [cdk], options);
             if (!task || latest[0]?.job_key !== jobKey || task.orbitcard_state !== 'retry_waiting'

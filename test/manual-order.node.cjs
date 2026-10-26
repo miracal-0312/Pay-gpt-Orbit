@@ -318,7 +318,10 @@ function storeFixture({ enqueueRedemption } = {}) {
             task_no: null, snapshot: null, message: p[11]
         });
         else if (q.startsWith('UPDATE cdk_codes SET used_at = CURRENT_TIMESTAMP')) db.cdks.find(c => c.cdk_code === p[0]).used_at = 'reserved';
-        else if (q.startsWith('UPDATE cdk_codes SET used_at = NULL')) db.cdks.find(c => c.cdk_code === p[0]).used_at = null;
+        else if (q.startsWith('UPDATE cdk_codes SET used_at = NULL')) {
+            const code = db.cdks.find(c => c.cdk_code === p[0]);
+            if (!q.includes('manual_redeemed_at IS NULL') || !code.manual_redeemed_at) code.used_at = null;
+        }
         else if (q.startsWith('UPDATE orbitcard_admin_orders SET card_id = ?')) {
             const row = db.orders.find(o => o.request_id === p[2]); row.card_id = p[0]; row.message = p[1];
         } else if (q.startsWith('UPDATE orbitcard_admin_orders SET issue_key = ?')) {
@@ -411,6 +414,18 @@ test('manual CDK and card reservation settle atomically on verified success or f
     await store.settleManualOrder(next, { state: 'failed', message: 'stale failure' });
     assert.equal(db.cdks[0].used_at, 'reserved');
     assert.equal(db.card.successful_plus, 1);
+});
+
+test('late manual-order failure preserves a support-redeemed CDK while releasing the original payment card', async () => {
+    const { db, store } = storeFixture();
+    await store.createManualOrder(manualInput(id));
+    await store.claimManualSubmission(id);
+    db.cdks[0].manual_redeemed_at = '2026-10-26';
+    await store.settleManualOrder(id, { state: 'failed', message: 'original payment failed' });
+    assert.equal(db.orders[0].state, 'failed');
+    assert.equal(db.cdks[0].used_at, 'reserved');
+    assert.equal(db.card.active_job, null);
+    assert.equal(db.card.successful_plus, 0);
 });
 
 test('a prepared order interrupted before submission releases its CDK and card without a platform call', async () => {

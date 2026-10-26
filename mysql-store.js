@@ -42,6 +42,7 @@ async function ensureLegacyColumns() {
     const columns = {
         app_config: { created_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP', updated_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP' },
         cdk_codes: { is_active: 'TINYINT(1) NOT NULL DEFAULT 1', shipped_at: 'TIMESTAMP NULL', used_at: 'TIMESTAMP NULL',
+            manual_redeemed_at: 'TIMESTAMP NULL', manual_redeemed_by: 'VARCHAR(255) NULL', manual_redemption_reason: 'VARCHAR(255) NULL',
             type: "VARCHAR(16) NOT NULL DEFAULT '自助'", plan_type: "VARCHAR(16) NOT NULL DEFAULT 'plus'", created_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP',
             updated_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP' },
         orbitcard_admin_orders: { issue_key: 'VARCHAR(80) NULL' },
@@ -102,7 +103,9 @@ async function getTaskStatus(jobKey) {
     const rows = await runQuery(`SELECT job_key, cdk_code, status, message, progress, display_time, updated_at,
         orbitcard_client_order_no, orbitcard_state, orbitcard_plan_type, orbitcard_email, orbitcard_base_url, orbitcard_card_id, orbitcard_issue_key, orbitcard_required_balance,
         orbitcard_retry_root_job_key, orbitcard_retry_attempt_no, orbitcard_retry_first_card_id, orbitcard_retry_second_card_id, orbitcard_api_key_hash,
-        gpt_api_order_id, gpt_api_raw FROM task_logs WHERE job_key = ? LIMIT 1`, [String(jobKey)]);
+        gpt_api_order_id, gpt_api_raw,
+        (SELECT c.manual_redeemed_at FROM cdk_codes c WHERE c.cdk_code = task_logs.cdk_code) AS manual_redeemed_at
+        FROM task_logs WHERE job_key = ? LIMIT 1`, [String(jobKey)]);
     return rows[0] || null;
 }
 
@@ -120,13 +123,15 @@ async function verifyCdkDetails(cdk) {
 }
 
 function mapCdkRow(row) {
-    const redeemed = row.manual_state === 'success' || (row.task_status === 'success' && (row.orbitcard_state === 'success' || !row.orbitcard_state));
+    const redeemed = Boolean(row.manual_redeemed_at) || row.manual_state === 'success' || (row.task_status === 'success' && (row.orbitcard_state === 'success' || !row.orbitcard_state));
     const occupied = Boolean(row.used_at) || ['running', 'manual'].includes(row.task_status)
         || ['balance_blocked', 'support_locked'].includes(row.orbitcard_state);
     return { code: row.cdk_code, plan_type: row.plan_type, plan_label: PLAN_LABELS[row.plan_type] || row.plan_type,
         type: row.type, shipped: Boolean(row.shipped_at), created_at: row.created_at, jobKey: row.job_key,
-        orbitcard_pending_confirmation: row.task_status === 'manual', orbitcard_balance_blocked: row.orbitcard_state==='balance_blocked',
-        orbitcard_support_locked: row.orbitcard_state==='support_locked',
+        manual_redeemed_at: row.manual_redeemed_at || null, manual_redeemed_by: row.manual_redeemed_by || '',
+        manual_redemption_reason: row.manual_redemption_reason || '',
+        orbitcard_pending_confirmation: !redeemed && row.task_status === 'manual', orbitcard_balance_blocked: !redeemed && row.orbitcard_state==='balance_blocked',
+        orbitcard_support_locked: !redeemed && row.orbitcard_state==='support_locked',
         status: redeemed ? 'redeemed' : occupied ? 'processing' : 'unused' };
 }
 
@@ -272,7 +277,10 @@ const orbitcardCdkStore = require('./orbitcard-cdk-store')({ withTransaction, ru
 const manualStore = require('./orbitcard-manual-store')({ runQuery, runExecute, withTransaction, enqueueRedemption: redemptionWebhook.enqueue });
 const acquirePaymentLock = require('./payment-execution-lock').createExecutionLocks({
     openConnection: core.openLockConnection, namespace: core.connectionInfo?.database || '' });
+const updateCdkStatus = require('./cdk-status-service')({ runQuery, runExecute, withTransaction,
+    acquirePaymentLock, enqueueRedemption: redemptionWebhook.enqueue });
 module.exports = { ...core, ...cardStore, ...orbitcardCdkStore, ...manualStore, acquirePaymentLock, ensureReady, initializeBaseData, createTaskLog, getTaskStatus,
+    updateCdkStatus,
     deliverRedemptionNotifications: redemptionWebhook.deliverPending,
     getRunningTaskByCdk, verifyCdkDetails, getCdkRedemptionStatus, listCdks, listCdksExportPage, insertCdks, markCdksShipped, deleteCdk,
     listAdminTaskLogs, listRecentGptApiOrders, listRecoverableOrbitcardTasks, noteQueryAttempt, getMaxConcurrentActivations, saveConfig, getAdminData, safeOrder };

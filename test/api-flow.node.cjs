@@ -42,6 +42,15 @@ test('malformed/incomplete/expired Sessions are rejected before touching a CDK',
     }
     assert.deepEqual(f.events,[]);
 });
+test('a manually redeemed CDK cannot resume a queued retry or start another payment', async () => {
+    const f = fixture({ verifyCdkDetails: async () => ({ type: '自助', used_at: 'reserved', manual_redeemed_at: '2026-10-26' }),
+        getRunningTaskByCdk: async () => { throw Error('must reject before attempting to resume'); } });
+    const response = await f.request();
+    assert.equal(response.code, 403);
+    assert.match(response.data.message, /人工售后核销/);
+    assert.deepEqual(f.events, []);
+});
+
 test('disabled/unconfigured Orbitcard refuses new work without claiming a CDK', async () => {
     const old = process.env.ORBITCARD_API_SECRET;
     try {

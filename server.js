@@ -28,10 +28,11 @@ function publicOrder(task) {
     return { provider: task.orbitcard_client_order_no ? 'orbitcard' : 'history',
         jobKey: task.orbitcard_retry_root_job_key || task.job_key,
         attemptJobKey: task.job_key, attempt: Number(task.orbitcard_retry_attempt_no || 1),
-        status: task.orbitcard_state === 'retry_waiting' ? 'retry' : task.status,
-        message: task.message, progress: Number(task.progress || 0),
+        status: task.manual_redeemed_at ? 'success' : task.orbitcard_state === 'retry_waiting' ? 'retry' : task.status,
+        message: task.manual_redeemed_at ? '卡密已由人工售后核销' : task.message,
+        progress: task.manual_redeemed_at ? 100 : Number(task.progress || 0),
         order_id: task.gpt_api_order_id || null, client_order_no: task.orbitcard_client_order_no || null,
-        cdk_state: task.orbitcard_state === 'success' ? 'redeemed' : ['failed','rejected'].includes(task.orbitcard_state) ? 'available' : 'reserved',
+        cdk_state: task.manual_redeemed_at || task.orbitcard_state === 'success' ? 'redeemed' : ['failed','rejected'].includes(task.orbitcard_state) ? 'available' : 'reserved',
         order: store.safeOrder(task.gpt_api_raw) };
 }
 async function notify(task) {
@@ -104,9 +105,9 @@ async function describeCdk(cdk) {
     if (!code || code.type !== '自助') return null;
     const task = await store.getRunningTaskByCdk(cdk);
     return { type: code.type, plan_type: code.plan_type, plan_label: PLAN_LABELS[code.plan_type] || code.plan_type,
-        status: task ? task.orbitcard_state === 'retry_waiting' ? 'retry' : task.status === 'running' ? 'processing' : task.status : code.used_at ? 'used' : 'unused',
+        status: code.manual_redeemed_at ? 'success' : task ? task.orbitcard_state === 'retry_waiting' ? 'retry' : task.status === 'running' ? 'processing' : task.status : code.used_at ? 'used' : 'unused',
         provider: task ? task.orbitcard_client_order_no ? 'orbitcard' : 'history' : 'orbitcard',
-        jobKey: task?.orbitcard_retry_root_job_key || task?.job_key, message: task?.message || (code.used_at ? 'CDK 已使用' : 'CDK 可兑换'),
+        jobKey: task?.orbitcard_retry_root_job_key || task?.job_key, message: code.manual_redeemed_at ? '卡密已由人工售后核销' : task?.message || (code.used_at ? 'CDK 已使用' : 'CDK 可兑换'),
         shipped: Boolean(code.shipped_at), usedAt: code.used_at };
 }
 app.post('/api/cdk/status', async (req, res, next) => {

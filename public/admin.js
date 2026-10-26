@@ -234,10 +234,24 @@ async function loadCdks() {
     $('cdkListSummary').textContent = '正在加载卡密…';
     const codes = await request(`/api/admin/cdks${filter ? `?plan_type=${encodeURIComponent(filter)}` : ''}`);
     if (sequence !== cdkLoadSequence) return;
-    $('cdkRows').innerHTML = codes.map(code => `<tr><td><code>${escapeHtml(code.code)}</code></td><td>${escapeHtml(code.plan_label || code.plan_type)}</td><td>${status(code.status)}${code.orbitcard_support_locked ? '<br>支付失败，已锁定；请人工售后' : code.orbitcard_balance_blocked ? '<br>账户余额不足，CDK 已锁定' : code.orbitcard_pending_confirmation ? '<br>结果待确认' : ''}</td><td>${code.shipped ? '已出库' : '未出库'}</td><td>${!code.shipped && code.status === 'unused' ? `<button class="danger" data-delete-cdk="${escapeHtml(code.code)}">删除</button>` : '—'}</td></tr>`).join('') || '<tr><td colspan="5">暂无卡密</td></tr>';
+    $('cdkRows').innerHTML = codes.map(code => `<tr><td><code>${escapeHtml(code.code)}</code></td><td>${escapeHtml(code.plan_label || code.plan_type)}</td><td>${status(code.status)}${code.manual_redeemed_at ? `<br>人工售后核销<br>${escapeHtml(code.manual_redeemed_by)} · ${escapeHtml(code.manual_redeemed_at)}<br>${escapeHtml(code.manual_redemption_reason)}` : code.orbitcard_support_locked ? '<br>支付失败，已锁定；请人工售后' : code.orbitcard_balance_blocked ? '<br>账户余额不足，CDK 已锁定' : code.orbitcard_pending_confirmation ? '<br>结果待确认' : ''}</td><td>${code.shipped ? '已出库' : '未出库'}</td><td>${code.status === 'processing' ? `<button class="secondary" data-cdk-status="${escapeHtml(code.code)}">修改状态</button>` : !code.shipped && code.status === 'unused' ? `<button class="danger" data-delete-cdk="${escapeHtml(code.code)}">删除</button>` : '—'}</td></tr>`).join('') || '<tr><td colspan="5">暂无卡密</td></tr>';
     $('cdkListSummary').textContent = `${filter ? (cdkPlans[filter] || cardPlans[filter] || filter) : '全部套餐'}：显示最近 ${codes.length} 条${codes.length === 2000 ? '（已达页面上限）' : ''}`;
     cdkLoadedFilter = filter;
     $('exportCdks').disabled = false;
+}
+async function redeemCdkAfterSupport(button) {
+    if (button.disabled) return;
+    const cdk = button.dataset.cdkStatus;
+    const reason = prompt(`将卡密 ${cdk} 修改为“已核销”。\n请填写人工售后处理备注（最多 255 字）：`);
+    if (reason === null) return;
+    if (!reason.trim() || reason.trim().length > 255) throw new Error('请填写 1–255 字的售后处理备注');
+    if (!confirm(`确认已完成该卡密的人工售后交付？\n卡密：${cdk}\n目标状态：已核销\n备注：${reason.trim()}\n确认后将通知商城，卡密不可再次充值。`)) return;
+    button.disabled = true;
+    try {
+        const result = await request(`/api/admin/cdks/${encodeURIComponent(cdk)}/status`, { status: 'redeemed', reason: reason.trim() });
+        notice(result.message, 'success');
+        await loadCdks();
+    } finally { button.disabled = false; }
 }
 async function exportCdks() {
     const button = $('exportCdks'), filter = cdkPlanFilter;
@@ -579,6 +593,8 @@ document.addEventListener('click', event => {
         if (!response.ok) throw new Error((await response.json()).message || '日志下载失败');
         const url = URL.createObjectURL(await response.blob()), link = document.createElement('a'); link.href = url; link.download = `task-${job}.jsonl`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
     });
+    const changeStatus = event.target.closest('[data-cdk-status]');
+    if (changeStatus) perform(() => redeemCdkAfterSupport(changeStatus));
     const remove = event.target.closest('[data-delete-cdk]');
     if (remove && confirm(`确定删除未使用的卡密 ${remove.dataset.deleteCdk}？`)) perform(async () => { await request(`/api/admin/cdks/${encodeURIComponent(remove.dataset.deleteCdk)}`, undefined, 'DELETE'); await loadCdks(); });
 });

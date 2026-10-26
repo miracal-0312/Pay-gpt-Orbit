@@ -94,7 +94,10 @@ module.exports = function fixture({ enqueueRedemption } = {}) {
             Object.assign(db.tasks.find(t => t.job_key === p[5]),{status:p[0],progress:99,message:p[1],orbitcard_state:p[2],gpt_api_order_id:p[3],gpt_api_raw:p[4]});
         } else if (q.startsWith('UPDATE task_logs SET status')) {
             Object.assign(db.tasks.find(t => t.job_key === p[6]),{status:p[0],progress:p[1],message:p[2],orbitcard_state:p[3],gpt_api_order_id:p[4],gpt_api_raw:p[5]});
-        } else if (q.startsWith('UPDATE cdk_codes SET used_at = NULL')) db.cdks.find(c => c.cdk_code === p[0]).used_at=null;
+        } else if (q.startsWith('UPDATE cdk_codes SET used_at = NULL')) {
+            const code = db.cdks.find(c => c.cdk_code === p[0]);
+            if (!q.includes('manual_redeemed_at IS NULL') || !code.manual_redeemed_at) code.used_at = null;
+        }
         else if (q.startsWith('UPDATE cdk_codes SET used_at')) db.cdks.find(c => c.cdk_code === p[0]).used_at ||= 'reserved';
         else throw new Error(`Unexpected test execute: ${q}`);
         return { affectedRows:1 };

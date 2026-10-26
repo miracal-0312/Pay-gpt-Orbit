@@ -992,6 +992,19 @@ app.post('/api/admin/cdks/import', requireSecondaryAuth, async (req, res) => {
         res.status(500).json({ success: false, message: error.message });
     }
 });
+app.post('/api/admin/cdks/:cdk/status', requireSecondaryAuth, async (req, res) => {
+    try {
+        await ensureStoreReady();
+        const result = await store.updateCdkStatus({ cdk: req.params.cdk, status: req.body?.status,
+            reason: req.body?.reason, adminEmail: req.admin.email });
+        res.set('Cache-Control', 'no-store');
+        res.json({ success: true, ...result, message: result.changed
+            ? '卡密已修改为已核销，商城通知已入队；发送失败将自动重试'
+            : '卡密已经核销，无需重复修改' });
+    } catch (error) {
+        res.status(error.status || 500).json({ success: false, message: error.message });
+    }
+});
 app.delete('/api/admin/cdks/:cdk', requireSecondaryAuth, async (req, res) => {
     try {
         await ensureStoreReady();
