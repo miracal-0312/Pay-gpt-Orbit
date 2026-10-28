@@ -8,14 +8,16 @@ function fixture() {
     const env = { CDK_REDEMPTION_WEBHOOK_URL: 'https://shop.example/api/v1/card-secrets/redemption-callback',
         CDK_REDEMPTION_SOURCE: 'pay-gpt-orbit', CDK_REDEMPTION_WEBHOOK_SECRET: 's'.repeat(32) };
     const events = new Map(), requests = [];
-    let clock = Date.parse('2026-10-24T01:00:00Z'), mode = 'success', failAck = false;
+    let clock = Date.parse('2026-10-24T01:00:00Z'), mode = 'success', failAck = false, beforeClaim = null;
     const runQuery = async (sql, p, options) => {
         if (sql.includes('FROM cdk_codes')) {
             assert.ok(options.connection);
             return p[0].toLowerCase() === 'code-test' ? [{ cdk_code: 'CODE-TEST' }] : [];
         }
+        assert.match(sql, /attempts < \?/);
+        assert.equal(p[4], 3);
         return [...events.values()].filter(e => !e.delivered && e.source === p[0]
-            && e.url === p[1] && e.next <= p[2] && e.lease <= p[3]).map(e => ({ ...e }));
+            && e.url === p[1] && e.next <= p[2] && e.lease <= p[3] && e.attempts < p[4]).map(e => ({ ...e }));
     };
     const runExecute = async (sql, p, options) => {
         if (sql.startsWith('INSERT')) {
@@ -25,7 +27,10 @@ function fixture() {
         }
         if (sql.includes('attempts = attempts + 1')) {
             const e = events.get(p[2]);
-            if (e.delivered || e.next > p[3] || e.lease > p[4]) return { affectedRows: 0 };
+            if (beforeClaim) { beforeClaim(e); beforeClaim = null; }
+            assert.match(sql, /attempts < \?/);
+            assert.equal(p[5], 3);
+            if (e.delivered || e.next > p[3] || e.lease > p[4] || e.attempts >= p[5]) return { affectedRows: 0 };
             Object.assign(e, { token: p[0], lease: p[1], attempts: e.attempts + 1 });
         } else if (sql.includes('delivered_at = CURRENT_TIMESTAMP')) {
             if (failAck) { failAck = false; throw Error('connection lost after receiver acknowledgement'); }
@@ -46,10 +51,12 @@ function fixture() {
         if (mode === 'offline') throw Error('private network details');
         if (mode === 'bad-ack') return { status: 200, data: { status_code: 0, data: { event_id: 'wrong', received: true } } };
         if (mode === 'redirect') return { status: 302 };
+        if (mode === 'missing') return { status: 404 };
         return { status: 200, data: { status_code: 0, data: { event_id: body.event_id, received: true } } };
     };
     const create = () => factory({ env, runQuery, runExecute, now: () => clock, request });
-    return { env, events, requests, create, advance(ms) { clock += ms; }, mode(value) { mode = value; }, failAck() { failAck = true; } };
+    return { env, events, requests, create, advance(ms) { clock += ms; }, mode(value) { mode = value; }, failAck() { failAck = true; },
+        beforeClaim(fn) { beforeClaim = fn; } };
 }
 
 test('redemption notifications validate configuration and stay disabled without a target', async () => {
@@ -106,6 +113,64 @@ test('receipt identity uses the stored CDK spelling even when customers type a d
     assert.equal(JSON.parse([...f.events.values()][0].payload).cdk, 'CODE-TEST');
     await assert.rejects(sender.enqueue({ cdk: 'missing-code', orderId: 'job-2' }, { connection: {} }));
     assert.equal(f.events.size, 1);
+});
+
+test('failed deliveries stop after three total attempts, retaining errors across restarts and duplicate enqueue', async () => {
+    for (const mode of ['offline', 'missing', 'redirect', 'bad-ack']) {
+        const f = fixture(); f.mode(mode);
+        const input = { cdk: 'CODE-TEST', orderId: 'job-1' };
+        await f.create().enqueue(input, { connection: {} });
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            await f.create().deliverPending();
+            assert.equal(f.requests.length, attempt);
+            f.advance(60001);
+        }
+        const event = [...f.events.values()][0];
+        assert.equal(event.attempts, 3);
+        assert.equal(event.delivered, undefined);
+        assert.ok(event.error);
+        const snapshot = structuredClone(event);
+        f.advance(86400000); f.mode('success');
+        await f.create().enqueue(input, { connection: {} });
+        await Promise.all([f.create().deliverPending(), f.create().deliverPending()]);
+        assert.equal(f.requests.length, 3);
+        assert.deepEqual(event, snapshot);
+    }
+});
+
+test('a third delivery can succeed and old exhausted records are skipped after upgrade', async () => {
+    const f = fixture();
+    await f.create().enqueue({ cdk: 'CODE-TEST', orderId: 'job-1' }, { connection: {} });
+    const event = [...f.events.values()][0];
+    event.attempts = 2;
+    await Promise.all([f.create().deliverPending(), f.create().deliverPending()]);
+    assert.equal(f.requests.length, 1);
+    assert.equal(event.attempts, 3);
+    assert.equal(event.delivered, true);
+    event.delivered = false; event.attempts = 10; event.lease = 0;
+    await f.create().deliverPending();
+    assert.equal(f.requests.length, 1);
+    assert.equal(event.attempts, 10);
+});
+
+test('a stale queue read cannot claim an event whose delivery budget was consumed elsewhere', async () => {
+    const f = fixture();
+    await f.create().enqueue({ cdk: 'CODE-TEST', orderId: 'job-1' }, { connection: {} });
+    f.beforeClaim(event => { event.attempts = 3; });
+    await f.create().deliverPending();
+    assert.equal(f.requests.length, 0);
+    assert.equal([...f.events.values()][0].attempts, 3);
+});
+
+test('lost acknowledgement on the final attempt cannot trigger a fourth send after lease expiry', async () => {
+    const f = fixture();
+    await f.create().enqueue({ cdk: 'CODE-TEST', orderId: 'job-1' }, { connection: {} });
+    const event = [...f.events.values()][0]; event.attempts = 2;
+    f.failAck(); await assert.rejects(f.create().deliverPending());
+    f.advance(60001);
+    await f.create().deliverPending();
+    assert.equal(event.attempts, 3);
+    assert.equal(f.requests.length, 1);
 });
 
 test('lost acknowledgements recover after the lease expires; changing the destination cannot leak queued receipts', async () => {

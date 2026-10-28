@@ -1,6 +1,7 @@
 'use strict';
 const crypto = require('node:crypto');
 const axios = require('axios');
+const MAX_DELIVERY_ATTEMPTS = 3;
 
 function readConfig(env = process.env) {
     const url = String(env.CDK_REDEMPTION_WEBHOOK_URL || '').trim();
@@ -50,13 +51,13 @@ module.exports = function createRedemptionWebhook({ runQuery, runExecute, env = 
             // Persisted targets prevent a configuration change from sending old receipts to another shop.
             const events = await runQuery(`SELECT event_id, payload, attempts FROM cdk_redemption_outbox
                 WHERE delivered_at IS NULL AND source = ? AND target_url = ?
-                AND next_attempt_at <= ? AND lease_until <= ? ORDER BY next_attempt_at, created_at LIMIT 10`,
-            [config.source, config.url, now(), now()]);
+                AND next_attempt_at <= ? AND lease_until <= ? AND attempts < ? ORDER BY next_attempt_at, created_at LIMIT 10`,
+            [config.source, config.url, now(), now(), MAX_DELIVERY_ATTEMPTS]);
             for (const event of events) {
                 const token = crypto.randomUUID(), claimedAt = now();
                 const claimed = await runExecute(`UPDATE cdk_redemption_outbox SET lease_token = ?, lease_until = ?, attempts = attempts + 1
-                    WHERE event_id = ? AND delivered_at IS NULL AND next_attempt_at <= ? AND lease_until <= ?`,
-                [token, claimedAt + 60000, event.event_id, claimedAt, claimedAt]);
+                    WHERE event_id = ? AND delivered_at IS NULL AND next_attempt_at <= ? AND lease_until <= ? AND attempts < ?`,
+                [token, claimedAt + 60000, event.event_id, claimedAt, claimedAt, MAX_DELIVERY_ATTEMPTS]);
                 if (claimed.affectedRows !== 1) continue;
                 let errorCode = null;
                 try {

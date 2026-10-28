@@ -12,8 +12,8 @@ function fixture() {
         CDK_REDEMPTION_SOURCE: 'pay-gpt-orbit', CDK_REDEMPTION_WEBHOOK_SECRET: 's'.repeat(32) };
     const db = { code: { id: 7, cdk_code: 'CODE-SUPPORT', is_active: 1, used_at: 'reserved' },
         task: { job_key: 'job-2', orbitcard_retry_root_job_key: 'job-1', status: 'failed', orbitcard_state: 'support_locked' },
-        order: null, events: [] };
-    let locked = false, releases = 0, failEnqueue = false;
+        order: null, events: [], audits: [] };
+    let locked = false, releases = 0, failEnqueue = false, failAudit = false;
     const runQuery = async (sql, params, options) => {
         assert.ok(options?.connection);
         if (sql.includes('FROM cdk_codes')) return db.code && params[0].toLowerCase() === db.code.cdk_code.toLowerCase() ? [structuredClone(db.code)] : [];
@@ -26,6 +26,11 @@ function fixture() {
         if (sql.startsWith('UPDATE cdk_codes SET manual_redeemed_at')) {
             Object.assign(db.code, { manual_redeemed_at: '2026-10-26T00:00:00Z', manual_redeemed_by: p[0], manual_redemption_reason: p[1] });
             db.code.used_at ||= 'reserved';
+        } else if (sql.startsWith('UPDATE cdk_codes SET shipped_at')) {
+            db.code.shipped_at = sql.includes('= NULL') ? null : 'shipped-now';
+        } else if (sql.startsWith('INSERT INTO admin_login_logs')) {
+            if (failAudit) throw Error('audit unavailable');
+            db.audits.push({ event: p[0], adminEmail: p[1], detail: p[2] });
         } else if (sql.startsWith('INSERT INTO cdk_redemption_outbox')) {
             if (failEnqueue) throw Error('outbox unavailable');
             if (!db.events.some(event => event.id === p[0])) db.events.push({ id: p[0], source: p[1], url: p[2], payload: JSON.parse(p[3]) });
@@ -46,12 +51,13 @@ function fixture() {
     const webhook = require('../cdk-redemption-webhook')({ runQuery, runExecute, env });
     const update = createStatusService({ runQuery, runExecute, withTransaction, acquirePaymentLock, env, enqueueRedemption: webhook.enqueue });
     const input = { cdk: 'code-support', status: 'redeemed', reason: ' 已在售后完成补发 ', adminEmail: 'admin@example.test' };
-    return { db, env, update, input, setLocked(value) { locked = value; }, failEnqueue(value) { failEnqueue = value; }, get releases() { return releases; } };
+    return { db, env, update, input, setLocked(value) { locked = value; }, failEnqueue(value) { failEnqueue = value; },
+        failAudit(value) { failAudit = value; }, get releases() { return releases; } };
 }
 
 test('support redemption atomically saves audit details and a canonical shop receipt without changing payment history', async () => {
     const f = fixture(), originalTask = structuredClone(f.db.task);
-    assert.deepEqual(await f.update(f.input), { status: 'redeemed', changed: true });
+    assert.deepEqual(await f.update(f.input), { status: 'redeemed', shipped: false, changed: true, redemptionChanged: true });
     assert.equal(f.db.code.manual_redeemed_by, f.input.adminEmail);
     assert.equal(f.db.code.manual_redemption_reason, f.input.reason.trim());
     assert.equal(f.db.code.used_at, 'reserved');
@@ -96,14 +102,16 @@ test('manual fulfillment and historical occupied codes can be redeemed; existing
     }
 });
 
-test('invalid, unused, disabled, busy and unconfigured updates do not mutate a CDK', async () => {
-    for (const kind of ['invalid-code', 'invalid-status', 'empty-reason', 'long-reason', 'unused', 'disabled', 'missing', 'busy', 'no-webhook', 'bad-webhook', 'preparing']) {
+test('invalid, disabled, busy and unconfigured updates do not mutate a CDK', async () => {
+    for (const kind of ['invalid-code', 'invalid-status', 'empty-reason', 'long-reason', 'invalid-shipped', 'no-change-request', 'invalid-expected', 'disabled', 'missing', 'busy', 'no-webhook', 'bad-webhook', 'preparing']) {
         const f = fixture(), input = { ...f.input };
         if (kind === 'invalid-code') input.cdk = '../bad';
         if (kind === 'invalid-status') input.status = 'unused';
         if (kind === 'empty-reason') input.reason = ' ';
         if (kind === 'long-reason') input.reason = 'a'.repeat(256);
-        if (kind === 'unused') { f.db.code.used_at = null; f.db.task = null; }
+        if (kind === 'invalid-shipped') input.shipped = 'false';
+        if (kind === 'no-change-request') delete input.status;
+        if (kind === 'invalid-expected') input.expectedShipped = 'false';
         if (kind === 'disabled') f.db.code.is_active = 0;
         if (kind === 'missing') f.db.code = null;
         if (kind === 'busy') f.setLocked(true);
@@ -114,6 +122,51 @@ test('invalid, unused, disabled, busy and unconfigured updates do not mutate a C
         await assert.rejects(f.update(input), undefined, kind);
         assert.deepEqual(f.db, before, kind);
     }
+});
+
+test('unused inventory can be redeemed and shipped atomically with operator audit and one receipt', async () => {
+    const f = fixture(); f.db.code.used_at = null; f.db.task = null;
+    const result = await f.update({ ...f.input, shipped: true, expectedStatus: 'unused', expectedShipped: false });
+    assert.deepEqual(result, { status: 'redeemed', shipped: true, changed: true, redemptionChanged: true });
+    assert.equal(f.db.events.length, 1);
+    assert.equal(f.db.code.shipped_at, 'shipped-now');
+    assert.equal(f.db.audits.length, 1);
+    assert.equal(f.db.audits[0].adminEmail, f.input.adminEmail);
+    assert.match(f.db.audits[0].detail, /unused → redeemed/);
+    assert.ok(f.db.audits[0].detail.includes(f.input.reason.trim()));
+});
+
+test('shipping can be edited both ways without webhook configuration or changing redemption records', async () => {
+    for (const state of ['unused', 'processing', 'redeemed']) {
+        const f = fixture(); f.env.CDK_REDEMPTION_WEBHOOK_URL = '';
+        if (state === 'unused') { f.db.code.used_at = null; f.db.task = null; }
+        if (state === 'redeemed') f.db.code.manual_redeemed_at = 'original-redemption';
+        const before = structuredClone(f.db);
+        const input = { ...f.input, status: undefined, shipped: true, expectedStatus: state, expectedShipped: false };
+        assert.deepEqual(await f.update(input), { status: state, shipped: true, changed: true, redemptionChanged: false });
+        assert.equal(f.db.code.manual_redeemed_at, before.code.manual_redeemed_at);
+        assert.deepEqual(f.db.task, before.task);
+        assert.equal(f.db.events.length, 0);
+        const same = await f.update({ ...input, expectedShipped: true });
+        assert.equal(same.changed, false);
+        assert.equal(f.db.audits.length, 1);
+        await f.update({ ...input, shipped: false, expectedShipped: true });
+        assert.equal(f.db.code.shipped_at, null);
+        assert.equal(f.db.audits.length, 2);
+    }
+});
+
+test('stale edits and audit failures cannot partially change shipping, redemption or notifications', async () => {
+    const f = fixture();
+    for (const expected of [{ expectedStatus: 'unused' }, { expectedShipped: true }]) {
+        await assert.rejects(f.update({ ...f.input, shipped: true, ...expected }), /状态已发生变化/);
+        assert.equal(f.db.audits.length, 0);
+        assert.equal(f.db.events.length, 0);
+    }
+    f.failAudit(true);
+    const before = structuredClone(f.db);
+    await assert.rejects(f.update({ ...f.input, shipped: true }), /audit unavailable/);
+    assert.deepEqual(f.db, before);
 });
 
 test('competing updates share the payment lock and cannot replace the original audit or receipt', async () => {
@@ -196,38 +249,14 @@ test('admin status endpoint requires both tokens and records the authenticated o
     assert.match((await result.json()).message, /商城通知已入队/);
     assert.equal(f.db.code.manual_redeemed_by, 'operator@example.test');
     assert.equal((await fetch(url, { method: 'POST', headers, body: JSON.stringify({ status: 'unused', reason: 'invalid' }) })).status, 400);
-});
-
-test('status UI requires a reason and confirmation, prevents duplicate clicks, refreshes and escapes audit text', async () => {
-    const source = fs.readFileSync(path.join(__dirname, '../public/admin.js'), 'utf8');
-    const block = source.slice(source.indexOf('async function loadCdks('), source.indexOf('async function exportCdks('));
-    const nodes = new Map(), calls = [];
-    const $ = id => { if (!nodes.has(id)) nodes.set(id, {}); return nodes.get(id); };
-    let reason = '售后完成', confirmed = true, fail = false;
-    let code = { code: 'CODE-SUPPORT', status: 'processing' };
-    const button = { dataset: { cdkStatus: code.code }, disabled: false };
-    const request = async (url, body) => {
-        calls.push({ url, body });
-        if (!body) return [code];
-        assert.equal(button.disabled, true);
-        if (fail) throw Error('network');
-        code = { ...code, status: 'redeemed', manual_redeemed_at: '2026-10-26', manual_redemption_reason: '<script>bad</script>' };
-        return { message: 'queued' };
-    };
-    const api = new Function('$', 'request', 'escapeHtml', 'status', 'prompt', 'confirm', 'notice',
-        'let cdkPlanFilter="", cdkLoadSequence=0, cdkLoadedFilter=null; const cdkPlans={}, cardPlans={};\n' + block + '\nreturn {loadCdks,redeemCdkAfterSupport};')(
-        $, request, value => String(value ?? '').replaceAll('<', '&lt;').replaceAll('>', '&gt;'), value => value,
-        () => reason, () => confirmed, () => {});
-    await api.loadCdks(); assert.match($('cdkRows').innerHTML, /修改状态/);
-    reason = null; await api.redeemCdkAfterSupport(button); assert.equal(calls.length, 1);
-    reason = ' '; await assert.rejects(api.redeemCdkAfterSupport(button), /备注/);
-    reason = '售后完成'; confirmed = false; await api.redeemCdkAfterSupport(button); assert.equal(calls.length, 1);
-    confirmed = true; button.disabled = true; await api.redeemCdkAfterSupport(button); assert.equal(calls.length, 1);
-    button.disabled = false; fail = true; await assert.rejects(api.redeemCdkAfterSupport(button), /network/);
-    assert.equal(button.disabled, false);
-    fail = false; await api.redeemCdkAfterSupport(button);
-    assert.equal(button.disabled, false);
-    assert.deepEqual(calls.at(-2).body, { status: 'redeemed', reason: '售后完成' });
-    assert.match($('cdkRows').innerHTML, /人工售后核销/);
-    assert.doesNotMatch($('cdkRows').innerHTML, /<script>|修改状态/);
+    const shipping = await fetch(url, { method: 'POST', headers, body: JSON.stringify({
+        shipped: true, expected_status: 'redeemed', expected_shipped: false, reason: '人工出库', adminEmail: 'spoofed'
+    }) });
+    assert.equal(shipping.status, 200);
+    assert.equal((await shipping.json()).shipped, true);
+    assert.equal(f.db.audits.at(-1).adminEmail, 'operator@example.test');
+    assert.equal(f.db.events.length, 1, 'shipping must not enqueue another redemption receipt');
+    const stale = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ shipped: false, expected_shipped: false, reason: 'stale' }) });
+    assert.equal(stale.status, 409);
+    assert.equal(f.db.code.shipped_at, 'shipped-now');
 });

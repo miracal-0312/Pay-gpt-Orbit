@@ -132,6 +132,53 @@ test('admin CSV export requires both tokens, filters plans and includes rows bey
     assert.ok(pro.includes('"已核销"'));
     assert.equal(rows.at(-1).shipped, true);
     assert.equal(pro.trim().split('\r\n').length, 2);
+
+    // Sparse matches must advance past empty source pages, even beyond the UI cap.
+    rows[505].shipped = false;
+    rows[2100].shipped = false;
+    rows[1700].shipped = false;
+    rows[1700].status = 'processing';
+    const criteria = 'plan_type=plus&status=unused&shipped=false';
+    const matching = await (await fetch(base + '/api/admin/cdks?' + criteria, { headers })).json();
+    assert.deepEqual(matching.map(row => row.id), [rows[505].id, rows[2100].id]);
+    const beforeExport = shippedBatches.length;
+    const preview = await fetch(base + '/api/admin/cdks/export?' + criteria + '&format=secret&quantity=1&mark_shipped=false', { method: 'POST', headers });
+    assert.equal(preview.status, 200);
+    assert.equal(await preview.text(), `secret\r\n"${rows[505].code}"\r\n`);
+    assert.equal(shippedBatches.length, beforeExport);
+    assert.equal(rows[505].shipped, false);
+    const detail = await (await fetch(base + '/api/admin/cdks/export?' + criteria + '&format=detail&quantity=1&mark_shipped=false', { method: 'POST', headers })).text();
+    assert.ok(detail.includes('"未出库"'));
+    assert.ok(!detail.includes('"已出库"'));
+
+    for (const row of [rows[505], rows[2100]]) {
+        const selected = await fetch(base + '/api/admin/cdks/export?' + criteria + '&format=secret&quantity=1&mark_shipped=true', { method: 'POST', headers });
+        assert.equal(selected.status, 200);
+        assert.equal(await selected.text(), `secret\r\n"${row.code}"\r\n`);
+        assert.deepEqual(shippedBatches.at(-1), [row.id]);
+    }
+    assert.equal(rows[1700].shipped, false, 'occupied cards must not be exported as unused');
+    const empty = await fetch(base + '/api/admin/cdks/export?' + criteria, { method: 'POST', headers });
+    assert.equal(empty.status, 404);
+    assert.match((await empty.json()).message, /没有符合/);
+    assert.equal(shippedBatches.length, beforeExport + 2);
+
+    const occupied = await (await fetch(base + '/api/admin/cdks/export?plan_type=plus&status=processing&shipped=false&quantity=100&mark_shipped=false', { method: 'POST', headers })).text();
+    assert.equal(occupied.trim().split('\r\n').length, 2, 'export available matches when fewer than the requested count');
+    assert.ok(occupied.includes(rows[1700].code));
+    const redeemed = await (await fetch(base + '/api/admin/cdks?status=redeemed&shipped=true', { headers })).json();
+    assert.deepEqual(redeemed.map(row => row.id), [1]);
+    const escaped = await (await fetch(base + '/api/admin/cdks/export?plan_type=pro100&format=secret&mark_shipped=false', { method: 'POST', headers })).text();
+    assert.match(escaped, /"'=HYPERLINK\(""bad""\)"/);
+
+    const pageReads = requests.length;
+    for (const invalid of ['status=bad', 'shipped=0', 'format=txt', 'mark_shipped=yes', 'quantity=0', 'quantity=-1',
+        'quantity=1.5', 'quantity=100001', 'quantity=1e2', 'quantity=abc', 'quantity=1&quantity=2', 'status=unused&status=redeemed']) {
+        assert.equal((await fetch(base + '/api/admin/cdks/export?' + invalid, { method: 'POST', headers })).status, 400, invalid);
+    }
+    assert.equal((await fetch(base + '/api/admin/cdks?status=bad', { headers })).status, 400);
+    assert.equal(requests.length, pageReads, 'invalid options must not read or modify cards');
+    assert.equal(shippedBatches.length, beforeExport + 2);
 });
 
 test('CDK catalog and generation accept only live Plus and Pro plans', async t => {

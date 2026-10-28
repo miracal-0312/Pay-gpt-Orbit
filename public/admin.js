@@ -4,8 +4,9 @@ const TOKEN_KEY = 'plus_admin_token', SECONDARY_KEY = 'plus_admin_secondary_toke
 const cardPlans = { plus: 'Plus', pro100: 'Pro 100', pro200: 'Pro 200', pro500: 'Pro 500' };
 let cdkPlans = {};
 let loginUrl = '/admin-login', selected = 'overview', savedBaseUrl = '';
-let cdkPlanFilter = '', cdkLoadSequence = 0, cdkLoadedFilter = null;
-let generatedCdkBatch = null;
+let cdkPlanFilter = '', cdkLoadSequence = 0, cdkLoadedFilter = null, cdkLoadedCount = 0;
+let cdkExporting = false;
+let cdkEditing = null, cdkStatusSaving = false;
 let manualCatalog = { plans: [] }, manualOrders = [];
 let paymentRegionLoadSequence = 0;
 function notice(text, type = '') {
@@ -251,53 +252,79 @@ async function loadCdkPlans() {
         + filters.map(([type, name]) => `<button type="button" data-cdk-plan="${escapeHtml(type)}" aria-pressed="${cdkPlanFilter === type}">${escapeHtml(name)}</button>`).join('');
     for (const button of $('cdkFilters').querySelectorAll('button')) button.classList.toggle('active', button.dataset.cdkPlan === cdkPlanFilter);
 }
+function cdkListQuery() {
+    return new URLSearchParams({ plan_type: cdkPlanFilter, status: $('cdkStatusFilter').value, shipped: $('cdkShippedFilter').value }).toString();
+}
 async function loadCdks() {
-    const filter = cdkPlanFilter, sequence = ++cdkLoadSequence;
+    const filter = cdkPlanFilter, query = cdkListQuery(), sequence = ++cdkLoadSequence;
     cdkLoadedFilter = null;
     $('exportCdks').disabled = true;
     $('cdkListSummary').textContent = '正在加载卡密…';
-    const codes = await request(`/api/admin/cdks${filter ? `?plan_type=${encodeURIComponent(filter)}` : ''}`);
+    const codes = await request(`/api/admin/cdks?${query}`);
     if (sequence !== cdkLoadSequence) return;
-    $('cdkRows').innerHTML = codes.map(code => `<tr><td><code>${escapeHtml(code.code)}</code></td><td>${escapeHtml(code.plan_label || code.plan_type)}</td><td>${status(code.status)}${code.manual_redeemed_at ? `<br>人工售后核销<br>${escapeHtml(code.manual_redeemed_by)} · ${escapeHtml(code.manual_redeemed_at)}<br>${escapeHtml(code.manual_redemption_reason)}` : code.orbitcard_support_locked ? '<br>支付失败，已锁定；请人工售后' : code.orbitcard_balance_blocked ? '<br>账户余额不足，CDK 已锁定' : code.orbitcard_pending_confirmation ? '<br>结果待确认' : ''}</td><td>${code.shipped ? '已出库' : '未出库'}</td><td>${code.status === 'processing' ? `<button class="secondary" data-cdk-status="${escapeHtml(code.code)}">修改状态</button>` : !code.shipped && code.status === 'unused' ? `<button class="danger" data-delete-cdk="${escapeHtml(code.code)}">删除</button>` : '—'}</td></tr>`).join('') || '<tr><td colspan="5">暂无卡密</td></tr>';
+    $('cdkRows').innerHTML = codes.map(code => `<tr><td><code>${escapeHtml(code.code)}</code></td><td>${escapeHtml(code.plan_label || code.plan_type)}</td><td>${status(code.status)}${code.manual_redeemed_at ? `<br>人工售后核销<br>${escapeHtml(code.manual_redeemed_by)} · ${escapeHtml(code.manual_redeemed_at)}<br>${escapeHtml(code.manual_redemption_reason)}` : code.orbitcard_support_locked ? '<br>支付失败，已锁定；请人工售后' : code.orbitcard_balance_blocked ? '<br>账户余额不足，CDK 已锁定' : code.orbitcard_pending_confirmation ? '<br>结果待确认' : ''}</td><td>${code.shipped ? '已出库' : '未出库'}</td><td><button type="button" class="secondary" data-cdk-status="${escapeHtml(code.code)}" data-cdk-state="${escapeHtml(code.status)}" data-cdk-shipped="${code.shipped}">修改状态</button>${!code.shipped && code.status === 'unused' ? `<button class="danger" data-delete-cdk="${escapeHtml(code.code)}">删除</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="5">暂无卡密</td></tr>';
     $('cdkListSummary').textContent = `${filter ? (cdkPlans[filter] || cardPlans[filter] || filter) : '全部套餐'}：显示最近 ${codes.length} 条${codes.length === 2000 ? '（已达页面上限）' : ''}`;
-    cdkLoadedFilter = filter;
-    $('exportCdks').disabled = false;
+    cdkLoadedFilter = query;
+    cdkLoadedCount = codes.length;
+    $('exportCdks').disabled = cdkExporting || !codes.length;
 }
-async function redeemCdkAfterSupport(button) {
-    if (button.disabled) return;
-    const cdk = button.dataset.cdkStatus;
-    const reason = prompt(`将卡密 ${cdk} 修改为“已核销”。\n请填写人工售后处理备注（最多 255 字）：`);
-    if (reason === null) return;
-    if (!reason.trim() || reason.trim().length > 255) throw new Error('请填写 1–255 字的售后处理备注');
-    if (!confirm(`确认已完成该卡密的人工售后交付？\n卡密：${cdk}\n目标状态：已核销\n备注：${reason.trim()}\n确认后将通知商城，卡密不可再次充值。`)) return;
-    button.disabled = true;
+function editCdkStatus(button) {
+    if (cdkStatusSaving) return;
+    cdkEditing = { cdk: button.dataset.cdkStatus, status: button.dataset.cdkState, shipped: button.dataset.cdkShipped === 'true' };
+    const labels = { unused: '未使用', processing: '占用中', redeemed: '已核销' };
+    $('cdkStatusCode').textContent = cdkEditing.cdk;
+    $('cdkEditStatus').innerHTML = `<option value="${escapeHtml(cdkEditing.status)}">${labels[cdkEditing.status]}（当前）</option>`
+        + (cdkEditing.status !== 'redeemed' ? '<option value="redeemed">已核销</option>' : '');
+    $('cdkEditStatus').value = cdkEditing.status;
+    $('cdkEditStatus').disabled = cdkEditing.status === 'redeemed';
+    $('cdkEditShipped').value = String(cdkEditing.shipped);
+    $('cdkStatusReason').value = '';
+    $('cdkStatusError').textContent = '';
+    $('cdkStatusDialog').showModal();
+}
+async function saveCdkStatus() {
+    if (!cdkEditing || cdkStatusSaving) return;
+    const editing = cdkEditing, targetStatus = $('cdkEditStatus').value;
+    const shipped = $('cdkEditShipped').value === 'true', reason = $('cdkStatusReason').value.trim();
+    $('cdkStatusError').textContent = '';
+    if (!reason || reason.length > 255) { $('cdkStatusError').textContent = '请填写 1–255 字的修改备注'; return; }
+    const body = { reason, expected_status: editing.status, expected_shipped: editing.shipped };
+    if (targetStatus !== editing.status) body.status = targetStatus;
+    if (shipped !== editing.shipped) body.shipped = shipped;
+    if (body.status === undefined && body.shipped === undefined) { $('cdkStatusError').textContent = '状态未变化，请调整后保存'; return; }
+    cdkStatusSaving = true;
+    $('cdkStatusFields').disabled = true;
     try {
-        const result = await request(`/api/admin/cdks/${encodeURIComponent(cdk)}/status`, { status: 'redeemed', reason: reason.trim() });
+        const result = await request(`/api/admin/cdks/${encodeURIComponent(editing.cdk)}/status`, body);
+        $('cdkStatusDialog').close();
+        cdkEditing = null;
         notice(result.message, 'success');
-        await loadCdks();
-    } finally { button.disabled = false; }
-}
-function exportGeneratedCdks() {
-    if (!generatedCdkBatch?.cdks.length) throw new Error('请先生成卡密');
-    const { cdks, plan, createdAt } = generatedCdkBatch;
-    const csv = '\uFEFFsecret\r\n' + cdks.map(code => '"' + String(code).replace(/"/g, '""') + '"').join('\r\n') + '\r\n';
-    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `cdks-${plan.replace(/[^a-zA-Z0-9_-]/g, '_')}-${cdks.length}-${createdAt}.csv`;
-    document.body.append(link);
-    try { link.click(); }
-    finally { link.remove(); setTimeout(() => URL.revokeObjectURL(url), 60000); }
-    notice(`已开始下载本次生成的 ${cdks.length} 个 CDK，请保存文件`, 'success');
+        try { await loadCdks(); }
+        catch (error) { notice(`状态已保存，但列表刷新失败：${error.message}`, 'error'); }
+    } catch (error) {
+        $('cdkStatusError').textContent = error.message;
+    } finally { cdkStatusSaving = false; $('cdkStatusFields').disabled = false; }
 }
 async function exportCdks() {
     const button = $('exportCdks'), filter = cdkPlanFilter;
+    if (cdkExporting) return;
+    const query = cdkListQuery();
+    if (cdkLoadedFilter !== query) throw new Error('请先加载当前筛选下的卡密列表');
+    const quantity = $('cdkExportQuantity');
+    if (!quantity.checkValidity()) { quantity.reportValidity(); throw new Error('导出数量须为 1–100000 的整数或留空'); }
+    const format = $('cdkExportFormat').value, markShipped = $('cdkMarkShipped').checked;
+    const params = new URLSearchParams(query);
+    params.set('quantity', quantity.value);
+    params.set('format', format);
+    params.set('mark_shipped', String(markShipped));
     const token = localStorage.getItem(TOKEN_KEY), secondary = localStorage.getItem(SECONDARY_KEY);
     if (!token) { logout(); throw new Error('请先登录'); }
     if (!secondary) throw new Error('请先通过二级验证');
+    cdkExporting = true;
     button.disabled = true;
+    button.textContent = '正在导出…';
     try {
-        const response = await fetch(`/api/admin/cdks/export${filter ? `?plan_type=${encodeURIComponent(filter)}` : ''}`, {
+        const response = await fetch(`/api/admin/cdks/export?${params}`, {
             method: 'POST',
             headers: { Authorization: `Bearer ${token}`, 'x-admin-secondary-token': secondary }
         });
@@ -313,15 +340,20 @@ async function exportCdks() {
         const url = URL.createObjectURL(await response.blob());
         const link = document.createElement('a');
         link.href = url;
-        link.download = `cdks-${filter || 'all'}-${new Date().toISOString().slice(0, 10)}.csv`;
+        link.download = `cdks-${filter || 'all'}-${format}-${new Date().toISOString().slice(0, 10)}.csv`;
         document.body.append(link);
         link.click();
         link.remove();
         setTimeout(() => URL.revokeObjectURL(url), 60000);
-        if (filter === cdkPlanFilter) await loadCdks();
-        notice(`${filter ? (cdkPlans[filter] || cardPlans[filter] || filter) : '全部套餐'}的 CDK 已导出并标记出库`, 'success');
+        notice(`${filter ? (cdkPlans[filter] || cardPlans[filter] || filter) : '全部套餐'}的 CDK 已按配置导出${markShipped ? '并标记出库' : '，出库状态未变更'}`, 'success');
+        if (query === cdkListQuery()) {
+            try { await loadCdks(); }
+            catch (error) { notice(`文件已导出，但列表刷新失败：${error.message}。请重新加载列表。`, 'error'); }
+        }
     } finally {
-        button.disabled = !localStorage.getItem(SECONDARY_KEY) || cdkLoadedFilter !== cdkPlanFilter;
+        cdkExporting = false;
+        button.textContent = '按配置导出 CSV';
+        button.disabled = !localStorage.getItem(SECONDARY_KEY) || !cdkLoadedCount || cdkLoadedFilter !== cdkListQuery();
     }
 }
 async function loadLogs() {
@@ -380,13 +412,8 @@ form('unlockForm', async () => {
 form('generateForm', async () => {
     const plan = $('planType').value;
     const data = await request('/api/admin/cdks/generate', { count: Number($('cdkCount').value), plan_type: plan });
-    generatedCdkBatch = { cdks: [...data.cdks], plan, createdAt: new Date().toISOString().replace(/[:.]/g, '-') };
-    $('generated').hidden = false;
-    $('generatedSummary').textContent = `已生成 ${cdkPlans[plan] || cardPlans[plan] || plan} 卡密 ${data.cdks.length} 个，可导出 CSV 后在 dujiao-next 商城导入。此按钮保留最近一次成功生成的批次，请在刷新页面前导出保存。`;
-    $('exportGeneratedCdks').disabled = !data.cdks.length;
-    notice(data.message, 'success'); await loadCdks();
+    notice(`${data.message}，请在下方卡密列表配置导出。`, 'success'); await loadCdks();
 });
-$('exportGeneratedCdks').onclick = () => perform(exportGeneratedCdks);
 form('importForm', async () => {
     const data = await request('/api/admin/cdks/import', { cdks: $('cdkImport').value.split(/[\s,;]+/).filter(Boolean), plan_type: $('planType').value });
     $('cdkImport').value = ''; notice(data.message, 'success'); await loadCdks();
@@ -555,6 +582,10 @@ $('testTelegram').onclick = () => perform(async () => notice((await request('/ap
 $('loadLoginLogs').onclick = () => perform(async () => { const data = await request('/api/admin/login-logs?limit=100'); $('loginLogs').textContent = JSON.stringify(data.logs, null, 2); });
 $('loadCdks').onclick = () => perform(loadCdks); $('loadLogs').onclick = () => perform(loadLogs);
 $('exportCdks').onclick = () => perform(exportCdks);
+$('cdkStatusForm').addEventListener('submit', event => { event.preventDefault(); perform(saveCdkStatus); });
+$('cancelCdkStatus').onclick = () => { if (!cdkStatusSaving) { $('cdkStatusDialog').close(); cdkEditing = null; } };
+$('cdkStatusDialog').addEventListener('cancel', event => { if (cdkStatusSaving) event.preventDefault(); else cdkEditing = null; });
+for (const id of ['cdkStatusFilter', 'cdkShippedFilter']) $(id).addEventListener('change', () => perform(loadCdks));
 $('cdkFilters').addEventListener('click', event => {
     const button = event.target.closest('[data-cdk-plan]');
     if (!button || !(button.dataset.cdkPlan === '' || Object.hasOwn(cdkPlans, button.dataset.cdkPlan) || Object.hasOwn(cardPlans, button.dataset.cdkPlan))) return;
@@ -639,7 +670,7 @@ document.addEventListener('click', event => {
         const url = URL.createObjectURL(await response.blob()), link = document.createElement('a'); link.href = url; link.download = `task-${job}.jsonl`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
     });
     const changeStatus = event.target.closest('[data-cdk-status]');
-    if (changeStatus) perform(() => redeemCdkAfterSupport(changeStatus));
+    if (changeStatus) editCdkStatus(changeStatus);
     const remove = event.target.closest('[data-delete-cdk]');
     if (remove && confirm(`确定删除未使用的卡密 ${remove.dataset.deleteCdk}？`)) perform(async () => { await request(`/api/admin/cdks/${encodeURIComponent(remove.dataset.deleteCdk)}`, undefined, 'DELETE'); await loadCdks(); });
 });

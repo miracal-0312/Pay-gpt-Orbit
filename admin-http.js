@@ -910,13 +910,49 @@ function cdkCsvLine(code) {
     return [code.code, code.plan_label, state, code.shipped ? '已出库' : '未出库', created].map(csvCell).join(',') + '\r\n';
 }
 
+function cdkSelection(req, res, exporting = false) {
+    const status = req.query.status ?? '', shipped = req.query.shipped ?? '';
+    const format = req.query.format ?? 'detail', quantity = req.query.quantity ?? '';
+    const markShipped = req.query.mark_shipped ?? 'true';
+    if (!['', 'unused', 'processing', 'redeemed'].includes(status)
+        || !['', 'true', 'false'].includes(shipped)
+        || (exporting && (!['detail', 'secret'].includes(format)
+            || !['true', 'false'].includes(markShipped)
+            || typeof quantity !== 'string'
+            || (quantity !== '' && (!/^[1-9]\d*$/.test(quantity) || Number(quantity) > 100000))))) {
+        res.status(400).json({ success: false, message: '无效的卡密筛选或导出配置，数量须为 1–100000 的整数或留空' });
+        return null;
+    }
+    return { status, shipped, format, limit: exporting && quantity ? Number(quantity) : Infinity, markShipped: markShipped === 'true' };
+}
+
+// Filter mapped states so export and list use the same redemption/occupation rules.
+// Advance using the source page, including pages containing no matching cards.
+async function* selectedCdkPages(planType, selection) {
+    let beforeId = null, remaining = selection.limit;
+    while (remaining > 0) {
+        const page = await store.listCdksExportPage(planType, beforeId);
+        if (!page.length) return;
+        const matches = page.filter(code => (!selection.status || code.status === selection.status)
+            && (!selection.shipped || code.shipped === (selection.shipped === 'true'))).slice(0, remaining);
+        if (matches.length) { remaining -= matches.length; yield matches; }
+        if (page.length < 500) return;
+        beforeId = page.at(-1).id;
+    }
+}
+
 app.get('/api/admin/cdks', requireSecondaryAuth, async (req, res) => {
     const planType = cdkPlanFilter(req, res);
     if (planType === null) return;
+    const selection = cdkSelection(req, res);
+    if (!selection) return;
     try {
         await ensureStoreReady();
         res.set('Cache-Control', 'no-store');
-        res.json(await store.listCdks(planType));
+        if (!selection.status && !selection.shipped) return res.json(await store.listCdks(planType));
+        const codes = [];
+        for await (const page of selectedCdkPages(planType, { ...selection, limit: 2000 })) codes.push(...page);
+        res.json(codes);
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
     }
@@ -924,30 +960,34 @@ app.get('/api/admin/cdks', requireSecondaryAuth, async (req, res) => {
 app.post('/api/admin/cdks/export', requireSecondaryAuth, async (req, res) => {
     const planType = cdkPlanFilter(req, res);
     if (planType === null) return;
+    const selection = cdkSelection(req, res, true);
+    if (!selection) return;
     try {
         await ensureStoreReady();
-        let beforeId = null;
         const exportedIds = [];
-        let page = await store.listCdksExportPage(planType, beforeId);
-        const name = `cdks-${planType || 'all'}-${new Date().toISOString().slice(0, 10)}.csv`;
+        const pages = selectedCdkPages(planType, selection);
+        let next = await pages.next();
+        if (next.done) return res.status(404).json({ success: false, message: '没有符合当前配置的卡密，请调整筛选条件' });
+        const name = `cdks-${planType || 'all'}-${selection.format}-${new Date().toISOString().slice(0, 10)}.csv`;
         res.set({ 'Cache-Control': 'no-store', 'Content-Type': 'text/csv; charset=utf-8',
             'Content-Disposition': `attachment; filename="${name}"` });
-        res.write('\uFEFF' + ['卡密', '套餐', '状态', '出库', '创建时间'].map(csvCell).join(',') + '\r\n');
-        while (page.length && !res.destroyed) {
+        res.write('\uFEFF' + (selection.format === 'secret' ? 'secret' : ['卡密', '套餐', '状态', '出库', '创建时间'].map(csvCell).join(',')) + '\r\n');
+        while (!next.done && !res.destroyed) {
+            const page = next.value;
             exportedIds.push(...page.map(code => code.id));
-            const chunk = page.map(code => cdkCsvLine({ ...code, shipped: true })).join('');
+            const chunk = page.map(code => selection.format === 'secret' ? csvCell(code.code) + '\r\n'
+                : cdkCsvLine({ ...code, shipped: selection.markShipped || code.shipped })).join('');
             if (!res.write(chunk)) {
                 await new Promise(resolve => {
                     const done = () => { res.off('drain', done); res.off('close', done); resolve(); };
                     res.once('drain', done); res.once('close', done);
                 });
             }
-            if (res.destroyed || page.length < 500) break;
-            beforeId = page.at(-1).id;
-            page = await store.listCdksExportPage(planType, beforeId);
+            if (res.destroyed) break;
+            next = await pages.next();
         }
         if (!res.destroyed) {
-            await store.markCdksShipped(exportedIds);
+            if (selection.markShipped) await store.markCdksShipped(exportedIds);
             res.end();
         }
     } catch (error) {
@@ -996,11 +1036,12 @@ app.post('/api/admin/cdks/:cdk/status', requireSecondaryAuth, async (req, res) =
     try {
         await ensureStoreReady();
         const result = await store.updateCdkStatus({ cdk: req.params.cdk, status: req.body?.status,
+            shipped: req.body?.shipped, expectedStatus: req.body?.expected_status, expectedShipped: req.body?.expected_shipped,
             reason: req.body?.reason, adminEmail: req.admin.email });
         res.set('Cache-Control', 'no-store');
-        res.json({ success: true, ...result, message: result.changed
-            ? '卡密已修改为已核销，商城通知已入队；发送失败将自动重试'
-            : '卡密已经核销，无需重复修改' });
+        res.json({ success: true, ...result, message: result.redemptionChanged
+            ? '卡密状态已保存并核销，商城通知已入队；最多发送 3 次（含首次），失败记录保留'
+            : result.changed ? '卡密状态已保存' : '卡密状态未变化，无需重复修改' });
     } catch (error) {
         res.status(error.status || 500).json({ success: false, message: error.message });
     }
