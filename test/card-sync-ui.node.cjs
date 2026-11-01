@@ -26,6 +26,17 @@ test('local refresh labels cached balances and does not show green live ACTIVE',
     assert.doesNotMatch(f.$('cardRows').innerHTML,/card-provider-status active/);
     assert.match(f.$('cardSyncState').textContent,/不会调用平台/);
 });
+
+test('deleted and unavailable cards are omitted from rows and history reminders after local refresh',async()=>{
+    for(const status of ['DELETED','UNAVAILABLE']) {
+        const f=setup(()=>{},false);
+        f.card.provider_status=status;
+        await f.api.loadCards();
+        assert.match(f.$('cardRows').innerHTML,/尚无卡片/);
+        assert.equal(f.$('cardHistoryState').hidden,true);
+        assert.doesNotMatch(f.$('cardRows').innerHTML,/data-card-transactions/);
+    }
+});
 test('failed platform sync retains visible warning with old balances and re-enables retry',async()=>{
     const f=setup(()=>{throw new Error('detail unavailable');});
     await assert.rejects(f.api.synchronizeCards(),/detail unavailable/);

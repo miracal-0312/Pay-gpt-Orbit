@@ -202,6 +202,7 @@ async function saveCardUsage(button) {
 }
 async function loadCards(sync = null) {
     const data = await request('/api/admin/orbitcard/cards');
+    data.cards = data.cards.filter(card => !['DELETED', 'UNAVAILABLE'].includes(card.provider_status));
     const currentCardId = $('transactionCardId').value;
     $('transactionCardId').replaceChildren(new Option('请选择平台卡片', ''));
     for (const card of data.cards) $('transactionCardId').add(new Option(`${card.card_id} / ${card.last4 ? `****${card.last4}` : '尾号未提供'}`, card.card_id));
@@ -212,7 +213,7 @@ async function loadCards(sync = null) {
     $('cardHistoryState').innerHTML = unconfirmed.length
         ? `<p>本地记录有 ${unconfirmed.length} 张卡待登记历史次数，尚不能参与自动选卡。请同步平台卡片、核对使用记录后如实填写。</p><div class="row">${unconfirmed.slice(0,20).map(card => `<button type="button" class="secondary" data-open-card-history="${escapeHtml(card.card_id)}">登记卡 ${escapeHtml(card.card_id)}</button>`).join('')}</div>${unconfirmed.length > 20 ? '<p>其余待登记卡片请在下方列表查看。</p>' : ''}` : '';
     $('cardSyncState').textContent = sync?.failed ? '平台同步失败，下面显示旧的本地快照，不能用于确认当前状态和余额。'
-        : sync?.checked_at ? `查询完成：${sync.checked_at}，同步 ${sync.count} 张，详情读取失败 ${sync.failed_ids.length} 张。数值为本次查询时的快照。`
+        : sync?.checked_at ? `查询完成：${sync.checked_at}，同步 ${sync.count} 张，详情读取失败 ${sync.failed_ids.length} 张，已移出列表 ${(sync.removed_ids || []).length} 张。数值为本次查询时的快照。`
             : '当前显示本地快照。点击“同步平台卡片”查询当前状态和余额；“刷新本地记录”不会调用平台。';
     $('issueRows').innerHTML = data.issues.map(issue => `<tr><td>${escapeHtml(issue.created_at)}<br><code>${escapeHtml(issue.issue_key)}</code></td><td>${escapeHtml(issue.product_code)}<br>${escapeHtml(issue.amount)}</td><td>${escapeHtml(cardPlans[issue.plan_type] || issue.plan_type)} / ${escapeHtml(issue.state)}<br>${escapeHtml(issue.provider_status || '')}<br>${escapeHtml(issue.message)}</td><td>${escapeHtml(issue.order_no || '待返回')}<br>${escapeHtml(issue.card_id || '待返回')}</td></tr>`).join('') || '<tr><td colspan="4">暂无开卡申请</td></tr>';
     $('fundingRows').innerHTML=(data.fundings || []).map(funding => `<tr><td>${escapeHtml(funding.created_at)}<br><code>${escapeHtml(funding.job_key)}</code></td><td>${escapeHtml(funding.card_id)}<br>${escapeHtml(funding.amount)} USD</td><td>${escapeHtml(funding.state)} / ${escapeHtml(funding.provider_status)}<br>${escapeHtml(funding.order_no || funding.funding_key)}<br>${escapeHtml(funding.message)}</td><td>${escapeHtml(funding.fee_snapshot || '待确认')}<br>目标余额：${escapeHtml(funding.target_balance)}</td></tr>`).join('') || '<tr><td colspan="4">暂无卡片补款</td></tr>';

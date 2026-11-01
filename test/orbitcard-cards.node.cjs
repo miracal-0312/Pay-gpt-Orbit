@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
@@ -89,6 +89,45 @@ function serviceFixture(overrides={}) {
     const service=make({store:f.store,audit:event => events.push(event),sleep:async ms => {clock+=ms;},now:() => clock,maxIssuePolls:1});
     return {...f,calls,events,api,service,advance:(ms=60000) => {clock+=ms;},setCards:cards => {providerCards=cards;},setAccount:balance => {accountBalance=balance;}};
 }
+
+test('sync retires deleted and absent cards without reading deleted details or erasing history',async()=>{
+    const f=serviceFixture();
+    const a=await f.addCard(42),b=await f.addCard(43);
+    f.db.cards[0].successful_plus=2;
+    f.db.cards[1].active_job='unresolved-order';
+    f.setCards([{...a,status:'DELETED'}]);
+    const result=await f.service.synchronize(cfg);
+    assert.deepEqual(result.failed_ids,[]);
+    assert.deepEqual(result.removed_ids,[42,43]);
+    assert.ok(!f.calls.some(call=>call.operation==='cardDetail'));
+    assert.equal(f.db.cards[0].provider_status,'DELETED');
+    assert.equal(f.db.cards[0].successful_plus,2);
+    assert.equal(f.db.cards[1].provider_status,'UNAVAILABLE');
+    assert.equal(f.db.cards[1].active_job,'unresolved-order');
+    assert.equal(f.db.cards[1].balance,null);
+    f.setCards([{...b,status:'ACTIVE'}]);
+    await f.service.synchronize(cfg);
+    assert.equal(f.db.cards[1].provider_status,'ACTIVE');
+    assert.equal(f.db.cards[1].active_job,'unresolved-order');
+});
+
+test('failed or malformed list never retires local cards',async()=>{
+    for(const response of [{success:false,status:403},{success:true,data:{list:[],total:1}},
+        {success:true,data:{list:[],total:'invalid'}}]) {
+        const f=serviceFixture({getCardList:async()=>response});
+        await f.addCard(42);
+        await assert.rejects(f.service.synchronize(cfg));
+        assert.equal(f.db.cards[0].provider_status,'ACTIVE');
+    }
+});
+
+test('deleted unconfirmed cards do not block allocation or trigger detail reads',async()=>{
+    const f=serviceFixture(),a=await f.addCard(42,false),b=await f.addCard(43);
+    f.setCards([{...a,status:'DELETED'},{...b,status:'ACTIVE',balance:50}]);
+    const task=await f.claim();
+    assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),43);
+    assert.deepEqual(f.calls.filter(call=>call.operation==='cardDetail').map(call=>call.body.card_id),[43]);
+});
 
 test('handed-off tasks never enter allocation or resume an unknown card application', async () => {
     for (const state of ['manual', 'support_locked', 'card_pending', 'funding_pending']) {

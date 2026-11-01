@@ -143,7 +143,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
             || !row.history_confirmed || Number(row[`successful_${plan}`])>=LIMITS[plan])) {
             throw new CardPreparationError('原订单已预占卡片但平台列表或次数不一致，禁止换卡或重复开卡');
         }
-        const relevant=saved.filter(row => live.has(Number(row.card_id)) && !excluded.has(Number(row.card_id))
+        const relevant=saved.filter(row => live.has(Number(row.card_id)) && live.get(Number(row.card_id)).provider_status !== 'DELETED' && !excluded.has(Number(row.card_id))
             && row.history_confirmed && Number(row[`successful_${plan}`]) < LIMITS[plan]
             && (!row.active_job || row.active_job===jobKey));
         const details=new Map();
@@ -266,8 +266,13 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
         return store.withCardAllocationLock(cfg.base_url, async locked => {
             try {
                 const listed = await cardsApi.listCards(cfg);
-                const detailed = await cardsApi.cardDetailsInBatches(cfg,listed.map(card=>card.card_id),{allowPartial:true});
+                const deleted = listed.filter(card => card.provider_status === 'DELETED');
+                const readable = listed.filter(card => card.provider_status !== 'DELETED');
+                const detailed = await cardsApi.cardDetailsInBatches(cfg,readable.map(card=>card.card_id),{allowPartial:true});
                 const live = new Map(listed.map(card => [card.card_id, card]));
+                // Absence from a complete list means unavailable, not proven deletion.
+                // Retain quotas and reservations for reconciliation of historical orders.
+                const missing = (await locked.listCards()).filter(card => !live.has(Number(card.card_id)));
                 // List metadata can fill identification fields, never the detail balance/status.
                 for (const card of detailed) {
                     card.product_code ||= live.get(card.card_id)?.product_code || '';
@@ -275,11 +280,17 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
                     card.last4 ||= live.get(card.card_id)?.last4 || '';
                 }
                 await locked.syncCards(detailed);
+                await locked.syncCards([
+                    ...deleted.map(card => ({...card, balance:null})),
+                    ...missing.map(card => ({...card, provider_status:card.provider_status === 'DELETED' ? 'DELETED' : 'UNAVAILABLE',
+                        bin:card.card_bin, balance:null}))
+                ]);
                 const confirmed = new Set(detailed.map(card => card.card_id));
                 const result = { count: detailed.length, listed_ids: listed.map(card => card.card_id),
-                    synced_ids: [...confirmed], failed_ids: listed.filter(card => !confirmed.has(card.card_id)).map(card => card.card_id),
+                    synced_ids: [...confirmed], failed_ids: readable.filter(card => !confirmed.has(card.card_id)).map(card => card.card_id),
+                    removed_ids: [...new Set([...deleted, ...missing, ...detailed.filter(card => card.provider_status === 'DELETED')].map(card => Number(card.card_id)))],
                     checked_at: new Date(now()).toISOString() };
-                record('', 'cards_synchronized', '已同步可读取的平台卡片摘要；缺失详情保留本地快照并标记未同步', result);
+                record('', 'cards_synchronized', '已同步平台卡片摘要，注销及列表缺失卡片已停用；其他缺失详情保留本地快照并标记未同步', result);
                 return result;
             } catch (error) {
                 record('', 'cards_sync_failed', '平台卡片同步失败，本地快照未确认，请勿视为实时余额', {
