@@ -14,7 +14,7 @@ const app = express();
 const activeJobs = new Set();
 const clients = new Map();
 const activeChallenges = new Map();
-let ready = null, draining = false, recoveryTimer = null, server, wss;
+let ready = null, draining = false, recoveryTimer = null, stopLogCleanup = null, server, wss;
 const port = Number(process.env.PORT || 3000);
 function ensureStoreReady() {
     if (!ready) ready = store.ensureReady().catch(error => { ready = null; throw error; });
@@ -170,12 +170,16 @@ async function start() {
     tick();
     recoveryTimer = setInterval(tick, 5000);
     recoveryTimer.unref();
+    stopLogCleanup = require('./log-retention').scheduleDailyCleanup(runtimeLog.cleanup, {
+        onError: error => console.error('日志保留清理失败：', error.message)
+    });
 }
 
 async function shutdown() {
     if (draining) return;
     draining = true;
     clearInterval(recoveryTimer);
+    stopLogCleanup?.();
     if (wss) for (const ws of wss.clients) ws.close(1001, 'Restarting');
     server?.close();
     const timer = setTimeout(() => process.exit(0), 60000);

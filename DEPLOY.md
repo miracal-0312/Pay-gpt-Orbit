@@ -99,18 +99,23 @@ docker compose up -d --force-recreate app
 
 `docker compose restart app` 不会注入新的环境值。已有 MySQL 数据卷的内部账号密码也不会因修改 `.env` 自动轮换。
 
-Compose 只挂载 `${APP_DATA_DIR:-./data}` 到 `/app/data`，审计日志在其中的 `logs`。源码从镜像加载；只更新宿主机代码而不重建应用镜像不会更新正在运行的代码。
+Compose 保留 `${APP_DATA_DIR:-./data}` 到 `/app/data` 的旧数据挂载，新增 `${APP_LOG_DIR:-/var/log/pay-gpt-orbit}` 到容器 `/var/log/pay-gpt-orbit` 的独立日志挂载。Linux 默认宿主路径在系统盘；Windows Docker 请将 `APP_LOG_DIR` 设置为 `C:/ProgramData/Pay-gpt-Orbit/logs`（以实际系统盘为准）。源码从镜像加载；只更新宿主机代码而不重建应用镜像不会更新正在运行的代码。
 
-`TASK_LOG_DIR` 仅用于裸机自定义日志路径；Compose 固定使用 `/app/data/logs`。部署账号需要能创建并追加文件。备份数据库和数据目录，监控磁盘空间；Docker 控制台日志轮转不会删除任务 JSONL 历史。
+`TASK_LOG_DIR` 可覆盖裸机日志路径；留空时 Linux 默认 `/var/log/pay-gpt-orbit`，Windows 默认系统盘的 `ProgramData\Pay-gpt-Orbit\logs`。Compose 容器内固定使用 `/var/log/pay-gpt-orbit`，宿主位置由 `APP_LOG_DIR` 指定。部署账号需要能创建、追加、替换和删除该目录中的文件。每个应用实例使用独立日志目录，不能由多个进程共同写入同一目录。
+
+日志按北京时间的自然日分组，保留当天及之前 14 天，共 15 天。运行日志为根目录的 `runtime-YYYY-MM-DD.jsonl`；订单日志为 `YYYY-MM-DD/task-订单编号.jsonl`。程序在每天零点直接按文件名/日期目录删除过期日期的日志，不每小时检查，不解析日志内容，也不重写日志。启动时补清理停机期间过期的日志一次，然后等待下一个北京时间零点；清理失败记录错误并在下个零点再试。后台支持跨天翻页及合并下载，过期日期删除后自动重置翻页位置。清理只删除本程序命名的日志文件和清空后的日期目录，保留其他文件及数据库业务记录。Docker 控制台日志仍按容量轮转。
+
+升级前先停止应用，将旧 `${APP_DATA_DIR:-./data}/logs` 下的 `runtime-*.jsonl` 和 `task-*.jsonl` 文件保留修改时间复制到新的空日志目录，再重建启动；新目录必须可写。不要把已有同名文件直接覆盖。旧版未分天的 `task-*.jsonl` 不再追加写入，兼容读取，并按文件最后修改日期整份过期删除；旧运行日志按文件名日期删除。确认迁移成功后再按备份策略处理旧目录；旧目录不会被程序自动删除。
 
 旧镜像和构建缓存不会因换用轻量镜像自动消失。应用确认运行后，可先用 `docker system df` 查看占用，再按实际镜像和容器引用情况制定清理方案。
 
 ## 单独调试一套环境
 
-另一套环境必须同时隔离项目名、容器名、端口和数据目录。只改容器名仍会发生端口冲突或共享日志。示例：
+另一套环境必须同时隔离项目名、容器名、端口、数据目录和日志目录。只改容器名仍会发生端口冲突或共享日志。示例：
 
 ```bash
 PORT=3001 MYSQL_PORT=3311 APP_DATA_DIR=./data-isolated \
+APP_LOG_DIR=/var/log/pay-gpt-orbit-isolated \
 APP_CONTAINER_NAME=pay-gpt-orbit-isolated-app \
 MYSQL_CONTAINER_NAME=pay-gpt-orbit-isolated-mysql \
 docker compose -p pay-gpt-orbit-isolated up -d --build

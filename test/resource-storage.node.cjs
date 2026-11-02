@@ -20,6 +20,9 @@ test('database query pool cannot have an unlimited queue through invalid configu
         core.getPool(); core.getPool();
         assert.equal(config.connectionLimit, env.DB_POOL_LIMIT === '8' ? 8 : 20);
         assert.equal(config.queueLimit, env.DB_QUEUE_LIMIT === '24' ? 24 : 100);
+        assert.equal(config.maxIdle, Math.min(5, config.connectionLimit));
+        assert.equal(config.idleTimeout, 60000);
+        assert.equal(config.maxPreparedStatements, 256);
     }
 });
 

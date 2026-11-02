@@ -37,7 +37,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3000
-      TASK_LOG_DIR: /app/data/logs
+      TASK_LOG_DIR: /var/log/pay-gpt-orbit
       DB_HOST: mysql
       DB_PORT: 3306
       DB_USER: root
@@ -46,6 +46,10 @@ services:
       DB_POOL_LIMIT: ${DB_POOL_LIMIT:-20}
       DB_QUEUE_LIMIT: ${DB_QUEUE_LIMIT:-100}
       DB_LOCK_LIMIT: ${DB_LOCK_LIMIT:-32}
+      DB_MAX_IDLE: ${DB_MAX_IDLE:-5}
+      DB_STATEMENT_CACHE_LIMIT: ${DB_STATEMENT_CACHE_LIMIT:-256}
+      LOG_CACHE_ENTRIES: ${LOG_CACHE_ENTRIES:-2000}
+      LOG_CACHE_BYTES: ${LOG_CACHE_BYTES:-4194304}
       JSON_BODY_LIMIT: ${JSON_BODY_LIMIT:-256kb}
       TRUST_PROXY: ${TRUST_PROXY:-}
       API_REQUESTS_PER_MINUTE: ${API_REQUESTS_PER_MINUTE:-180}
@@ -70,6 +74,7 @@ services:
       CDK_REDEMPTION_WEBHOOK_SECRET: ${CDK_REDEMPTION_WEBHOOK_SECRET:-}
     volumes:
       - ${APP_DATA_DIR:-./data}:/app/data
+      - ${APP_LOG_DIR:-/var/log/pay-gpt-orbit}:/var/log/pay-gpt-orbit
     logging:
       driver: json-file
       options:

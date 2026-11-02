@@ -2,7 +2,6 @@
 'use strict';
 const express = require('express');
 const path = require('node:path');
-const fs = require('node:fs');
 const crypto = require('node:crypto');
 const adminAuth = require('./admin-auth');
 const gptApi = require('./orbitcard-client');
@@ -323,7 +322,7 @@ app.get('/api/admin/runtime-logs', handle((req, res) => {
 }));
 app.post('/api/admin/runtime-logs/clear', handle((req, res) => {
     runtimeLog.clear();
-    runtimeLog.push({ jobKey: '', level: 'system', source: 'server', text: '运行日志显示缓存已清空，磁盘历史保留' });
+    runtimeLog.push({ jobKey: '', level: 'system', source: 'server', text: '运行日志显示缓存已清空，磁盘日志保留最近 15 天' });
     res.json({ success: true, message: '显示缓存已清空，持久化日志保留' });
 }));
 app.get('/api/admin/session', (req, res) => {
@@ -528,13 +527,11 @@ app.post('/api/admin/telegram', handle(async (req, res) => {
     });
     res.json({ success: true, message: 'Telegram 通知配置已保存' });
 }));
-app.get('/api/admin/task-logs/:jobKey/audit', (req, res) => {
+app.get('/api/admin/task-logs/:jobKey/audit', async (req, res) => {
     try {
-        const file = runtimeLog.taskFile(req.params.jobKey);
-        if (!fs.existsSync(file)) return res.status(404).json({ success: false, message: '此任务没有持久化日志；升级前的历史无法补录' });
-        res.set('Cache-Control', 'no-store');
-        return res.download(file, `task-${req.params.jobKey}.jsonl`);
-    } catch (_) {
+        await runtimeLog.downloadTask(req.params.jobKey, res);
+    } catch (error) {
+        if (res.headersSent) return res.destroy(error);
         return res.status(400).json({ success: false, message: '无效的任务日志标识' });
     }
 });

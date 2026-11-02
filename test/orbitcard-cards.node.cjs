@@ -4,6 +4,12 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
 const {createRequire}=require('node:module');
+const logDir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'orbit-card-logs-'));
+process.env.TASK_LOG_DIR = logDir;
+require('node:test').after(() => {
+    assert.ok(path.basename(logDir).startsWith('orbit-card-logs-'));
+    fs.rmSync(logDir, { recursive: true, force: true });
+});
 const fixture=require('./helpers/card-db.cjs');
 function load(name,mocks) {
     const filename=path.resolve(__dirname,'..',name), real=createRequire(filename), module={exports:{}};

@@ -631,7 +631,7 @@ $('cdkFilters').addEventListener('click', event => {
     $('exportCdks').disabled = true;
     perform(loadCdks);
 });
-$('clearLogs').onclick = () => perform(async () => { await request('/api/admin/runtime-logs/clear', {}); await loadLogs(); notice('显示缓存已清空，磁盘历史保留', 'success'); });
+$('clearLogs').onclick = () => perform(async () => { await request('/api/admin/runtime-logs/clear', {}); await loadLogs(); notice('显示缓存已清空，磁盘日志保留最近 15 天', 'success'); });
 let orderEditing = null, orderStatusSaving = false;
 function editOrderStatus(button) {
     if (orderStatusSaving) return;

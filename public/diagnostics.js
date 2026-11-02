@@ -3,6 +3,9 @@
 // Only request identifiers persist in the tab. Session remains in the textarea until submission.
 const DIAG_REQUEST_KEY = 'orbitcard_debug_request_id';
 let diagLogCursor = 0, diagLogKey = '', diagLogLines = [], diagLogSequence = 0, diagReading = false;
+let diagLogChars = 0;
+let diagLogRevision = '';
+const DIAG_LOG_CHAR_LIMIT = 1024 * 1024;
 let diagOrder = null, diagPayBusy = false, diagQueryBusy = false;
 let diagTrackingStarted = 0, diagPollFailures = 0, diagNextPollAt = 0, diagPolling = false, diagPreflightBusy = false;
 try { $('diagRequestId').value = sessionStorage.getItem(DIAG_REQUEST_KEY) || ''; } catch (_) { /* storage unavailable */ }
@@ -12,7 +15,8 @@ function diagSetRequestId(id) {
 }
 function diagFollow(key) {
     diagTrackingStarted = Date.now(); diagPollFailures = 0; diagNextPollAt = 0;
-    $('diagTraceId').value = key; diagLogSequence++; diagLogKey = key; diagLogCursor = 0; diagLogLines = [];
+    diagLogRevision = '';
+    $('diagTraceId').value = key; diagLogSequence++; diagLogKey = key; diagLogCursor = 0; diagLogLines = []; diagLogChars = 0;
     $('diagTraceLog').textContent = '正在读取持久化日志…';
     $('diagLogState').textContent = `${key} · 等待读取`;
 }
@@ -24,15 +28,19 @@ async function diagReadLogs(reset = false) {
     if (diagReading) return;
     diagReading = true;
     try {
-        const data = await request(`/api/admin/orbitcard/diagnostics/logs/${encodeURIComponent(key)}?cursor=${diagLogCursor}`);
+        const data = await request(`/api/admin/orbitcard/diagnostics/logs/${encodeURIComponent(key)}?cursor=${diagLogCursor}&revision=${encodeURIComponent(diagLogRevision)}`);
         if (sequence !== diagLogSequence) return;
         diagLogCursor = data.next_cursor;
+        diagLogRevision = data.revision || '';
+        if (data.reset) { diagLogLines = []; diagLogChars = 0; }
         for (const entry of data.entries || []) {
-            diagLogLines.push(`[${new Date(entry.ts).toLocaleString('zh-CN')}] ${entry.event || 'log'} · ${entry.text || ''}${entry.data ? '\n' + JSON.stringify(entry.data, null, 2) : ''}`);
+            const full = `[${new Date(entry.ts).toLocaleString('zh-CN')}] ${entry.event || 'log'} · ${entry.text || ''}${entry.data ? '\n' + JSON.stringify(entry.data, null, 2) : ''}`;
+            const line = full.length > 32768 ? full.slice(0, 32768) + '\n[预览已缩短，完整内容请下载日志]' : full;
+            diagLogLines.push(line); diagLogChars += line.length;
+            while (diagLogLines.length > 1000 || diagLogChars > DIAG_LOG_CHAR_LIMIT) diagLogChars -= diagLogLines.shift().length;
         }
-        if (diagLogLines.length > 1000) diagLogLines.splice(0, diagLogLines.length - 1000);
         $('diagTraceLog').textContent = diagLogLines.join('\n\n') || '尚无持久化记录。';
-        $('diagLogState').textContent = `${key} · ${data.has_more ? '还有后续记录，点击“读取后续记录”或等待自动跟踪' : data.exists ? '已读到当前末尾' : '日志尚未生成'} · 页面最多显示最近 1000 条，完整历史可下载`;
+        $('diagLogState').textContent = `${key} · ${data.has_more ? '还有后续记录，点击“读取后续记录”或等待自动跟踪' : data.exists ? '已读到当前末尾' : '日志尚未生成'} · 页面保留容量范围内最近 1000 条预览，完整历史可下载`;
     } catch (error) { if (sequence === diagLogSequence) $('diagLogState').textContent = `日志读取失败：${error.message}`; throw error; }
     finally { diagReading = false; }
 }

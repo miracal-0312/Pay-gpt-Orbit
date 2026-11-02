@@ -7,6 +7,13 @@ const inFlight = new Map();
 const recent = new Map();
 const MAX_RECENT_QUERIES = 1000;
 const MAX_RETRY_MS = 24 * 60 * 60 * 1000;
+function pruneRecent() {
+    const now = Date.now();
+    for (const [key, value] of recent) if (value.until <= now) recent.delete(key);
+}
+// Expired CAPTCHA/query results should also be released when traffic stops.
+const cleanupTimer = setInterval(pruneRecent, 30000);
+cleanupTimer.unref();
 
 async function refresh({ cfg, task, persist, onConfirmedFailure }) {
     if (!task.orbitcard_client_order_no) throw new Error('该任务未绑定 Orbitcard 订单');
@@ -22,7 +29,7 @@ async function refresh({ cfg, task, persist, onConfirmedFailure }) {
     const now = Date.now();
     const cached = recent.get(task.job_key);
     if (cached?.until > now) return { ...cached.result, retryAfterMs: cached.until - now };
-    for (const [key, value] of recent) if (value.until <= now) recent.delete(key);
+    pruneRecent();
     const pending = (async () => {
         const result = await subscription.query({ ...cfg, auditJobKey: task.job_key }, { orderId: task.gpt_api_order_id,
             clientOrderNo: task.orbitcard_client_order_no, planType: api.PLAN_MAP?.[task.orbitcard_plan_type], email: task.orbitcard_email, cardId: task.orbitcard_card_id });

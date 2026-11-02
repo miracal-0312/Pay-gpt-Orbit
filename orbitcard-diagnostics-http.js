@@ -9,7 +9,7 @@ module.exports = function registerDiagnostics(app, { store, requireSecondaryAuth
     });
     app.get('/api/admin/orbitcard/diagnostics/logs/:jobKey', requireSecondaryAuth, async (req, res) => {
         res.set('Cache-Control', 'no-store');
-        try { res.json({ success: true, ...await logs.readTask(req.params.jobKey, req.query?.cursor || '0') }); }
+        try { res.json({ success: true, ...await logs.readTask(req.params.jobKey, req.query?.cursor || '0', req.query?.revision || '') }); }
         catch (_) { res.status(400).json({ success: false, message: '日志标识或读取位置无效，或日志文件暂不可读' }); }
     });
 };
