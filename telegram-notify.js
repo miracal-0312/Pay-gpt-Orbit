@@ -1,6 +1,8 @@
 'use strict';
 
 const axios = require('axios');
+let activeRequests = 0;
+const MAX_ACTIVE_REQUESTS = 8;
 
 const EVENT_LABELS = {
     success: '✅ 开通成功',
@@ -19,35 +21,15 @@ function escapeHtml(text) {
         .replace(/>/g, '&gt;');
 }
 
-function formatTelegramMessage(event, { email, cdk, jobKey, message, ip, fingerprint, userAgent, method }) {
+function formatTelegramMessage(event, fields) {
     const title = EVENT_LABELS[event] || '📢 系统通知';
     const lines = [title, ''];
-
-    if (email) {
-        lines.push(`账号: ${escapeHtml(email)}`);
+    for (const [key, label] of [['email', '账号'], ['ip', 'IP'], ['fingerprint', '指纹'], ['userAgent', '浏览器'],
+        ['method', '验证方式'], ['cdk', 'CDK'], ['jobKey', '任务'], ['message', '详情']]) {
+        if (!fields[key]) continue;
+        const value = key === 'userAgent' ? String(fields[key]).slice(0, 120) : fields[key];
+        lines.push(`${label}: ${escapeHtml(value)}`);
     }
-    if (ip) {
-        lines.push(`IP: ${escapeHtml(ip)}`);
-    }
-    if (fingerprint) {
-        lines.push(`指纹: ${escapeHtml(fingerprint)}`);
-    }
-    if (userAgent) {
-        lines.push(`浏览器: ${escapeHtml(String(userAgent).slice(0, 120))}`);
-    }
-    if (method) {
-        lines.push(`验证方式: ${escapeHtml(method)}`);
-    }
-    if (cdk) {
-        lines.push(`CDK: ${escapeHtml(cdk)}`);
-    }
-    if (jobKey) {
-        lines.push(`任务: ${escapeHtml(jobKey)}`);
-    }
-    if (message) {
-        lines.push(`详情: ${escapeHtml(message)}`);
-    }
-
     return lines.join('\n');
 }
 
@@ -57,7 +39,8 @@ async function sendTelegramMessage(botToken, chatId, text) {
     if (!token || !chat) {
         return { ok: false, error: '缺少 Bot Token 或 Chat ID' };
     }
-
+    if (activeRequests >= MAX_ACTIVE_REQUESTS) return { ok: false, error: 'Telegram 通知繁忙，请稍后重试' };
+    activeRequests++;
     try {
         const response = await axios.post(
             `https://api.telegram.org/bot${token}/sendMessage`,
@@ -67,23 +50,21 @@ async function sendTelegramMessage(botToken, chatId, text) {
                 parse_mode: 'HTML',
                 disable_web_page_preview: true
             },
-            { timeout: 15000 }
+            { timeout: 15000, signal: AbortSignal.timeout(15000), maxRedirects: 0,
+                maxContentLength: 16384, maxBodyLength: 32768 }
         );
         return { ok: Boolean(response.data?.ok), error: response.data?.description || '' };
     } catch (error) {
         const detail = error.response?.data?.description || error.message;
         return { ok: false, error: detail };
-    }
+    } finally { activeRequests--; }
 }
 
 function shouldNotifyEvent(settings, event) {
     if (!settings?.bot_token) {
         return false;
     }
-    if (event === 'admin_login_success' || event === 'admin_login_failed' || event === 'admin_2fa_failed') {
-        return Boolean(settings.on_admin_login ?? settings.notify_admin);
-    }
-    if (event === 'admin_secondary_success') {
+    if (['admin_login_success', 'admin_login_failed', 'admin_2fa_failed', 'admin_secondary_success'].includes(event)) {
         return Boolean(settings.on_admin_login ?? settings.notify_admin);
     }
     if (event === 'success') {
@@ -103,7 +84,7 @@ function getTargetChatIds(settings) {
     if (settings.notify_group && settings.group_chat_id) {
         targets.push({ label: 'group', chatId: settings.group_chat_id });
     }
-    return targets;
+    return targets.filter((target, index) => targets.findIndex(item => String(item.chatId).trim() === String(target.chatId).trim()) === index);
 }
 
 async function dispatchTelegramNotification(settings, event, payload = {}) {
@@ -117,16 +98,17 @@ async function dispatchTelegramNotification(settings, event, payload = {}) {
     }
 
     const text = formatTelegramMessage(event, payload);
-    const results = await Promise.all(
-        targets.map(async (target) => {
-            const result = await sendTelegramMessage(settings.bot_token, target.chatId, text);
-            return { ...target, ...result };
-        })
-    );
+    const results = await sendToTargets(settings, targets, text);
 
     const sent = results.filter((item) => item.ok).length;
     const errors = results.filter((item) => !item.ok).map((item) => `${item.label}: ${item.error}`);
     return { sent, errors, results };
+}
+
+function sendToTargets(settings, targets, text) {
+    return Promise.all(targets.map(async target => ({
+        ...target, ...await sendTelegramMessage(settings.bot_token, target.chatId, text)
+    })));
 }
 
 async function notifyAdminSecurityEvent(store, event, payload = {}) {
@@ -181,12 +163,7 @@ async function sendTelegramTest(store, payload = {}) {
         message: '这是一条 Telegram 通知测试消息'
     });
 
-    const results = await Promise.all(
-        targets.map(async (target) => {
-            const result = await sendTelegramMessage(settings.bot_token, target.chatId, text);
-            return { ...target, ...result };
-        })
-    );
+    const results = await sendToTargets(settings, targets, text);
 
     const failed = results.filter((item) => !item.ok);
     if (failed.length > 0) {

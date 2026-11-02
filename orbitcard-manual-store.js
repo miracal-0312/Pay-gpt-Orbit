@@ -5,8 +5,8 @@ const { cardScope, LIMITS } = require('./orbitcard-card-policy');
 const { PROVIDER_TO_PLAN: COUNTED_PLANS } = require('./plan-registry');
 
 module.exports = function createManualStore({ runQuery, runExecute, withTransaction, enqueueRedemption = async () => {} }) {
-    async function getManualOrder(requestId) {
-        const rows = await runQuery('SELECT * FROM orbitcard_admin_orders WHERE request_id = ? LIMIT 1', [requestId]);
+    async function getManualOrder(requestId, options) {
+        const rows = await runQuery('SELECT * FROM orbitcard_admin_orders WHERE request_id = ? LIMIT 1', [requestId], options);
         return rows[0] || null;
     }
 
@@ -54,7 +54,7 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
                 VALUES (?,?,?,?,?,?,?,?,?,0,?,'preparing',?)`,
             [input.requestId, jobKey, scope, input.apiKeyHash, input.mode, input.cdkCode || null,
                 input.planType, input.planName, input.targetEmail, input.adminEmail, '正在实时选卡或准备支付资金'], options);
-            return getManualOrderInTransaction(input.requestId, options);
+            return getManualOrder(input.requestId, options);
         });
     }
 
@@ -113,7 +113,7 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
             }
             await runExecute("UPDATE orbitcard_admin_orders SET state = 'failed', message = ? WHERE request_id = ? AND state = 'preparing'",
                 [String(message || '').slice(0,255), requestId], options);
-            return getManualOrderInTransaction(requestId, options);
+            return getManualOrder(requestId, options);
         });
     }
 
@@ -133,63 +133,6 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
         ['支付卡已准备，等待提交原订阅订单', requestId, jobKey, cardId]);
         if (result.affectedRows !== 1) throw new Error('管理员订单支付卡准备状态不一致');
         return getManualOrder(requestId);
-    }
-
-    async function createManualOrder(input) {
-        const scope = cardScope(input.baseUrl), jobKey = `manual-${input.requestId}`;
-        return withTransaction(async connection => {
-            const options = { connection };
-            const [existing] = await runQuery('SELECT * FROM orbitcard_admin_orders WHERE request_id = ? FOR UPDATE', [input.requestId], options);
-            if (existing) {
-                if (existing.plan_type !== input.planType || existing.target_email !== input.targetEmail
-                    || Number(existing.card_id) !== input.cardId || existing.scope !== scope
-                    || existing.api_key_hash !== input.apiKeyHash || existing.mode !== input.mode
-                    || (existing.cdk_code || null) !== (input.cdkCode || null)) throw new Error('此请求编号已用于另一笔管理员订单');
-                return { order: existing, created: false };
-            }
-            const pending = await runQuery(`SELECT request_id FROM orbitcard_admin_orders
-                WHERE scope = ? AND target_email = ? AND plan_type = ?
-                AND state IN ('prepared','submitting','pending','manual') LIMIT 1 FOR UPDATE`,
-            [scope, input.targetEmail, input.planType], options);
-            if (pending.length) throw new Error('此账号与套餐已有待确认管理员订单，请先核对原单');
-            if (input.mode === 'fulfillment') {
-                const [cdk] = await runQuery('SELECT * FROM cdk_codes WHERE cdk_code = ? FOR UPDATE', [input.cdkCode], options);
-                if (!cdk || !cdk.is_active || cdk.used_at || !['自助', '手动'].includes(cdk.type)
-                    || !input.acceptedCdkPlans.includes(cdk.plan_type)) {
-                    throw new Error('CDK 无效、已占用或套餐与所选卡台套餐不一致');
-                }
-                const prior = await runQuery('SELECT request_id FROM orbitcard_admin_orders WHERE cdk_code = ? AND state = \'success\' LIMIT 1', [input.cdkCode], options);
-                if (prior.length) throw new Error('CDK 已经完成一次人工开通');
-                const task = await runQuery('SELECT job_key FROM task_logs WHERE cdk_code = ? LIMIT 1', [input.cdkCode], options);
-                if (task.length) throw new Error('该 CDK 已有自助使用记录，不能再次用于人工开通');
-            }
-            const [card] = await runQuery('SELECT * FROM orbitcard_managed_cards WHERE scope = ? AND card_id = ? FOR UPDATE',
-                [scope, input.cardId], options);
-            if (!card || !card.history_confirmed || card.active_job || card.provider_status !== 'ACTIVE' || card.currency !== 'USD') {
-                throw new Error('支付卡未登记历史次数、正在被占用或状态异常，请换卡并重新查询');
-            }
-            const counted = COUNTED_PLANS[input.planType];
-            if (counted && Number(card[`successful_${counted}`]) >= LIMITS[counted]) {
-                throw new Error('该卡当前套餐的成功次数已达到上限，请选择其他卡');
-            }
-            await runExecute(`INSERT INTO orbitcard_admin_orders
-                (request_id,client_order_no,scope,api_key_hash,mode,cdk_code,plan_type,plan_name,target_email,card_id,admin_email,state,message)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,'prepared',?)`,
-            [input.requestId, jobKey, scope, input.apiKeyHash, input.mode, input.cdkCode || null,
-                input.planType, input.planName, input.targetEmail, input.cardId, input.adminEmail,
-                '已保存管理员订单，等待提交 Orbitcard'], options);
-            if (input.mode === 'fulfillment') {
-                await runExecute('UPDATE cdk_codes SET used_at = CURRENT_TIMESTAMP WHERE cdk_code = ? AND used_at IS NULL', [input.cdkCode], options);
-            }
-            await runExecute('UPDATE orbitcard_managed_cards SET active_job = ?, active_plan = ? WHERE scope = ? AND card_id = ?',
-                [jobKey, 'manual', scope, input.cardId], options);
-            return { order: await getManualOrderInTransaction(input.requestId, options), created: true };
-        });
-    }
-
-    async function getManualOrderInTransaction(requestId, options) {
-        const rows = await runQuery('SELECT * FROM orbitcard_admin_orders WHERE request_id = ? LIMIT 1', [requestId], options);
-        return rows[0] || null;
     }
 
     async function claimManualSubmission(requestId) {
@@ -215,7 +158,7 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
             await runExecute('UPDATE orbitcard_managed_cards SET active_job = NULL, active_plan = NULL WHERE scope = ? AND card_id = ? AND active_job = ?',
                 [order.scope, order.card_id, order.client_order_no], options);
             await runExecute("UPDATE orbitcard_admin_orders SET state = 'failed', message = '提交前中断；未调用平台扣款，CDK 与支付卡已释放' WHERE request_id = ? AND state = 'prepared'", [requestId], options);
-            return getManualOrderInTransaction(requestId, options);
+            return getManualOrder(requestId, options);
         });
     }
 
@@ -256,12 +199,12 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
             if (state === 'success' && order.cdk_code) {
                 await enqueueRedemption({ cdk: order.cdk_code, orderId: order.client_order_no }, options);
             }
-            return getManualOrderInTransaction(requestId, options);
+            return getManualOrder(requestId, options);
         });
     }
 
     return { getManualOrder, listManualOrders, listRecoverableManualOrders,
         prepareManualOrder, reserveManualCard, attachManualIssue, blockManualBalance,
         failManualPreparation, pauseManualPreparation, markManualPrepared,
-        createManualOrder, claimManualSubmission, abandonPreparedManualOrder, settleManualOrder };
+        claimManualSubmission, abandonPreparedManualOrder, settleManualOrder };
 };

@@ -114,4 +114,13 @@
 <small>修改出库状态不会改变使用状态。保存为已核销后，卡密不可再次兑换，系统会通知商城；已核销状态不能重置。</small>
 <p id="cdkStatusError" class="cdk-status-error" role="alert"></p>
 <div class="row"><button type="submit">保存状态</button><button id="cancelCdkStatus" type="button" class="secondary">取消</button></div>
+</fieldset></form></dialog>
+<dialog id="orderStatusDialog" class="cdk-status-dialog" aria-labelledby="orderStatusTitle">
+<form id="orderStatusForm"><fieldset id="orderStatusFields" class="stack">
+<div><h2 id="orderStatusTitle">人工修改订单结果</h2><code id="orderStatusCode"></code></div>
+<label>订单结果<select id="orderEditStatus" required><option value="">请选择核对后的结果</option><option value="success">成功</option><option value="failed">失败（保留卡密锁定，转人工售后）</option></select></label>
+<label>修改原因<textarea id="orderStatusReason" maxlength="255" required placeholder="填写核对依据及修改原因"></textarea></label>
+<small>请先核对实际订阅结果。成功会核销卡密，并按已配置的通知设置通知商城；失败会停止自动支付并保留卡密锁定。已成功或已核销的订单不能改为失败。</small>
+<p id="orderStatusError" class="cdk-status-error" role="alert"></p>
+<div class="row"><button type="submit">保存结果</button><button id="cancelOrderStatus" type="button" class="secondary">取消</button></div>
 </fieldset></form></dialog></body></html>

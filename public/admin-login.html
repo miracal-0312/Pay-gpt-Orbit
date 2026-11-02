@@ -60,8 +60,34 @@
             } catch (_) { }
         }
 
-        function goToAdminPanel() {
-            location.href = adminPanelPath;
+        function finishLogin(data) {
+            if (!data.token) throw new Error('登录响应缺少令牌，请重新登录');
+            localStorage.setItem(TOKEN_KEY, data.token);
+            localStorage.removeItem(SECONDARY_TOKEN_KEY);
+            location.href = data.panelUrl || data.panelPath || adminPanelPath;
+        }
+
+        async function submitLogin(buttonId, endpoint, body, onSuccess) {
+            const button = document.getElementById(buttonId);
+            if (button.disabled) return;
+            button.disabled = true;
+            setMessage('');
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 30000);
+            try {
+                const response = await fetch(`/api/admin/login${endpoint}`, {
+                    method: 'POST', signal: controller.signal,
+                    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) throw new Error(data.message || '验证请求失败');
+                onSuccess(data);
+            } catch (error) {
+                setMessage(controller.signal.aborted ? '请求超时，请稍后重试' : error.message);
+            } finally {
+                clearTimeout(timeout);
+                button.disabled = false;
+            }
         }
 
         function getBrowserFingerprint() {
@@ -147,11 +173,7 @@
                 const response = await fetch('/api/admin/session', {
                     headers: { Authorization: `Bearer ${token}` }
                 });
-                if (!response.ok) {
-                    localStorage.removeItem(TOKEN_KEY);
-                    localStorage.removeItem(SECONDARY_TOKEN_KEY);
-                    return;
-                }
+                if (!response.ok) throw new Error('登录已失效');
                 const data = await response.json();
                 if (data.refreshed && data.token) {
                     localStorage.setItem(TOKEN_KEY, data.token);
@@ -163,27 +185,14 @@
             }
         }
 
-        async function login() {
+        function login() {
             const email = document.getElementById('email').value.trim();
             const password = document.getElementById('password').value;
             if (!email || !password) {
                 setMessage('请输入邮箱和密码');
                 return;
             }
-            const loginBtn = document.getElementById('loginBtn');
-            loginBtn.disabled = true;
-            setMessage('');
-            try {
-                const response = await fetch('/api/admin/login', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ email, password, fingerprint: getBrowserFingerprint() })
-                });
-                const data = await response.json();
-                if (!response.ok || !data.success) {
-                    setMessage(data.message || '登录失败');
-                    return;
-                }
+            return submitLogin('loginBtn', '', { email, password, fingerprint: getBrowserFingerprint() }, data => {
                 if (data.requires2fa) {
                     state.challengeToken = data.challengeToken;
                     renderMethods(data.methods || [], data.defaultMethod || '');
@@ -195,42 +204,20 @@
                     showStep('2fa');
                     return;
                 }
-                if (data.token) {
-                    localStorage.setItem(TOKEN_KEY, data.token);
-                    localStorage.removeItem(SECONDARY_TOKEN_KEY);
-                    adminPanelPath = data.panelPath || adminPanelPath;
-                    goToAdminPanel();
-                }
-            } catch (_) {
-                setMessage('登录请求失败');
-            } finally {
-                loginBtn.disabled = false;
-            }
+                finishLogin(data);
+            });
         }
 
-        async function sendTelegramCode() {
+        function sendTelegramCode() {
             if (state.selectedMethod !== 'telegram') {
                 setMessage('请先切换到 Telegram 验证码');
                 return;
             }
-            const btn = document.getElementById('sendTgBtn');
-            btn.disabled = true;
-            try {
-                const response = await fetch('/api/admin/login/send-tg-code', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ challengeToken: state.challengeToken })
-                });
-                const data = await response.json();
-                setMessage(data.message || (data.success ? '验证码已发送' : '发送失败'), data.success);
-            } catch (_) {
-                setMessage('发送失败');
-            } finally {
-                btn.disabled = false;
-            }
+            return submitLogin('sendTgBtn', '/send-tg-code', { challengeToken: state.challengeToken },
+                data => setMessage(data.message || '验证码已发送', true));
         }
 
-        async function verify2fa() {
+        function verify2fa() {
             const code = document.getElementById('code').value.trim();
             if (!code) {
                 setMessage('请输入验证码');
@@ -240,34 +227,9 @@
                 setMessage('请选择验证方式');
                 return;
             }
-            const verifyBtn = document.getElementById('verifyBtn');
-            verifyBtn.disabled = true;
-            setMessage('');
-            try {
-                const response = await fetch('/api/admin/login/verify-2fa', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        challengeToken: state.challengeToken,
-                        method: state.selectedMethod,
-                        code,
-                        fingerprint: getBrowserFingerprint()
-                    })
-                });
-                const data = await response.json();
-                if (!response.ok || !data.success || !data.token) {
-                    setMessage(data.message || '验证失败');
-                    return;
-                }
-                localStorage.setItem(TOKEN_KEY, data.token);
-                localStorage.removeItem(SECONDARY_TOKEN_KEY);
-                adminPanelPath = data.panelPath || adminPanelPath;
-                goToAdminPanel();
-            } catch (_) {
-                setMessage('验证请求失败');
-            } finally {
-                verifyBtn.disabled = false;
-            }
+            return submitLogin('verifyBtn', '/verify-2fa', {
+                challengeToken: state.challengeToken, method: state.selectedMethod, code, fingerprint: getBrowserFingerprint()
+            }, finishLogin);
         }
 
         document.getElementById('stepLogin').addEventListener('submit', event => { event.preventDefault(); login(); });

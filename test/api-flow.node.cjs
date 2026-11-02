@@ -285,7 +285,7 @@ test('CDK status API distinguishes confirmed redemption from reservations and fa
 
 test('production dependency graph and Dockerfile contain no browser or Python runtimes', () => {
     const root = path.resolve(__dirname,'..'), lock = JSON.parse(fs.readFileSync(path.join(root,'package-lock.json'),'utf8'));
-    assert.deepEqual(Object.keys(require('../package.json').dependencies).sort(),['axios','express','mysql2','ws']);
+    assert.deepEqual(Object.keys(require('../package.json').dependencies).sort(),['axios','express','mysql2','proxy-addr','ws']);
     assert.ok(Object.keys(lock.packages).every(key => !/playwright|puppeteer|torch|opencv|transformers/.test(key)));
     const dockerfile = fs.readFileSync(path.join(root,'Dockerfile'),'utf8');
     assert.ok(!/python|pip install|playwright|chromium|xvfb|vnc|apt-get/i.test(dockerfile));

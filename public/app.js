@@ -1,6 +1,7 @@
 'use strict';
 const $ = id => document.getElementById(id);
 let activeCdk = '', activeJob = '', activePlanLabel = '', generation = 0, timer, expiryTimer, trackingStarted = 0, busy = false;
+let pollFailures = 0, verifying = false, submitting = false, runtimeBusy = false;
 const statusNames = { success: '订阅成功', failed: '充值失败', retry: '请重新提交 Session', manual: '处理中 / 结果待确认', running: '正在充值', processing: '正在充值', used: '卡密已使用', unused: '卡密可使用' };
 // Keep provider branding out of customer-facing copy, including stored order
 // messages and upstream errors. API identifiers remain unchanged.
@@ -82,17 +83,25 @@ function display(data) {
 }
 async function refresh(auto = false, expected = generation) {
     if (!activeCdk || expected !== generation) return;
+    if (auto && Date.now() - trackingStarted >= 15 * 60 * 1000) {
+        $('trackingHint').textContent = '自动查询已暂停，可点击“查询原订单”继续。';
+        return;
+    }
+    if (auto && document.hidden) { clearTimeout(timer); timer = setTimeout(() => refresh(true, expected), 10000); return; }
     if (busy) { if (auto) { clearTimeout(timer); timer = setTimeout(() => refresh(true, expected), 1000); } return; }
     busy = true; $('refreshBtn').disabled = true;
     let delay = 5000;
     try {
         const data = await post('/api/cdk/orbitcard/status', { cdk: activeCdk });
         if (expected !== generation) return;
-        delay = Math.max(5000, Number(data.retry_after_ms) || 0);
+        const retryAfter = Number(data.retry_after_ms);
+        delay = Number.isFinite(retryAfter) ? Math.min(300000, Math.max(5000, retryAfter)) : 5000;
+        pollFailures = data.success ? 0 : Math.min(pollFailures + 1, 4);
+        if (pollFailures) delay = Math.max(delay, Math.min(60000, 5000 * 2 ** pollFailures));
         if (data.data && !display(data.data)) auto = false;
         if (!data.success) { clearChallenge(); message(data.message || '查询暂不可用，卡密仍保持原状态'); if (data.stop_tracking) auto = false; }
         if (data.success) challenge(data.captcha);
-    } catch (error) { if (expected === generation) { clearChallenge(); message(`${error.message}。请保留原卡密并继续查询。`, 'error'); } delay = 10000; }
+    } catch (error) { if (expected === generation) { clearChallenge(); message(`${error.message}。请保留原卡密并继续查询。`, 'error'); pollFailures = Math.min(pollFailures + 1, 4); } delay = Math.min(60000, 5000 * 2 ** pollFailures); }
     finally {
         busy = false; $('refreshBtn').disabled = false;
         if (expected === generation && auto && Date.now() - trackingStarted < 15 * 60 * 1000) {
@@ -101,7 +110,7 @@ async function refresh(auto = false, expected = generation) {
         else if (expected === generation && auto) $('trackingHint').textContent = '自动查询已暂停，可点击“查询原订单”继续。';
     }
 }
-function startTracking() { clearTimeout(timer); trackingStarted = Date.now(); $('refreshBtn').hidden = false; return refresh(true); }
+function startTracking() { clearTimeout(timer); trackingStarted = Date.now(); pollFailures = 0; $('refreshBtn').hidden = false; return refresh(true); }
 $('cdkInput').addEventListener('input', () => {
     showRedeemStep(1);
     generation++; clearTimeout(timer); clearChallenge(); activeCdk = ''; activeJob = ''; activePlanLabel = '';
@@ -110,7 +119,10 @@ $('cdkInput').addEventListener('input', () => {
     $('orderInfo').textContent = ''; $('trackingHint').textContent = ''; $('planInfo').textContent = ''; message('');
 });
 async function verifyCurrentCdk(event) {
-    event.preventDefault(); const current = ++generation; clearTimeout(timer); clearChallenge(); activeJob = '';
+    event.preventDefault();
+    if (verifying) return;
+    verifying = true;
+    const current = ++generation; clearTimeout(timer); clearChallenge(); activeJob = '';
     const cdk = $('cdkInput').value.trim(); $('verifyBtn').disabled = true; $('retryBtn').disabled = true;
     activeCdk = ''; $('redeemForm').hidden = true; $('retryBtn').hidden = true;
     $('refreshBtn').hidden = true; $('progressBox').hidden = true;
@@ -128,13 +140,15 @@ async function verifyCurrentCdk(event) {
         if (data.jobKey && data.provider === 'orbitcard') { activeJob = data.jobKey; startTracking(); }
         else if (data.provider === 'history') message(data.message || '历史充值记录需联系管理员人工核对');
     } catch (error) { if (current === generation) message(error.message, 'error'); }
-    finally { $('verifyBtn').disabled = false; $('retryBtn').disabled = false; }
+    finally { verifying = false; $('verifyBtn').disabled = false; $('retryBtn').disabled = false; }
 }
 $('verifyForm').addEventListener('submit', verifyCurrentCdk);
 $('retryBtn').addEventListener('click', verifyCurrentCdk);
 $('redeemForm').addEventListener('submit', async event => {
     event.preventDefault();
+    if (submitting) return;
     if (!activeCdk || activeCdk !== $('cdkInput').value.trim()) return message('请先验证当前卡密', 'error');
+    submitting = true;
     const current = generation; $('startBtn').disabled = true;
     try {
         JSON.parse($('sessionInput').value);
@@ -156,11 +170,14 @@ $('redeemForm').addEventListener('submit', async event => {
             startTracking();
         } else message(error instanceof SyntaxError ? 'Session 不是有效的 JSON' : error.message, 'error');
     }
-    finally { $('startBtn').disabled = false; }
+    finally { submitting = false; $('startBtn').disabled = false; }
 });
 $('refreshBtn').addEventListener('click', startTracking);
 async function runtime() {
+    if (runtimeBusy || document.hidden) return;
+    runtimeBusy = true;
     try { const data = await requestJson('/api/public/runtime'); if (data.success) $('runtimeInfo').textContent = `当前处理任务 ${data.runtime.active_foreground_jobs} / ${data.runtime.max_foreground_jobs}`; }
     catch (_) { $('runtimeInfo').textContent = '服务状态暂不可用'; }
+    finally { runtimeBusy = false; }
 }
 runtime(); setInterval(runtime, 30000);

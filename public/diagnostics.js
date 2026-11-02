@@ -4,12 +4,14 @@
 const DIAG_REQUEST_KEY = 'orbitcard_debug_request_id';
 let diagLogCursor = 0, diagLogKey = '', diagLogLines = [], diagLogSequence = 0, diagReading = false;
 let diagOrder = null, diagPayBusy = false, diagQueryBusy = false;
+let diagTrackingStarted = 0, diagPollFailures = 0, diagNextPollAt = 0, diagPolling = false, diagPreflightBusy = false;
 try { $('diagRequestId').value = sessionStorage.getItem(DIAG_REQUEST_KEY) || ''; } catch (_) { /* storage unavailable */ }
 function diagSetRequestId(id) {
     $('diagRequestId').value = id;
     try { if (id) sessionStorage.setItem(DIAG_REQUEST_KEY, id); else sessionStorage.removeItem(DIAG_REQUEST_KEY); } catch (_) { /* keep current page identity */ }
 }
 function diagFollow(key) {
+    diagTrackingStarted = Date.now(); diagPollFailures = 0; diagNextPollAt = 0;
     $('diagTraceId').value = key; diagLogSequence++; diagLogKey = key; diagLogCursor = 0; diagLogLines = [];
     $('diagTraceLog').textContent = '正在读取持久化日志…';
     $('diagLogState').textContent = `${key} · 等待读取`;
@@ -40,10 +42,12 @@ function diagPlanRequired() {
     return plan;
 }
 async function diagPreflight(stage) {
+    if (diagPreflightBusy) return;
     const input = { stage, request_id: crypto.randomUUID() };
     if (!['plans','balance','session'].includes(stage)) input.plan_type = diagPlanRequired();
     if (['session','full'].includes(stage)) input.session = $('diagSession').value;
     const buttons = [...document.querySelectorAll('[data-diag-stage]')];
+    diagPreflightBusy = true;
     buttons.forEach(button => { button.disabled = true; });
     diagFollow(`debug-${input.request_id}`);
     $('diagSteps').textContent = '预检进行中，只调用读取接口…';
@@ -62,7 +66,7 @@ async function diagPreflight(stage) {
         notice(data.passed ? '只读预检完成；未创建订单或扣款。' : '预检未通过，请查看具体步骤及日志。', data.passed ? 'success' : 'error');
         await diagReadLogs();
     } catch (error) { $('diagSteps').textContent = `预检失败：${error.message}`; await diagReadLogs().catch(() => {}); throw error; }
-    finally { buttons.forEach(button => { button.disabled = false; }); }
+    finally { diagPreflightBusy = false; buttons.forEach(button => { button.disabled = false; }); }
 }
 document.querySelectorAll('[data-diag-stage]').forEach(button => {
     button.onclick = () => perform(() => diagPreflight(button.dataset.diagStage));
@@ -142,10 +146,7 @@ $('diagMoreLogs').onclick = () => perform(() => diagReadLogs());
 $('diagDownload').onclick = () => perform(async () => {
     const key = $('diagTraceId').value.trim();
     if (!/^[a-zA-Z0-9_-]{1,80}$/.test(key)) throw new Error('请填写有效的任务日志编号');
-    const response = await fetch(`/api/admin/task-logs/${encodeURIComponent(key)}/audit`, { headers: { Authorization: `Bearer ${localStorage.getItem(TOKEN_KEY) || ''}` } });
-    if (!response.ok) throw new Error('日志下载失败，请检查登录状态及日志编号');
-    const url=URL.createObjectURL(await response.blob()), link=document.createElement('a');
-    link.href=url; link.download=`trace-${key}.jsonl`; link.click(); setTimeout(()=>URL.revokeObjectURL(url),1000);
+    await downloadAudit(key, 'trace');
 });
 document.addEventListener('click', event => {
     const button = event.target.closest('[data-debug-trace]'); if (!button) return;
@@ -153,10 +154,26 @@ document.addEventListener('click', event => {
     diagFollow(button.dataset.debugTrace);
     perform(async () => { await diagReadLogs(); $('diagTraceId').scrollIntoView({ behavior: 'smooth', block: 'center' }); });
 });
+$('diagAutoLogs').addEventListener('change', () => {
+    diagTrackingStarted = Date.now(); diagPollFailures = 0; diagNextPollAt = 0;
+});
 setInterval(async () => {
-    if (document.hidden || selected !== 'diagnostics' || !$('diagAutoLogs').checked || !localStorage.getItem(SECONDARY_KEY)) return;
-    if ($('diagTraceId').value.trim()) await diagReadLogs().catch(() => {});
-    if ($('diagRequestId').value && !diagPayBusy && (!diagOrder || ['submitting','pending','manual'].includes(diagOrder.state))) {
-        await diagQueryOrder().catch(() => {});
+    if (document.hidden || selected !== 'diagnostics' || !$('diagAutoLogs').checked || !localStorage.getItem(SECONDARY_KEY) || diagPolling) return;
+    if (!diagTrackingStarted) diagTrackingStarted = Date.now();
+    if (Date.now() - diagTrackingStarted >= 15 * 60 * 1000 || diagPollFailures >= 5) {
+        $('diagAutoLogs').checked = false;
+        $('diagLogState').textContent = '自动跟踪已暂停；需要继续时，请重新勾选自动跟踪。';
+        return;
+    }
+    if (Date.now() < diagNextPollAt) return;
+    diagPolling = true;
+    try {
+        if ($('diagTraceId').value.trim()) await diagReadLogs();
+        if ($('diagRequestId').value && !diagPayBusy && (!diagOrder || ['submitting','pending','manual'].includes(diagOrder.state))) await diagQueryOrder();
+        diagPollFailures = 0;
+    } catch (_) { diagPollFailures++; }
+    finally {
+        diagNextPollAt = Date.now() + Math.min(60000, 10000 * 2 ** diagPollFailures);
+        diagPolling = false;
     }
 }, 10000);

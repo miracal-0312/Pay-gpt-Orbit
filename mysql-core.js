@@ -1,10 +1,18 @@
 // Database transport, administrator security and Orbitcard configuration.
 'use strict';
-const crypto = require('node:crypto');
+const { createPasswordHash } = require('./admin-auth');
 const mysql = require('mysql2/promise');
 const orbitcardConfig = require('./orbitcard-config');
 const { normalizeAdminPaths } = require('./admin-paths');
 let pool = null;
+let lockConnections = 0;
+function boundedInteger(value, fallback, maximum) {
+    const parsed = Number(value);
+    return Number.isInteger(parsed) && parsed > 0 && parsed <= maximum ? parsed : fallback;
+}
+const DB_POOL_LIMIT = boundedInteger(process.env.DB_POOL_LIMIT, 20, 200);
+const DB_QUEUE_LIMIT = boundedInteger(process.env.DB_QUEUE_LIMIT, 100, 10000);
+const DB_LOCK_LIMIT = boundedInteger(process.env.DB_LOCK_LIMIT, 32, 256);
 const DB_HOST = process.env.DB_HOST || '127.0.0.1';
 const DB_PORT = Number(process.env.DB_PORT || 3306);
 const DB_NAME = process.env.DB_NAME || 'plus_papay';
@@ -28,8 +36,8 @@ function getPool() {
             database: DB_NAME,
             charset: 'utf8mb4',
             waitForConnections: true,
-            connectionLimit: Number(process.env.DB_POOL_LIMIT || 20),
-            queueLimit: 0,
+            connectionLimit: DB_POOL_LIMIT,
+            queueLimit: DB_QUEUE_LIMIT,
             namedPlaceholders: false,
             multipleStatements: true,
             enableKeepAlive: true,
@@ -40,20 +48,24 @@ function getPool() {
     return pool;
 }
 
-function createPasswordHash(password) {
-    const salt = crypto.randomBytes(16).toString('hex');
-    const hash = crypto.scryptSync(String(password), salt, 64).toString('hex');
-    return `scrypt$${salt}$${hash}`;
-}
-
 async function openLockConnection() {
-    const connection = await mysql.createConnection({ host: DB_HOST, port: DB_PORT, user: DB_USER, password: DB_PASSWORD,
-        database: DB_NAME, charset: 'utf8mb4', enableKeepAlive: true, keepAliveInitialDelay: 10000,
-        connectTimeout: 10000 });
-    // Dedicated connections may fail while awaiting the platform rather than a
-    // database query. Handle idle errors; the next ownership check/query fails.
-    connection.on('error', () => {});
-    return connection;
+    // Reserve before connecting: concurrent connection handshakes count too.
+    // Never queue or evict an existing payment owner to admit another request.
+    if (lockConnections >= DB_LOCK_LIMIT) throw Object.assign(new Error('支付执行连接已满，请稍后重试'), { code: 'DB_LOCK_BUSY', status: 503 });
+    lockConnections++;
+    let released = false;
+    const release = () => { if (!released) { released = true; lockConnections--; } };
+    try {
+        const connection = await mysql.createConnection({ host: DB_HOST, port: DB_PORT, user: DB_USER, password: DB_PASSWORD,
+            database: DB_NAME, charset: 'utf8mb4', enableKeepAlive: true, keepAliveInitialDelay: 10000,
+            connectTimeout: 10000 });
+        const destroy = connection.destroy.bind(connection);
+        connection.destroy = () => { try { return destroy(); } finally { release(); } };
+        connection.once('end', release);
+        // Idle transport failures must free the slot and terminate its locks.
+        connection.on('error', () => connection.destroy());
+        return connection;
+    } catch (error) { release(); throw error; }
 }
 
 function queryError(error) {
@@ -61,29 +73,34 @@ function queryError(error) {
         { code: error?.code, errno: error?.errno });
 }
 
-async function runQuery(sql, params = [], options = {}) {
-    const executor = options.connection || getPool();
-
+async function executeSql(method, sql, params, options) {
     try {
-        const [rows] = await executor.query(sql, params);
-        return rows;
-    } catch (error) {
-        throw queryError(error);
-    }
-}
-
-async function runExecute(sql, params = [], options = {}) {
-    const executor = options.connection || getPool();
-
-    try {
-        const [result] = await executor.execute(sql, params);
+        const [result] = await (options.connection || getPool())[method](sql, params);
         return result;
     } catch (error) {
         throw queryError(error);
     }
 }
+const runQuery = (sql, params = [], options = {}) => executeSql('query', sql, params, options);
+const runExecute = (sql, params = [], options = {}) => executeSql('execute', sql, params, options);
 
 const withTransaction = require('./mysql-transaction')({ getPool });
+
+async function getConfigValues(keys) {
+    if (!keys.length) return {};
+    const rows = await runQuery(`SELECT config_key, config_value FROM app_config
+        WHERE config_key IN (${keys.map(() => '?').join(', ')})`, keys);
+    return Object.fromEntries(rows.map(row => [row.config_key, row.config_value]));
+}
+
+async function saveConfigValues(values) {
+    const entries = Object.entries(values);
+    if (!entries.length) return;
+    // Related settings and credential versions are committed in one write.
+    await withTransaction(connection => runExecute(`INSERT INTO app_config (config_key, config_value)
+        VALUES ${entries.map(() => '(?, ?)').join(', ')}
+        ON DUPLICATE KEY UPDATE config_value = VALUES(config_value)`, entries.flat(), { connection }));
+}
 
 async function ensureGptApiConfigDefaults() {
     await withTransaction(async connection => {
@@ -115,9 +132,7 @@ async function ensureGptApiConfigDefaults() {
 }
 
 async function getGptApiConfig() {
-    const rows = await runQuery(`SELECT config_key, config_value FROM app_config
-        WHERE config_key IN (${GPT_API_CONFIG_KEYS.map(() => '?').join(', ')})`, GPT_API_CONFIG_KEYS);
-    const map = Object.fromEntries(rows.map(row => [row.config_key, row.config_value]));
+    const map = await getConfigValues(GPT_API_CONFIG_KEYS);
     return {
         provider: 'orbitcard',
         enabled: map.gpt_api_enabled === '1',
@@ -146,12 +161,7 @@ async function saveGptApiConfig(input = {}) {
         orbitcard_product_code: cfg.orbitcard_product_code, orbitcard_safety_margin: cfg.orbitcard_safety_margin,
         orbitcard_max_initial_amount: cfg.orbitcard_max_initial_amount,
         orbitcard_payment_regions: JSON.stringify(cfg.orbitcard_payment_regions) };
-    await withTransaction(async connection => {
-        for (const [key, value] of Object.entries(values)) {
-            await runExecute(`INSERT INTO app_config (config_key, config_value) VALUES (?, ?)
-                ON DUPLICATE KEY UPDATE config_value = VALUES(config_value)`, [key, value], { connection });
-        }
-    });
+    await saveConfigValues(values);
 }
 
 async function hasColumn(tableName, columnName) {
@@ -176,14 +186,8 @@ async function ensureColumn(tableName, columnName, columnDefinition) {
 }
 
 async function getAppConfigValue(configKey, fallbackValue = '') {
-    const rows = await runQuery(
-        `SELECT config_value
-         FROM app_config
-         WHERE config_key = ?
-         LIMIT 1`,
-        [String(configKey)]
-    );
-    return rows[0]?.config_value ?? fallbackValue;
+    const key = String(configKey), values = await getConfigValues([key]);
+    return Object.hasOwn(values, key) ? values[key] ?? fallbackValue : fallbackValue;
 }
 
 async function getTelegramConfig() {
@@ -196,13 +200,7 @@ async function getTelegramConfig() {
         'telegram_on_success',
         'telegram_on_failure'
     ];
-    const rows = await runQuery(
-        `SELECT config_key, config_value
-         FROM app_config
-         WHERE config_key IN (${keys.map(() => '?').join(', ')})`,
-        keys
-    );
-    const map = Object.fromEntries(rows.map((row) => [row.config_key, row.config_value]));
+    const map = await getConfigValues(keys);
     return {
         bot_token: String(map.telegram_bot_token || '').trim(),
         admin_chat_id: String(map.telegram_admin_chat_id || '').trim(),
@@ -220,21 +218,11 @@ async function saveTelegramConfig(config = {}) {
         telegram_admin_chat_id: String(config.admin_chat_id || '').trim(), telegram_group_chat_id: String(config.group_chat_id || '').trim(),
         telegram_notify_admin: config.notify_admin ? '1' : '0', telegram_notify_group: config.notify_group ? '1' : '0',
         telegram_on_success: config.on_success ? '1' : '0', telegram_on_failure: config.on_failure ? '1' : '0' };
-    await withTransaction(async connection => {
-        for (const [key, value] of Object.entries(values)) await runExecute(
-            'INSERT INTO app_config (config_key, config_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE config_value = VALUES(config_value)',
-            [key, value], { connection });
-    });
+    await saveConfigValues(values);
 }
 
 async function getMaintenanceModeState() {
-    const rows = await runQuery(
-        `SELECT config_key, config_value
-         FROM app_config
-         WHERE config_key IN (?, ?)`,
-        ['maintenance_mode', 'maintenance_mode_drain']
-    );
-    const configMap = Object.fromEntries(rows.map((row) => [row.config_key, row.config_value]));
+    const configMap = await getConfigValues(['maintenance_mode', 'maintenance_mode_drain']);
     return {
         enabled: String(configMap.maintenance_mode || '0') === '1',
         drain: String(configMap.maintenance_mode_drain || '0') === '1'
@@ -242,24 +230,11 @@ async function getMaintenanceModeState() {
 }
 
 async function getAdminAuthConfig() {
-    const rows = await runQuery(
-        `SELECT config_key, config_value
-         FROM app_config
-         WHERE config_key IN (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-            'admin_password_hash',
-            'admin_password_version',
-            'admin_email',
-            'admin_secondary_password_hash',
-            'admin_secondary_password_version',
-            'admin_totp_secret',
-            'admin_totp_enabled',
-            'telegram_on_admin_login',
-            'admin_2fa_login_mode'
-        ]
-    );
-
-    const map = Object.fromEntries(rows.map((item) => [item.config_key, item.config_value]));
+    const map = await getConfigValues([
+        'admin_password_hash', 'admin_password_version', 'admin_email',
+        'admin_secondary_password_hash', 'admin_secondary_password_version',
+        'admin_totp_secret', 'admin_totp_enabled', 'telegram_on_admin_login', 'admin_2fa_login_mode'
+    ]);
 
     return {
         email: String(map.admin_email || DEFAULT_ADMIN_EMAIL).trim().toLowerCase(),
@@ -281,23 +256,12 @@ async function saveAdmin2faLoginMode(mode) {
     if (!['either', 'totp', 'telegram'].includes(normalized)) {
         throw new Error('无效的登录验证方式');
     }
-    await runExecute(
-        `INSERT INTO app_config (config_key, config_value)
-         VALUES (?, ?)
-         ON DUPLICATE KEY UPDATE config_value = VALUES(config_value)`,
-        ['admin_2fa_login_mode', normalized]
-    );
+    await saveConfigValues({ admin_2fa_login_mode: normalized });
     return normalized;
 }
 
 async function getAdminPaths() {
-    const rows = await runQuery(
-        `SELECT config_key, config_value
-         FROM app_config
-         WHERE config_key IN (?, ?)`,
-        ['admin_login_path', 'admin_panel_path']
-    );
-    const map = Object.fromEntries(rows.map((item) => [item.config_key, item.config_value]));
+    const map = await getConfigValues(['admin_login_path', 'admin_panel_path']);
     return normalizeAdminPaths({
         loginPath: map.admin_login_path || DEFAULT_ADMIN_LOGIN_PATH,
         panelPath: map.admin_panel_path || DEFAULT_ADMIN_PANEL_PATH
@@ -306,18 +270,7 @@ async function getAdminPaths() {
 
 async function saveAdminPaths({ loginPath, panelPath }) {
     const normalized = normalizeAdminPaths({ loginPath, panelPath });
-    await withTransaction(async (connection) => {
-        await runExecute(
-            `INSERT INTO app_config (config_key, config_value)
-             VALUES (?, ?), (?, ?)
-             ON DUPLICATE KEY UPDATE config_value = VALUES(config_value)`,
-            [
-                'admin_login_path', normalized.loginPath,
-                'admin_panel_path', normalized.panelPath
-            ],
-            { connection }
-        );
-    });
+    await saveConfigValues({ admin_login_path: normalized.loginPath, admin_panel_path: normalized.panelPath });
     return normalized;
 }
 
@@ -328,18 +281,7 @@ async function updateAdminEmail(email) {
     }
     const authConfig = await getAdminAuthConfig();
     const nextVersion = Math.max(1, Number(authConfig.passwordVersion || 1)) + 1;
-    await withTransaction(async (connection) => {
-        await runExecute(
-            `INSERT INTO app_config (config_key, config_value)
-             VALUES (?, ?), (?, ?)
-             ON DUPLICATE KEY UPDATE config_value = VALUES(config_value)`,
-            [
-                'admin_email', normalized,
-                'admin_password_version', String(nextVersion)
-            ],
-            { connection }
-        );
-    });
+    await saveConfigValues({ admin_email: normalized, admin_password_version: String(nextVersion) });
     return { email: normalized, passwordVersion: nextVersion };
 }
 
@@ -347,34 +289,12 @@ async function updateAdminSecondaryPassword(password) {
     const nextHash = createPasswordHash(password);
     const authConfig = await getAdminAuthConfig();
     const nextVersion = Math.max(1, Number(authConfig.secondaryPasswordVersion || 1)) + 1;
-    await withTransaction(async (connection) => {
-        await runExecute(
-            `INSERT INTO app_config (config_key, config_value)
-             VALUES (?, ?), (?, ?)
-             ON DUPLICATE KEY UPDATE config_value = VALUES(config_value)`,
-            [
-                'admin_secondary_password_hash', nextHash,
-                'admin_secondary_password_version', String(nextVersion)
-            ],
-            { connection }
-        );
-    });
+    await saveConfigValues({ admin_secondary_password_hash: nextHash, admin_secondary_password_version: String(nextVersion) });
     return { secondaryPasswordVersion: nextVersion };
 }
 
 async function saveAdminTotpConfig({ secret, enabled }) {
-    await withTransaction(async (connection) => {
-        await runExecute(
-            `INSERT INTO app_config (config_key, config_value)
-             VALUES (?, ?), (?, ?)
-             ON DUPLICATE KEY UPDATE config_value = VALUES(config_value)`,
-            [
-                'admin_totp_secret', String(secret || ''),
-                'admin_totp_enabled', enabled ? '1' : '0'
-            ],
-            { connection }
-        );
-    });
+    await saveConfigValues({ admin_totp_secret: String(secret || ''), admin_totp_enabled: enabled ? '1' : '0' });
 }
 
 async function insertAdminLoginLog({
@@ -423,22 +343,11 @@ async function updateAdminPassword(password) {
     const authConfig = await getAdminAuthConfig();
     const nextVersion = Math.max(1, Number(authConfig.passwordVersion || 1)) + 1;
 
-    await withTransaction(async (connection) => {
-        await runExecute(
-            `INSERT INTO app_config (config_key, config_value)
-             VALUES (?, ?), (?, ?)
-             ON DUPLICATE KEY UPDATE config_value = VALUES(config_value)`,
-            [
-                'admin_password_hash', nextHash,
-                'admin_password_version', String(nextVersion)
-            ],
-            { connection }
-        );
-    });
+    await saveConfigValues({ admin_password_hash: nextHash, admin_password_version: String(nextVersion) });
 
     return {
         passwordHash: nextHash,
         passwordVersion: nextVersion
     };
 }
-module.exports = { getPool, openLockConnection, createPasswordHash, runQuery, runExecute, withTransaction, ensureGptApiConfigDefaults, getGptApiConfig, saveGptApiConfig, hasColumn, ensureColumn, getAppConfigValue, getTelegramConfig, saveTelegramConfig, getMaintenanceModeState, getAdminAuthConfig, saveAdmin2faLoginMode, getAdminPaths, saveAdminPaths, updateAdminEmail, updateAdminSecondaryPassword, saveAdminTotpConfig, insertAdminLoginLog, listAdminLoginLogs, updateAdminPassword, close: async () => { if (pool) await pool.end(); }, connectionInfo: { host: DB_HOST, port: DB_PORT, database: DB_NAME, user: DB_USER } };
+module.exports = { getPool, openLockConnection, createPasswordHash, runQuery, runExecute, withTransaction, ensureGptApiConfigDefaults, getGptApiConfig, saveGptApiConfig, hasColumn, ensureColumn, getAppConfigValue, getConfigValues, saveConfigValues, getTelegramConfig, saveTelegramConfig, getMaintenanceModeState, getAdminAuthConfig, saveAdmin2faLoginMode, getAdminPaths, saveAdminPaths, updateAdminEmail, updateAdminSecondaryPassword, saveAdminTotpConfig, insertAdminLoginLog, listAdminLoginLogs, updateAdminPassword, close: async () => { if (pool) await pool.end(); }, connectionInfo: { host: DB_HOST, port: DB_PORT, database: DB_NAME, user: DB_USER } };

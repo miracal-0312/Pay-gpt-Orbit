@@ -65,7 +65,8 @@ module.exports = function createRedemptionWebhook({ runQuery, runExecute, env = 
                     const result = await request({ method: 'POST', url: config.url, data: event.payload,
                         headers: { 'Content-Type': 'application/json', 'X-Redemption-Timestamp': timestamp,
                             'X-Redemption-Signature': sign(config.secret, timestamp, event.payload) },
-                        timeout: 10000, maxRedirects: 0, maxContentLength: 16384,
+                        timeout: 10000, signal: AbortSignal.timeout(10000), maxRedirects: 0, maxContentLength: 16384,
+                        maxBodyLength: 16384,
                         validateStatus: () => true, transformRequest: [value => value] });
                     if (result.status !== 200 || result.data?.status_code !== 0
                         || result.data?.data?.event_id !== event.event_id || result.data?.data?.received !== true) {

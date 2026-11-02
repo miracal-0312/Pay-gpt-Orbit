@@ -9,6 +9,9 @@ const { PROVIDER_PLANS, LEGACY_PLAN_ALIASES } = require('./plan-registry');
 const PLAN_MAP = Object.freeze({ ...PROVIDER_PLANS, ...Object.fromEntries(
     Object.entries(LEGACY_PLAN_ALIASES).map(([alias, plan]) => [alias, PROVIDER_PLANS[plan]])) });
 const accountCooldowns = new Map();
+const MAX_ACTIVE_REQUESTS = 32;
+const MAX_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+let activeRequests = 0;
 
 async function request(cfg, operation, body = {}, idempotencyKey = '') {
     if (['createSubscription','createCard','rechargeCard'].includes(operation)) await cfg.executionGuard?.assertOwned();
@@ -33,12 +36,15 @@ async function request(cfg, operation, body = {}, idempotencyKey = '') {
             idempotency_key: idempotencyKey || undefined,
             elapsed_ms: Date.now() - startedAt, ...details }
     });
+    for (const [identity, until] of accountCooldowns) if (until <= startedAt) accountCooldowns.delete(identity);
     const remainingCooldown=(accountCooldowns.get(accountIdentity) || 0)-Date.now();
     if(remainingCooldown>0) {
         record('request_deferred',{retry_after_ms:remainingCooldown});
         return {success:false,status:429,retryAfterMs:remainingCooldown,error:'Orbitcard 当前请求受限，请等待平台规定的重试间隔'};
     }
-    if(remainingCooldown<=0) accountCooldowns.delete(accountIdentity);
+    // Reject excess work instead of building an unbounded queue behind a slow upstream.
+    if (activeRequests >= MAX_ACTIVE_REQUESTS) return { success: false, status: 503, retryAfterMs: 5000,
+        error: 'Orbitcard 请求繁忙，本次请求尚未发送，请稍后查询原订单' };
     record('request_started');
     const raw = JSON.stringify(body);
     const timestamp = String(Math.floor(Date.now() / 1000));
@@ -48,9 +54,12 @@ async function request(cfg, operation, body = {}, idempotencyKey = '') {
     const headers = { 'Content-Type': 'application/json', 'X-API-Key': key, 'X-Timestamp': timestamp,
         'X-Nonce': nonce, 'X-Signature': crypto.createHmac('sha256', secret).update(canonical).digest('hex') };
     if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey;
+    activeRequests++;
     try {
+        const timeout = ['createSubscription','createCard'].includes(operation) ? 45000 : 30000;
         const response = await axios.request({ method: 'POST', url: `${url.origin}${path}`, data: raw,
-            headers, timeout: ['createSubscription','createCard'].includes(operation) ? 45000 : 30000, maxRedirects: 0,
+            headers, timeout, signal: AbortSignal.timeout(timeout), maxRedirects: 0,
+            maxContentLength: 2 * 1024 * 1024, maxBodyLength: 256 * 1024,
             validateStatus: () => true });
         const envelope = response.data;
         const success = response.status >= 200 && response.status < 300 && envelope?.code === 0;
@@ -60,8 +69,11 @@ async function request(cfg, operation, body = {}, idempotencyKey = '') {
         const retryHints = [headerSeconds, envelope?.request_error?.retry_after_seconds,
             envelope?.data?.request_error?.retry_after_seconds, envelope?.data?.retry_after_seconds];
         const seconds = Math.max(0, ...retryHints.map(Number).filter(Number.isFinite));
-        const retryAfterMs=Number.isFinite(seconds)?Math.max(0,seconds*1000):0;
-        if(response.status===429) accountCooldowns.set(accountIdentity,Date.now()+Math.max(5000,retryAfterMs));
+        const retryAfterMs = Math.min(MAX_COOLDOWN_MS, seconds * 1000);
+        if(response.status===429) {
+            if (!accountCooldowns.has(accountIdentity) && accountCooldowns.size >= 128) accountCooldowns.delete(accountCooldowns.keys().next().value);
+            accountCooldowns.set(accountIdentity,Date.now()+Math.max(5000,retryAfterMs));
+        }
         const requestError = envelope?.request_error || envelope?.data?.request_error;
         record('request_finished', { http_status: response.status, platform_code: envelope?.code,
             card_response: ['getCardList', 'cardDetail'].includes(operation) ? cardResponseShape(envelope?.data) : undefined,
@@ -81,7 +93,7 @@ async function request(cfg, operation, body = {}, idempotencyKey = '') {
         // Axios errors contain the signed request and the customer's entire Session.
         record('request_failed', { outcome: 'unknown', error: 'network_or_audit_failure' });
         return { success: false, error: 'Orbitcard 网络请求失败，结果待确认' };
-    }
+    } finally { activeRequests--; }
 }
 
 // Structure only: no card numbers, CVV, credentials or raw provider messages.

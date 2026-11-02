@@ -252,9 +252,7 @@ async function saveConfig(config = {}) {
     }
     if (Object.hasOwn(config, 'maintenance_mode')) values.maintenance_mode = config.maintenance_mode ? '1' : '0';
     if (Object.hasOwn(config, 'maintenance_mode_drain')) values.maintenance_mode_drain = config.maintenance_mode_drain ? '1' : '0';
-    await withTransaction(async connection => {
-        for (const [key, value] of Object.entries(values)) await runExecute('INSERT INTO app_config (config_key, config_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE config_value = VALUES(config_value)', [key, value], { connection });
-    });
+    await core.saveConfigValues(values);
 }
 
 async function getAdminData() {
@@ -281,8 +279,10 @@ const acquirePaymentLock = require('./payment-execution-lock').createExecutionLo
     openConnection: core.openLockConnection, namespace: core.connectionInfo?.database || '' });
 const updateCdkStatus = require('./cdk-status-service')({ runQuery, runExecute, withTransaction,
     acquirePaymentLock, enqueueRedemption: redemptionWebhook.enqueue });
+const updateOrderStatus = require('./order-status-service')({ runQuery, runExecute, withTransaction, getTaskStatus,
+    acquirePaymentLock, settleCardUse: cardStore.settleCardUse, enqueueRedemption: redemptionWebhook.enqueue });
 module.exports = { ...core, ...cardStore, ...orbitcardCdkStore, ...manualStore, ...paymentAutomation, acquirePaymentLock, ensureReady, initializeBaseData, createTaskLog, getTaskStatus,
-    updateCdkStatus,
+    updateCdkStatus, updateOrderStatus,
     deliverRedemptionNotifications: redemptionWebhook.deliverPending,
     getRunningTaskByCdk, verifyCdkDetails, getCdkRedemptionStatus, listCdks, listCdksExportPage, insertCdks, markCdksShipped, deleteCdk,
     listAdminTaskLogs, listRecentGptApiOrders, listRecoverableOrbitcardTasks, noteQueryAttempt, getMaxConcurrentActivations, saveConfig, getAdminData, safeOrder };

@@ -3,7 +3,7 @@ const { cdkLockKey } = require('./payment-execution-lock');
 const { requiresManualHandling } = require('./payment-automation');
 
 // Both interactive refresh and restart recovery query the same durable identity.
-module.exports = function createRecovery({ store, query, activeJobs, audit, notify = async () => {}, reconcileCards = async () => {}, checkBalance = async () => false }) {
+module.exports = function createRecovery({ store, query, activeJobs, audit, notify = async () => {}, checkBalance = async () => false, now = Date.now }) {
     async function refreshTask(task) {
         if (activeJobs.has(task.job_key)) return { success: true, querySkipped: true };
         const guard = await store.acquirePaymentLock(cdkLockKey(task.cdk_code));
@@ -37,42 +37,6 @@ module.exports = function createRecovery({ store, query, activeJobs, audit, noti
                 message:'账户可用余额已补足，CDK 已解除锁定；请重新验证卡密并提交最新 Session 继续充值'});
             audit({jobKey:task.job_key,source:'orbitcard',event:'account_balance_restored',text:'账户余额已补足，等待用户重新提交 Session',data:{applied:result.applied}});
             return {success:true,applied:result.applied,querySkipped:true};
-        }
-        if(task.orbitcard_state==='funding_pending') {
-            await reconcileCards();
-            const funding=await store.getCardFundingForTask(task.job_key);
-            if(funding && ['ready','failed'].includes(funding.state)) {
-                if (Number(task.orbitcard_retry_attempt_no || 1) > 1) {
-                    const result=await lockSupport(task.job_key,'funding_pending',
-                        '支付重试期间卡片补款需要人工核对，CDK 已锁定；请联系人工售后');
-                    return {success:true,applied:result.applied,querySkipped:true};
-                }
-                const ready=funding.state==='ready';
-                const result=await settle(task.job_key,{status:ready?'retry':'failed',progress:0,orbitcardState:'rejected',expectedState:'funding_pending',
-                    message:ready?'原卡片补款已确认，CDK 已释放；请重新验证卡密并提交最新 Session 继续充值':'平台已确认原卡片补款失败，会员充值未提交，CDK 已释放'});
-                audit({jobKey:task.job_key,source:'orbitcard',event:'card_funding_resolved',text:ready?'原补款已确认，等待重新提交 Session':'原补款失败，释放本次兑换预占',data:{funding_key:funding.funding_key,applied:result.applied}});
-                return {success:true,applied:result.applied,querySkipped:true};
-            }
-            return {success:true,querySkipped:true,waitMs:60000};
-        }
-        if (task.orbitcard_state === 'card_pending') {
-            await reconcileCards();
-            const issue = await store.getCardIssueForTask(task.job_key);
-            if (issue && ['ready','failed'].includes(issue.state)) {
-                if (Number(task.orbitcard_retry_attempt_no || 1) > 1) {
-                    const result=await lockSupport(task.job_key,'card_pending',
-                        '支付重试期间新卡申请需要人工核对，CDK 已锁定；请联系人工售后');
-                    return {success:true,applied:result.applied,querySkipped:true};
-                }
-                const ready = issue.state === 'ready';
-                const result = await settle(task.job_key, { status: ready ? 'retry' : 'failed', progress: 0,
-                    orbitcardState: 'rejected', expectedState: 'card_pending', message: ready
-                        ? '支付卡已准备好，CDK 已释放；请重新验证卡密并提交最新 Session 继续充值'
-                        : '平台已确认开卡失败，尚未提交会员充值，CDK 已释放' });
-                audit({ jobKey: task.job_key, source: 'orbitcard', event: 'card_preparation_resolved', text: ready ? '支付卡已准备，等待重新提交 Session' : '开卡失败，已释放 CDK', data: { issue_key: issue.issue_key, applied: result.applied } });
-                return { success: true, applied: result.applied, querySkipped: true };
-            }
-            return { success: true, querySkipped: true, waitMs:60000 };
         }
         if (task.orbitcard_state === 'prepared') {
             let preparedIssue = null;
@@ -117,30 +81,37 @@ module.exports = function createRecovery({ store, query, activeJobs, audit, noti
     }
     let inProgress = false;
     const pausedUntil = new Map();
+    function pause(jobKey, waitMs, failed = false) {
+        const failures = failed ? Math.min(5, (pausedUntil.get(jobKey)?.failures || 0) + 1) : 0;
+        const delay = Math.min(24 * 60 * 60 * 1000, Math.max(Number(waitMs) || 0,
+            failed ? Math.min(300000, 30000 * 2 ** (failures - 1)) : 0));
+        if (!pausedUntil.has(jobKey) && pausedUntil.size >= 1000) pausedUntil.delete(pausedUntil.keys().next().value);
+        pausedUntil.set(jobKey, { until: now() + delay, failures });
+    }
     async function recover() {
         if (inProgress) return;
         inProgress = true;
         try {
+            for (const [key, state] of pausedUntil) if (state.until + 600000 <= now()) pausedUntil.delete(key);
             const tasks = await store.listRecoverableOrbitcardTasks();
             for (const task of tasks) {
-                if ((pausedUntil.get(task.job_key) || 0) > Date.now()) continue;
+                if ((pausedUntil.get(task.job_key)?.until || 0) > now()) continue;
                 try {
                     const result = await refreshTask(task);
                     if(result.waitMs) {
                         await store.noteQueryAttempt(task.job_key);
-                        pausedUntil.set(task.job_key,Date.now()+result.waitMs);
+                        pause(task.job_key, result.waitMs);
                     }
                     if (!result.querySkipped) {
                         await store.noteQueryAttempt(task.job_key);
-                        pausedUntil.set(task.job_key, Date.now() + Math.max(result.success ? 10000 : 30000, result.retryAfterMs || 0));
+                        pause(task.job_key, Math.max(10000, result.retryAfterMs || 0), !result.success);
                     }
                 } catch (_) {
                     await store.noteQueryAttempt(task.job_key).catch(() => {});
-                    pausedUntil.set(task.job_key, Date.now() + 30000);
+                    pause(task.job_key, 30000, true);
                     audit({ jobKey: task.job_key, source: 'orbitcard', event: 'recovery_error', text: '原单恢复暂时失败，保留订单与 CDK，下次继续查询' });
                 }
             }
-            for (const [key, until] of pausedUntil) if (until <= Date.now()) pausedUntil.delete(key);
         } finally { inProgress = false; }
     }
     return { refreshTask, recover };

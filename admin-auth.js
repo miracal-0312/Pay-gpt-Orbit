@@ -16,6 +16,16 @@ const TG_CODE_MAX_ATTEMPTS = 5;
 
 const loginAttempts = new Map();
 const tgLoginCodes = new Map();
+const MAX_AUTH_ENTRIES = 10000;
+let nextCacheCleanupAt = 0;
+function pruneAuthCaches(now = Date.now()) {
+    if (now < nextCacheCleanupAt) return;
+    nextCacheCleanupAt = now + 60000;
+    for (const [key, entry] of loginAttempts) {
+        if (now >= Math.max(entry.firstAt + LOGIN_WINDOW_MS, entry.lockedUntil || 0)) loginAttempts.delete(key);
+    }
+    for (const [key, entry] of tgLoginCodes) if (now >= entry.exp) tgLoginCodes.delete(key);
+}
 
 function resolveAdminTokenSecret() {
     const secret = process.env.ADMIN_TOKEN_SECRET || '';
@@ -23,30 +33,8 @@ function resolveAdminTokenSecret() {
     return secret;
 }
 
-function encodeBase64Url(input) {
-    return Buffer.from(input)
-        .toString('base64')
-        .replace(/\+/g, '-')
-        .replace(/\//g, '_')
-        .replace(/=+$/g, '');
-}
-
-function decodeBase64Url(input) {
-    const normalized = String(input || '')
-        .replace(/-/g, '+')
-        .replace(/_/g, '/')
-        .padEnd(Math.ceil(String(input || '').length / 4) * 4, '=');
-    return Buffer.from(normalized, 'base64').toString('utf8');
-}
-
 function signPayload(encodedPayload, secret = resolveAdminTokenSecret()) {
-    return crypto
-        .createHmac('sha256', secret)
-        .update(encodedPayload)
-        .digest('base64')
-        .replace(/\+/g, '-')
-        .replace(/\//g, '_')
-        .replace(/=+$/g, '');
+    return crypto.createHmac('sha256', secret).update(encodedPayload).digest('base64url');
 }
 
 function safeEqualString(left, right) {
@@ -80,7 +68,7 @@ function issueSignedToken(payload, ttlMs, secret = resolveAdminTokenSecret()) {
         iat: now,
         exp: now + ttlMs
     };
-    const encodedPayload = encodeBase64Url(JSON.stringify(body));
+    const encodedPayload = Buffer.from(JSON.stringify(body)).toString('base64url');
     const signature = signPayload(encodedPayload, secret);
     return {
         token: `${encodedPayload}.${signature}`,
@@ -101,7 +89,7 @@ function verifySignedToken(token, { expectedSub, secret = resolveAdminTokenSecre
         return null;
     }
     try {
-        const payload = JSON.parse(decodeBase64Url(encodedPayload));
+        const payload = JSON.parse(Buffer.from(encodedPayload, 'base64url').toString('utf8'));
         if (!payload || !payload.exp || Date.now() >= Number(payload.exp)) {
             return null;
         }
@@ -160,11 +148,8 @@ function verifySecondaryToken(token) {
 }
 
 function getClientMeta(req) {
-    const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
-    const ip = forwarded
-        || String(req.headers['x-real-ip'] || '').trim()
-        || req.socket?.remoteAddress
-        || '';
+    // Express resolves req.ip using the server's explicit trusted proxy policy.
+    const ip = req.ip || req.socket?.remoteAddress || '';
     return {
         ip: ip.replace(/^::ffff:/, ''),
         userAgent: String(req.headers['user-agent'] || '').slice(0, 512),
@@ -179,7 +164,10 @@ function normalizeEmail(email) {
 function checkLoginRateLimit(ip) {
     const key = String(ip || 'unknown').slice(0, 45);
     const now = Date.now();
+    pruneAuthCaches(now);
+    if (!loginAttempts.has(key) && loginAttempts.size >= MAX_AUTH_ENTRIES) return { allowed: false, retryAfterSec: 60, reason: 'busy' };
     const entry = loginAttempts.get(key) || { count: 0, firstAt: now, lockedUntil: 0 };
+    loginAttempts.set(key, entry);
     if (entry.lockedUntil && now < entry.lockedUntil) {
         const retryAfterSec = Math.ceil((entry.lockedUntil - now) / 1000);
         return { allowed: false, retryAfterSec, reason: 'locked' };
@@ -199,7 +187,9 @@ function checkLoginRateLimit(ip) {
 
 function recordLoginFailure(key, entry) {
     const now = Date.now();
-    const next = entry || { count: 0, firstAt: now, lockedUntil: 0 };
+    pruneAuthCaches(now);
+    if (!loginAttempts.has(key) && loginAttempts.size >= MAX_AUTH_ENTRIES) return;
+    const next = loginAttempts.get(key) || entry || { count: 0, firstAt: now, lockedUntil: 0 };
     next.count += 1;
     if (next.count >= LOGIN_MAX_ATTEMPTS) {
         next.lockedUntil = now + LOGIN_LOCK_MS;
@@ -290,6 +280,8 @@ function getTotpUri(email, secret, issuer = 'PlusPapay') {
 function storeTelegramLoginCode(challengeId, code) {
     const key = String(challengeId || '').trim();
     if (!key) return;
+    pruneAuthCaches();
+    if (!tgLoginCodes.has(key) && tgLoginCodes.size >= MAX_AUTH_ENTRIES) throw new Error('验证码请求过多，请稍后重试');
     tgLoginCodes.set(key, {
         code: String(code),
         exp: Date.now() + TG_CODE_TTL_MS,
@@ -324,15 +316,6 @@ function generateTelegramLoginCode() {
     return String(Math.floor(100000 + Math.random() * 900000));
 }
 
-function is2faRequired(authConfig = {}, telegramSettings = {}) {
-    if (authConfig.totpEnabled && authConfig.totpSecret) {
-        return true;
-    }
-    const botToken = String(telegramSettings.bot_token || '').trim();
-    const adminChatId = String(telegramSettings.admin_chat_id || '').trim();
-    return Boolean(botToken && adminChatId);
-}
-
 function getAvailable2faMethods(authConfig = {}, telegramSettings = {}) {
     const methods = [];
     const totpSecret = String(authConfig.totpSecret || '').trim();
@@ -350,13 +333,7 @@ function getAvailable2faMethods(authConfig = {}, telegramSettings = {}) {
 function resolveLogin2faMethods(authConfig = {}, telegramSettings = {}) {
     const available = getAvailable2faMethods(authConfig, telegramSettings);
     const mode = String(authConfig.login2faMode || 'either').trim().toLowerCase();
-    if (mode === 'totp') {
-        return available.includes('totp') ? ['totp'] : available;
-    }
-    if (mode === 'telegram') {
-        return available.includes('telegram') ? ['telegram'] : available;
-    }
-    return available;
+    return available.includes(mode) ? [mode] : available;
 }
 
 function pickDefaultLogin2faMethod(methods = [], preferred = '') {
@@ -410,7 +387,6 @@ module.exports = {
     storeTelegramLoginCode,
     verifyTelegramLoginCode,
     generateTelegramLoginCode,
-    is2faRequired,
     getAvailable2faMethods,
     resolveLogin2faMethods,
     pickDefaultLogin2faMethod,

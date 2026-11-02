@@ -26,7 +26,7 @@ test('Orbitcard credentials come only from environment, never admin input or old
         async query() { return [[...rows].map(([config_key, config_value]) => ({ config_key, config_value }))]; },
         async execute(sql, params) {
             if (sql.startsWith('DELETE')) params.forEach(key => rows.delete(key));
-            else rows.set(params[0], params[1]);
+            else for (let index = 0; index < params.length; index += 2) rows.set(params[index], params[index + 1]);
             return [{}];
         }
     };

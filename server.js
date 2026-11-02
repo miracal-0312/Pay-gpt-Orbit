@@ -1,13 +1,13 @@
 require('./load-env')();
 
 const express = require('express');
-const path = require('node:path');
-const fs = require('node:fs');
 const WebSocket = require('ws');
+const proxyAddress = require('proxy-addr');
+const { createRequestGuard, limit } = require('./request-guard');
+const taskSockets = require('./task-sockets');
 const store = require('./mysql-store');
 const runtimeLog = require('./runtime-log');
 const adminAuth = require('./admin-auth');
-const api = require('./orbitcard-client');
 const { PLAN_LABELS } = require('./plan-registry');
 const { notifyTelegramEvent } = require('./telegram-notify');
 const app = express();
@@ -22,7 +22,7 @@ function ensureStoreReady() {
 }
 function log(jobKey, text, event = 'task') { runtimeLog.push({ jobKey, source: 'orbitcard', event, text }); }
 function broadcast(jobKey, data) {
-    for (const ws of clients.get(jobKey) || []) if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ jobKey, ...data }));
+    for (const ws of clients.get(jobKey) || []) taskSockets.send(ws, { jobKey, ...data });
 }
 function publicOrder(task) {
     return { provider: task.orbitcard_client_order_no ? 'orbitcard' : 'history',
@@ -45,7 +45,6 @@ const cardService = require('./orbitcard-card-service')({ store, audit: entry =>
 const manualService = require('./orbitcard-manual-service')({ store, activeJobs, cardService, audit: entry => runtimeLog.push(entry) });
 const recovery = require('./order-recovery')({ store, query: require('./orbitcard-query'), activeJobs,
     audit: entry => runtimeLog.push(entry), notify,
-    reconcileCards: async () => cardService.recover(await store.getGptApiConfig()),
     checkBalance: task => store.getGptApiConfig().then(cfg => cardService.canResumeBalance(cfg,task)) });
 let cardRecoveryAt = 0;
 
@@ -53,8 +52,10 @@ const { run: runWorker } = require('./payment-service')({ store, cardService, wo
     activeJobs, activeChallenges, audit: entry => runtimeLog.push(entry), broadcast, log, notify });
 
 app.disable('x-powered-by');
+// Only named proxy addresses/subnets may supply the client IP; never trust arbitrary forwarded headers.
+if (process.env.TRUST_PROXY?.trim()) app.set('trust proxy', process.env.TRUST_PROXY.split(',').map(value => value.trim()).filter(Boolean));
+app.use(createRequestGuard());
 app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '256kb' }));
-app.use((req, res, next) => { if (req.path.startsWith('/api/')) res.set('Cache-Control', 'no-store'); next(); });
 require('./admin-http')(app, { store, ensureStoreReady, getTotalActiveJobs: () => activeJobs.size, cardService, manualService });
 
 app.get('/api/public/runtime', async (req, res, next) => {
@@ -148,27 +149,14 @@ async function start() {
     runtimeLog.initialize();
     await ensureStoreReady();
     server = app.listen(port, () => log('', `Orbitcard 服务已启动，端口 ${port}`, 'server_ready'));
+    server.maxConnections = limit(process.env.HTTP_MAX_CONNECTIONS, 500, 10000);
+    server.requestTimeout = 30000;
+    server.headersTimeout = 15000;
+    server.keepAliveTimeout = 5000;
+    server.setTimeout(120000, socket => socket.destroy());
     wss = new WebSocket.Server({ server, maxPayload: 16384 });
-    wss.on('connection', ws => {
-        let jobKey = null;
-        const unsubscribe = () => { if (jobKey) { clients.get(jobKey)?.delete(ws); if (!clients.get(jobKey)?.size) clients.delete(jobKey); } };
-        ws.on('message', async raw => {
-            try {
-                const data = JSON.parse(raw);
-                if (data.type === 'ping') return ws.send(JSON.stringify({ type: 'pong', ts: data.ts }));
-                if (data.type !== 'subscribe') return;
-                if (!await require('./task-subscription').authorize(data, { store, verifyAdminToken: adminAuth.verifyAdminToken })) return ws.close(1008, 'Unauthorized');
-                if (ws.readyState !== WebSocket.OPEN) return;
-                unsubscribe(); jobKey = data.jobKey;
-                if (!clients.has(jobKey)) clients.set(jobKey, new Set());
-                clients.get(jobKey).add(ws);
-                const task = await store.getTaskStatus(jobKey);
-                if (task && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'snapshot', ...publicOrder(task) }));
-            } catch (_) { ws.close(1008, 'Invalid message'); }
-        });
-        ws.on('close', unsubscribe);
-        ws.on('error', unsubscribe);
-    });
+    taskSockets.attachTaskSockets(wss, { store, verifyAdminToken: adminAuth.verifyAdminToken, publicOrder, clients,
+        getClientIp: req => proxyAddress(req, app.get('trust proxy fn') || (() => false)) });
     const tick = () => {
         store.deliverRedemptionNotifications().catch(() => log('', '商城核销通知暂不可用，将自动重试', 'redemption_notification_error'));
         recovery.recover().catch(() => log('', '后台查单暂不可用，下次继续', 'recovery_error'));

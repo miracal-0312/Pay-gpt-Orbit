@@ -9,11 +9,15 @@ let cdkExporting = false;
 let cdkEditing = null, cdkStatusSaving = false;
 let manualCatalog = { plans: [] }, manualOrders = [];
 let paymentRegionLoadSequence = 0;
+let autoRefreshStarted = Date.now(), autoRefreshBusy = false, autoRefreshFailures = 0;
+let noticeTimer = null;
 function notice(text, type = '') {
+    clearTimeout(noticeTimer);
     const content = String(text ?? '');
     $('notice').className = `message notice-banner ${type}`;
     $('notice').hidden = !content;
     $('noticeText').textContent = content;
+    noticeTimer = content ? setTimeout(() => notice(''), 5000) : null;
 }
 $('closeNotice').addEventListener('click', () => {
     const wasFocused = document.activeElement === $('closeNotice');
@@ -22,12 +26,24 @@ $('closeNotice').addEventListener('click', () => {
 });
 function escapeHtml(value) { return String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch])); }
 function logout() { localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(SECONDARY_KEY); location.assign(loginUrl); }
-async function request(url, body, method = body === undefined ? 'GET' : 'POST') {
+const pendingRequests = new Map();
+function request(url, body, method = body === undefined ? 'GET' : 'POST') {
+    const key = JSON.stringify([method, url, body]);
+    if (pendingRequests.has(key)) return pendingRequests.get(key);
+    if (pendingRequests.size >= 8) return Promise.reject(new Error('当前请求较多，请等待已有操作完成'));
+    const pending = requestOnce(url, body, method).finally(() => pendingRequests.delete(key));
+    pendingRequests.set(key, pending);
+    return pending;
+}
+async function requestOnce(url, body, method) {
     const token = localStorage.getItem(TOKEN_KEY);
     if (!token) { logout(); throw new Error('请先登录'); }
     const headers = { Authorization: `Bearer ${token}`, 'x-admin-secondary-token': localStorage.getItem(SECONDARY_KEY) || '' };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
-    const response = await fetch(url, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 120000);
+    try {
+    const response = await fetch(url, { method, headers, signal: controller.signal, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     let data;
     if (response.status === 401) { logout(); throw new Error('登录已失效'); }
     try { data = await response.json(); }
@@ -42,6 +58,10 @@ async function request(url, body, method = body === undefined ? 'GET' : 'POST') 
         throw error;
     }
     return data;
+    } catch (error) {
+        if (controller.signal.aborted) throw new Error('请求超时；操作可能仍在处理，请查询原结果后再决定是否重试');
+        throw error;
+    } finally { clearTimeout(timeout); }
 }
 async function perform(action, success) {
     try { const result = await action(); if (success) notice(success, 'success'); return result; }
@@ -52,7 +72,7 @@ function renderTasks(tasks) {
     $('tasks').innerHTML = tasks.map(task => {
         const order = task.order || {}, fee = order.fee_status ? `${order.service_fee ?? '—'} ${order.currency || 'USDT'} / ${order.fee_status}` : '—';
         const payment = order.payment ? `${order.payment.amount} ${order.payment.currency}` : '—';
-        const refresh = task.provider === 'orbitcard' ? `<button class="secondary" data-refresh-order="${escapeHtml(task.jobKey)}">查原单</button>` : '<small>历史记录</small>';
+        const refresh = task.provider === 'orbitcard' ? `<button class="secondary" data-refresh-order="${escapeHtml(task.jobKey)}">查原单</button> <button type="button" class="secondary" data-edit-order="${escapeHtml(task.jobKey)}" data-order-status="${escapeHtml(task.status)}">人工修改</button>` : '<small>历史记录</small>';
         const cardLabel = task.card_id || (task.provider !== 'orbitcard' ? '历史未绑定'
             : ['prepared','rejected','balance_blocked','card_pending'].includes(task.orbitcard_state) ? '尚未分配支付卡' : '未记录支付卡');
         const historyAction = task.provider === 'orbitcard' && /旧卡历史次数尚未确认/.test(task.message || '')
@@ -306,6 +326,20 @@ async function saveCdkStatus() {
         $('cdkStatusError').textContent = error.message;
     } finally { cdkStatusSaving = false; $('cdkStatusFields').disabled = false; }
 }
+function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob), link = document.createElement('a');
+    link.href = url; link.download = filename;
+    document.body.append(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+async function downloadAudit(job, prefix = 'task') {
+    const response = await fetch(`/api/admin/task-logs/${encodeURIComponent(job)}/audit`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem(TOKEN_KEY) || ''}` }
+    });
+    if (response.status === 401) { logout(); return; }
+    if (!response.ok) throw new Error((await response.json()).message || '日志下载失败');
+    downloadBlob(await response.blob(), `${prefix}-${job}.jsonl`);
+}
 async function exportCdks() {
     const button = $('exportCdks'), filter = cdkPlanFilter;
     if (cdkExporting) return;
@@ -338,14 +372,7 @@ async function exportCdks() {
             }
             throw new Error(data.message || `导出失败（HTTP ${response.status}）`);
         }
-        const url = URL.createObjectURL(await response.blob());
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = `cdks-${filter || 'all'}-${format}-${new Date().toISOString().slice(0, 10)}.csv`;
-        document.body.append(link);
-        link.click();
-        link.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 60000);
+        downloadBlob(await response.blob(), `cdks-${filter || 'all'}-${format}-${new Date().toISOString().slice(0, 10)}.csv`);
         notice(`${filter ? (cdkPlans[filter] || cardPlans[filter] || filter) : '全部套餐'}的 CDK 已按配置导出${markShipped ? '并标记出库' : '，出库状态未变更'}`, 'success');
         if (query === cdkListQuery()) {
             try { await loadCdks(); }
@@ -382,6 +409,7 @@ async function loadSelected() {
 function selectView(tab) {
     const button = [...$('tabs').querySelectorAll('[data-tab]')].find(item => item.dataset.tab === tab);
     if (!button) return;
+    autoRefreshStarted = Date.now(); autoRefreshFailures = 0;
     selected = tab;
     for (const section of document.querySelectorAll('.view')) section.hidden = section.id !== selected;
     for (const item of $('tabs').querySelectorAll('button')) {
@@ -397,13 +425,17 @@ function selectView(tab) {
 $('tabs').addEventListener('click', event => {
     const button = event.target.closest('[data-tab]'); if (button) selectView(button.dataset.tab);
 });
-$('logout').onclick = logout; $('reload').onclick = () => perform(loadSelected);
+$('logout').onclick = logout; $('reload').onclick = () => { autoRefreshStarted = Date.now(); autoRefreshFailures = 0; return perform(loadSelected); };
 function form(id, handler) {
+    let submitting = false;
     $(id).addEventListener('submit', async event => {
-        event.preventDefault(); const button = $(id).querySelector('button[type=submit],button:not([type])');
+        event.preventDefault();
+        if (submitting) return;
+        submitting = true;
+        const button = $(id).querySelector('button[type=submit],button:not([type])');
         if (button) button.disabled = true;
         try { await handler(); } catch (error) { notice(error.message, 'error'); }
-        finally { if (button) button.disabled = false; }
+        finally { submitting = false; if (button) button.disabled = false; }
     });
 }
 form('unlockForm', async () => {
@@ -600,7 +632,39 @@ $('cdkFilters').addEventListener('click', event => {
     perform(loadCdks);
 });
 $('clearLogs').onclick = () => perform(async () => { await request('/api/admin/runtime-logs/clear', {}); await loadLogs(); notice('显示缓存已清空，磁盘历史保留', 'success'); });
+let orderEditing = null, orderStatusSaving = false;
+function editOrderStatus(button) {
+    if (orderStatusSaving) return;
+    orderEditing = { jobKey: button.dataset.editOrder, status: button.dataset.orderStatus };
+    $('orderStatusCode').textContent = orderEditing.jobKey;
+    $('orderEditStatus').value = ['success', 'failed'].includes(orderEditing.status) ? orderEditing.status : '';
+    $('orderStatusReason').value = '';
+    $('orderStatusError').textContent = '';
+    $('orderStatusDialog').showModal();
+}
+async function saveOrderStatus() {
+    if (!orderEditing || orderStatusSaving) return;
+    orderStatusSaving = true;
+    $('orderStatusFields').disabled = true;
+    $('orderStatusError').textContent = '';
+    try {
+        const result = await request(`/api/admin/orders/${encodeURIComponent(orderEditing.jobKey)}/status`, {
+            status: $('orderEditStatus').value, expected_status: orderEditing.status, reason: $('orderStatusReason').value.trim()
+        });
+        $('orderStatusDialog').close();
+        orderEditing = null;
+        notice(result.message, 'success');
+        try { await loadOverview(); }
+        catch (error) { notice(`结果已保存，但列表刷新失败：${error.message}`, 'error'); }
+    } catch (error) { $('orderStatusError').textContent = error.message; }
+    finally { orderStatusSaving = false; $('orderStatusFields').disabled = false; }
+}
+$('orderStatusForm').addEventListener('submit', event => { event.preventDefault(); saveOrderStatus(); });
+$('cancelOrderStatus').onclick = () => { if (!orderStatusSaving) $('orderStatusDialog').close(); };
+$('orderStatusDialog').addEventListener('cancel', event => { if (orderStatusSaving) event.preventDefault(); });
 document.addEventListener('click', event => {
+    const editOrder = event.target.closest('[data-edit-order]');
+    if (editOrder) editOrderStatus(editOrder);
     if (event.target.closest('[data-manage-card-history]')) selectView('cards');
     const historyButton = event.target.closest('[data-open-card-history]');
     if (historyButton) {
@@ -621,17 +685,9 @@ document.addEventListener('click', event => {
             $('manualSession').focus();
         }
     }
-    const downloadManual = event.target.closest('[data-download-manual]');
-    if (downloadManual) perform(async () => {
-        const job = downloadManual.dataset.downloadManual;
-        const response = await fetch(`/api/admin/task-logs/${encodeURIComponent(job)}/audit`, {
-            headers: { Authorization: `Bearer ${localStorage.getItem(TOKEN_KEY) || ''}` }
-        });
-        if (response.status === 401) { logout(); return; }
-        if (!response.ok) throw new Error((await response.json()).message || '日志下载失败');
-        const url = URL.createObjectURL(await response.blob()), link = document.createElement('a');
-        link.href = url; link.download = `manual-${job}.jsonl`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
-    });
+    const download = event.target.closest('[data-download-manual],[data-download-audit]');
+    if (download) perform(() => downloadAudit(download.dataset.downloadManual || download.dataset.downloadAudit,
+        download.dataset.downloadManual ? 'manual' : 'task'));
     const refreshManual = event.target.closest('[data-refresh-manual]');
     if (refreshManual) perform(async () => {
         refreshManual.disabled = true;
@@ -662,14 +718,6 @@ document.addEventListener('click', event => {
     });
     const refresh = event.target.closest('[data-refresh-order]');
     if (refresh) perform(async () => { refresh.disabled = true; try { await request(`/api/admin/orders/${encodeURIComponent(refresh.dataset.refreshOrder)}/refresh`, {}); await loadOverview(); notice('已查询原订单', 'success'); } finally { refresh.disabled = false; } });
-    const download = event.target.closest('[data-download-audit]');
-    if (download) perform(async () => {
-        const job = download.dataset.downloadAudit;
-        const response = await fetch(`/api/admin/task-logs/${encodeURIComponent(job)}/audit`, { headers: { Authorization: `Bearer ${localStorage.getItem(TOKEN_KEY) || ''}` } });
-        if (response.status === 401) { logout(); return; }
-        if (!response.ok) throw new Error((await response.json()).message || '日志下载失败');
-        const url = URL.createObjectURL(await response.blob()), link = document.createElement('a'); link.href = url; link.download = `task-${job}.jsonl`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
-    });
     const changeStatus = event.target.closest('[data-cdk-status]');
     if (changeStatus) editCdkStatus(changeStatus);
     const remove = event.target.closest('[data-delete-cdk]');
@@ -683,4 +731,15 @@ perform(async () => {
     const initialView = location.hash.slice(1);
     if (initialView && initialView !== 'overview') selectView(initialView);
 });
-setInterval(() => { if (!document.hidden && ['overview','logs'].includes(selected)) perform(loadSelected); }, 15000);
+setInterval(async () => {
+    if (document.hidden || !['overview','logs'].includes(selected) || autoRefreshBusy || !autoRefreshStarted) return;
+    if (Date.now() - autoRefreshStarted >= 15 * 60 * 1000 || autoRefreshFailures >= 5) {
+        autoRefreshStarted = 0;
+        notice('自动刷新已暂停，点击刷新按钮可继续。');
+        return;
+    }
+    autoRefreshBusy = true;
+    try { await loadSelected(); autoRefreshFailures = 0; }
+    catch (_) { autoRefreshFailures++; }
+    finally { autoRefreshBusy = false; }
+}, 15000);

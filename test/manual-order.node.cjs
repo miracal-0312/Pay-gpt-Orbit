@@ -300,7 +300,9 @@ function storeFixture({ enqueueRedemption } = {}) {
         plan_type: 'plus', used_at: null }], card: { scope, card_id: 12, history_confirmed: 1,
         active_job: null, provider_status: 'ACTIVE', currency: 'USD', successful_plus: 0 } };
     const clean = sql => sql.replace(/\s+/g, ' ').trim();
-    const runQuery = async (sql, p = []) => {
+    let inTransaction = false;
+    const runQuery = async (sql, p = [], options) => {
+        if (inTransaction) assert.equal(options?.connection?.transaction, true, 'transactional reads must retain their connection');
         const q = clean(sql);
         if (q.startsWith('SELECT * FROM orbitcard_admin_orders WHERE request_id')) return db.orders.filter(o => o.request_id === p[0]
             && (!q.includes("state = 'prepared'") || o.state === 'prepared')).map(o => structuredClone(o));
@@ -320,12 +322,6 @@ function storeFixture({ enqueueRedemption } = {}) {
             mode: p[4], cdk_code: p[5], plan_type: p[6], plan_name: p[7],
             target_email: p[8], card_id: 0, admin_email: p[9], state: 'preparing',
             task_no: null, snapshot: null, message: p[10], issue_key: null
-        });
-        else if (q.startsWith('INSERT INTO orbitcard_admin_orders')) db.orders.push({
-            request_id: p[0], client_order_no: p[1], scope: p[2], api_key_hash: p[3],
-            mode: p[4], cdk_code: p[5], plan_type: p[6], plan_name: p[7],
-            target_email: p[8], card_id: p[9], admin_email: p[10], state: 'prepared',
-            task_no: null, snapshot: null, message: p[11]
         });
         else if (q.startsWith('UPDATE cdk_codes SET used_at = CURRENT_TIMESTAMP')) db.cdks.find(c => c.cdk_code === p[0]).used_at = 'reserved';
         else if (q.startsWith('UPDATE cdk_codes SET used_at = NULL')) {
@@ -361,10 +357,19 @@ function storeFixture({ enqueueRedemption } = {}) {
     };
     const withTransaction = async action => {
         const backup = structuredClone(db);
+        inTransaction = true;
         try { return await action({ transaction: true }); }
         catch (error) { Object.assign(db, backup); throw error; }
+        finally { inTransaction = false; }
     };
     return { db, store: createStore({ runQuery, runExecute, withTransaction, enqueueRedemption }) };
+}
+
+async function prepareOrder(store, input) {
+    const order = await store.prepareManualOrder(input);
+    const card = await store.reserveManualCard(input.requestId, input.cardId, order.client_order_no, input.planType);
+    assert.ok(card, 'test order must reserve an eligible card');
+    return store.markManualPrepared(input.requestId, order.client_order_no, input.cardId);
 }
 
 function manualInput(requestId, overrides = {}) {
@@ -382,7 +387,7 @@ test('manual fulfillment emits a receipt atomically, while test orders and failu
             if (fail) throw Error('outbox unavailable');
             receipts.push(receipt);
         } });
-        await store.createManualOrder(manualInput(id, { mode, cdkCode: mode === 'fulfillment' ? 'KC-READY' : null }));
+        await prepareOrder(store, manualInput(id, { mode, cdkCode: mode === 'fulfillment' ? 'KC-READY' : null }));
         await store.claimManualSubmission(id);
         await store.settleManualOrder(id, { state: 'pending', message: 'pending' });
         assert.equal(receipts.length, 0);
@@ -396,26 +401,26 @@ test('manual fulfillment emits a receipt atomically, while test orders and failu
         assert.equal(receipts.length, mode === 'fulfillment' ? 1 : 0);
     }
     const { store } = storeFixture({ enqueueRedemption: async () => { throw Error('failed order must not emit'); } });
-    await store.createManualOrder(manualInput(id)); await store.claimManualSubmission(id);
+    await prepareOrder(store, manualInput(id)); await store.claimManualSubmission(id);
     await store.settleManualOrder(id, { state: 'failed', message: 'failed' });
 });
 
 test('manual CDK and card reservation settle atomically on verified success or failure', async () => {
     const { db, store } = storeFixture();
-    await assert.rejects(store.createManualOrder(manualInput(id, { acceptedCdkPlans: ['gpt-go'] })), /CDK/);
+    await assert.rejects(prepareOrder(store, manualInput(id, { acceptedCdkPlans: ['gpt-go'] })), /CDK/);
     assert.equal(db.cdks[0].used_at, null);
     assert.equal(db.card.active_job, null);
-    await store.createManualOrder(manualInput(id));
+    await prepareOrder(store, manualInput(id));
     assert.equal(db.cdks[0].used_at, 'reserved');
     assert.equal(db.card.active_job, `manual-${id}`);
-    await assert.rejects(store.createManualOrder(manualInput('36aad0bb-5eb7-4771-93f5-1ebd049b29e0')), /待确认管理员订单/);
+    await assert.rejects(prepareOrder(store, manualInput('36aad0bb-5eb7-4771-93f5-1ebd049b29e0')), /待确认管理员订单/);
     assert.equal(await store.claimManualSubmission(id), true);
     await store.settleManualOrder(id, { state: 'failed', message: 'confirmed failure' });
     assert.equal(db.cdks[0].used_at, null);
     assert.equal(db.card.active_job, null);
     assert.equal(db.card.successful_plus, 0);
     const next = '36aad0bb-5eb7-4771-93f5-1ebd049b29e0';
-    await store.createManualOrder(manualInput(next));
+    await prepareOrder(store, manualInput(next));
     await store.claimManualSubmission(next);
     await store.settleManualOrder(next, { state: 'success', message: 'confirmed success' });
     assert.equal(db.cdks[0].used_at, 'reserved');
@@ -428,7 +433,7 @@ test('manual CDK and card reservation settle atomically on verified success or f
 
 test('late manual-order failure preserves a support-redeemed CDK while releasing the original payment card', async () => {
     const { db, store } = storeFixture();
-    await store.createManualOrder(manualInput(id));
+    await prepareOrder(store, manualInput(id));
     await store.claimManualSubmission(id);
     db.cdks[0].manual_redeemed_at = '2026-10-26';
     await store.settleManualOrder(id, { state: 'failed', message: 'original payment failed' });
@@ -440,7 +445,7 @@ test('late manual-order failure preserves a support-redeemed CDK while releasing
 
 test('manual-order handoff persists through pending queries and confirmed failure cannot release its CDK for recharge', async () => {
     const { db, store } = storeFixture();
-    await store.createManualOrder(manualInput(id)); await store.claimManualSubmission(id);
+    await prepareOrder(store, manualInput(id)); await store.claimManualSubmission(id);
     await store.settleManualOrder(id, { state: 'manual', message: 'support' });
     await store.settleManualOrder(id, { state: 'pending', message: 'upstream pending' });
     assert.equal(db.orders[0].state, 'manual');
@@ -451,7 +456,7 @@ test('manual-order handoff persists through pending queries and confirmed failur
 
 test('a prepared order interrupted before submission releases its CDK and card without a platform call', async () => {
     const { db, store } = storeFixture();
-    await store.createManualOrder(manualInput(id));
+    await prepareOrder(store, manualInput(id));
     assert.equal(db.cdks[0].used_at, 'reserved');
     await store.abandonPreparedManualOrder(id);
     assert.equal(db.orders[0].state, 'failed');
@@ -460,7 +465,7 @@ test('a prepared order interrupted before submission releases its CDK and card w
 });
 
 test('a stale query cannot settle an unsubmitted admin preparation', async () => {
-    const {db,store}=storeFixture(); await store.createManualOrder(manualInput(id));
+    const {db,store}=storeFixture(); await prepareOrder(store, manualInput(id));
     const order=await store.settleManualOrder(id,{state:'success',message:'stale query'});
     assert.equal(order.state,'prepared');assert.equal(db.card.successful_plus,0);
     assert.equal(db.card.active_job,`manual-${id}`);assert.equal(db.cdks[0].used_at,'reserved');

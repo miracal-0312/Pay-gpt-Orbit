@@ -5,6 +5,8 @@ const { progressFor } = require('./orbitcard-cdk');
 const subscription = require('./orbitcard-subscription-service')(api);
 const inFlight = new Map();
 const recent = new Map();
+const MAX_RECENT_QUERIES = 1000;
+const MAX_RETRY_MS = 24 * 60 * 60 * 1000;
 
 async function refresh({ cfg, task, persist, onConfirmedFailure }) {
     if (!task.orbitcard_client_order_no) throw new Error('该任务未绑定 Orbitcard 订单');
@@ -49,7 +51,9 @@ async function refresh({ cfg, task, persist, onConfirmedFailure }) {
     inFlight.set(task.job_key, pending);
     try {
         const result = await pending;
-        recent.set(task.job_key, { result, until: Date.now() + Math.max(5000, result.retryAfterMs || 0) });
+        if (!recent.has(task.job_key) && recent.size >= MAX_RECENT_QUERIES) recent.delete(recent.keys().next().value);
+        const delay = Math.max(5000, Math.min(MAX_RETRY_MS, Number(result.retryAfterMs) || 0));
+        recent.set(task.job_key, { result, until: Date.now() + delay });
         return result;
     } finally { inFlight.delete(task.job_key); }
 }
