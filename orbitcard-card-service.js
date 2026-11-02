@@ -143,7 +143,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
             || !row.history_confirmed || Number(row[`successful_${plan}`])>=LIMITS[plan])) {
             throw new CardPreparationError('原订单已预占卡片但平台列表或次数不一致，禁止换卡或重复开卡');
         }
-        const relevant=saved.filter(row => live.has(Number(row.card_id)) && !excluded.has(Number(row.card_id))
+        const relevant=saved.filter(row => live.has(Number(row.card_id)) && live.get(Number(row.card_id)).provider_status !== 'DELETED' && !excluded.has(Number(row.card_id))
             && row.history_confirmed && Number(row[`successful_${plan}`]) < LIMITS[plan]
             && (!row.active_job || row.active_job===jobKey));
         const details=new Map();
@@ -202,6 +202,28 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
                 attachIssue: (key, issueKey) => store.attachManualIssue(selection.manualRequestId, key, issueKey),
                 blockBalance: (key, required, message) => store.blockManualBalance(selection.manualRequestId, key, required, message)
             } : cardMethods;
+            // Every selection (including retries and manual requests) starts with
+            // a complete provider snapshot. Never fall back to cached card state.
+            async function refreshCards() {
+                const listed = await cardsApi.listCards(cfg);
+                const live = new Map(listed.map(card => [Number(card.card_id), card]));
+                const missing = (await locked.listCards()).filter(card => !live.has(Number(card.card_id)));
+                await locked.syncCards(listed.map(card => card.provider_status === 'DELETED' ? {...card, balance:null} : card));
+                await locked.syncCards(missing.map(card => ({...card,
+                    provider_status:card.provider_status === 'DELETED' ? 'DELETED' : 'UNAVAILABLE',
+                    bin:card.card_bin, balance:null})));
+                record(jobKey, 'cards_refreshed_before_selection', '选卡前已更新卡台状态，注销及列表缺失卡片已停用', {
+                    listed_ids: listed.map(card => card.card_id),
+                    removed_ids: [...listed.filter(card => card.provider_status === 'DELETED'), ...missing].map(card => Number(card.card_id))
+                });
+                return listed;
+            }
+            function requireListedCard(listed, cardId) {
+                const card = listed.find(card => Number(card.card_id) === Number(cardId));
+                if (!card || card.provider_status === 'DELETED') {
+                    throw new CardPreparationError('原订单卡片已注销或不在卡台列表中，已停止支付，请核对原订单；禁止换卡重复充值');
+                }
+            }
             const available=await account(cfg);
             const originalFunding=await locked.fundingForJob(jobKey);
             if(originalFunding) {
@@ -211,9 +233,11 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
                     throw new CardPreparationError('原补款的平台、密钥或套餐与当前订单不一致，禁止继续支付');
                 }
                 if (originalFunding.state === 'failed') throw new CardPreparationError('原补款已失败，请确认原订单后重新发起兑换');
+                requireListedCard(await refreshCards(), originalFunding.card_id);
                 const card = originalFunding.state==='ready'
                     ? await cardsApi.cardDetail(cfg,originalFunding.card_id)
                     : await fundingService.confirm(cfg,locked,originalFunding);
+                await locked.syncCards([card]);
                 const reservation = (await locked.listCards()).find(row => Number(row.card_id)===Number(originalFunding.card_id));
                 if(!reservation || reservation.active_job!==jobKey) {
                     throw new CardPreparationError('原补款卡片占用归属已变更，禁止继续提交订阅');
@@ -238,6 +262,8 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
                     throw new CardPreparationError('原开卡申请的套餐或密钥不一致，请核对原订单');
                 }
                 if (originalIssue.state === 'failed') throw new CardPreparationError('原开卡已失败，请确认原订单后重新发起兑换');
+                const listed = await refreshCards();
+                if (originalIssue.card_id) requireListedCard(listed, originalIssue.card_id);
                 // Finish this job's original issue before looking at unrelated cards.
                 const opened = originalIssue.state === 'ready'
                     ? await cardsApi.cardDetail(cfg, originalIssue.card_id) : await confirmIssue(cfg, locked, originalIssue);
@@ -250,8 +276,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
             }
             const products = await cardsApi.products(cfg),planBudget=budgetFor(products,planType);
             await requireFunds(locked,jobKey,available,planBudget);
-            const listed = await cardsApi.listCards(cfg);
-            await locked.syncCards(listed);
+            const listed = await refreshCards();
             const selected = await reusable(cfg, locked, jobKey, planType, listed, products,planBudget,available,selection);
             if (selected) return selected.card_id;
             const {card:opened,products:latestProducts} = await issueFor(cfg, locked, planType, jobKey, products);
@@ -266,8 +291,13 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
         return store.withCardAllocationLock(cfg.base_url, async locked => {
             try {
                 const listed = await cardsApi.listCards(cfg);
-                const detailed = await cardsApi.cardDetailsInBatches(cfg,listed.map(card=>card.card_id),{allowPartial:true});
+                const deleted = listed.filter(card => card.provider_status === 'DELETED');
+                const readable = listed.filter(card => card.provider_status !== 'DELETED');
+                const detailed = await cardsApi.cardDetailsInBatches(cfg,readable.map(card=>card.card_id),{allowPartial:true});
                 const live = new Map(listed.map(card => [card.card_id, card]));
+                // Absence from a complete list means unavailable, not proven deletion.
+                // Retain quotas and reservations for reconciliation of historical orders.
+                const missing = (await locked.listCards()).filter(card => !live.has(Number(card.card_id)));
                 // List metadata can fill identification fields, never the detail balance/status.
                 for (const card of detailed) {
                     card.product_code ||= live.get(card.card_id)?.product_code || '';
@@ -275,11 +305,17 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
                     card.last4 ||= live.get(card.card_id)?.last4 || '';
                 }
                 await locked.syncCards(detailed);
+                await locked.syncCards([
+                    ...deleted.map(card => ({...card, balance:null})),
+                    ...missing.map(card => ({...card, provider_status:card.provider_status === 'DELETED' ? 'DELETED' : 'UNAVAILABLE',
+                        bin:card.card_bin, balance:null}))
+                ]);
                 const confirmed = new Set(detailed.map(card => card.card_id));
                 const result = { count: detailed.length, listed_ids: listed.map(card => card.card_id),
-                    synced_ids: [...confirmed], failed_ids: listed.filter(card => !confirmed.has(card.card_id)).map(card => card.card_id),
+                    synced_ids: [...confirmed], failed_ids: readable.filter(card => !confirmed.has(card.card_id)).map(card => card.card_id),
+                    removed_ids: [...new Set([...deleted, ...missing, ...detailed.filter(card => card.provider_status === 'DELETED')].map(card => Number(card.card_id)))],
                     checked_at: new Date(now()).toISOString() };
-                record('', 'cards_synchronized', '已同步可读取的平台卡片摘要；缺失详情保留本地快照并标记未同步', result);
+                record('', 'cards_synchronized', '已同步平台卡片摘要，注销及列表缺失卡片已停用；其他缺失详情保留本地快照并标记未同步', result);
                 return result;
             } catch (error) {
                 record('', 'cards_sync_failed', '平台卡片同步失败，本地快照未确认，请勿视为实时余额', {

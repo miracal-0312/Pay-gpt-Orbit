@@ -76,6 +76,9 @@ async function listCards(cfg) {
             cards.set(card.card_id, card);
         }
         const total = data?.total == null ? null : Number(data.total);
+        if (total !== null && (!Number.isSafeInteger(total) || total < cards.size)) {
+            throw new CardPreparationError('卡片列表总数无效，已停止选卡');
+        }
         if (!rows.length) {
             if (Number.isFinite(total) && cards.size < total) throw new CardPreparationError('卡片列表缺页，已停止选卡');
             return [...cards.values()];

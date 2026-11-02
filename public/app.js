@@ -2,7 +2,13 @@
 const $ = id => document.getElementById(id);
 let activeCdk = '', activeJob = '', activePlanLabel = '', generation = 0, timer, expiryTimer, trackingStarted = 0, busy = false;
 const statusNames = { success: '订阅成功', failed: '充值失败', retry: '请重新提交 Session', manual: '处理中 / 结果待确认', running: '正在充值', processing: '正在充值', used: '卡密已使用', unused: '卡密可使用' };
-function message(text, type = '') { $('statusMessage').textContent = text; $('statusMessage').className = `message ${type}`; }
+// Keep provider branding out of customer-facing copy, including stored order
+// messages and upstream errors. API identifiers remain unchanged.
+function publicText(text) {
+    return String(text ?? '').replace(/ORBITCARD_[A-Z0-9_]+/gi, '服务配置')
+        .replace(/orbit\s*card/gi, '充值服务');
+}
+function message(text, type = '') { $('statusMessage').textContent = publicText(text); $('statusMessage').className = `message ${type}`; }
 async function requestJson(url, options = {}) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 30000);
@@ -113,7 +119,7 @@ async function verifyCurrentCdk(event) {
         const result = await post('/api/verify-cdk', { cdk });
         if (current !== generation) return;
         activeCdk = cdk;
-        const data = result.data; activePlanLabel = data.plan_label || data.plan_type;
+        const data = result.data; activePlanLabel = publicText(data.plan_label || data.plan_type);
         $('planInfo').textContent = `${activePlanLabel} · ${statusNames[data.status] || data.status}`;
         $('redeemForm').hidden = !['unused','retry'].includes(data.status) || data.type !== '自助';
         showRedeemStep($('redeemForm').hidden ? 3 : 2);

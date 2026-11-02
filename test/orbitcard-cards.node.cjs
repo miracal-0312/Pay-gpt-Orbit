@@ -90,6 +90,45 @@ function serviceFixture(overrides={}) {
     return {...f,calls,events,api,service,advance:(ms=60000) => {clock+=ms;},setCards:cards => {providerCards=cards;},setAccount:balance => {accountBalance=balance;}};
 }
 
+test('sync retires deleted and absent cards without reading deleted details or erasing history',async()=>{
+    const f=serviceFixture();
+    const a=await f.addCard(42),b=await f.addCard(43);
+    f.db.cards[0].successful_plus=2;
+    f.db.cards[1].active_job='unresolved-order';
+    f.setCards([{...a,status:'DELETED'}]);
+    const result=await f.service.synchronize(cfg);
+    assert.deepEqual(result.failed_ids,[]);
+    assert.deepEqual(result.removed_ids,[42,43]);
+    assert.ok(!f.calls.some(call=>call.operation==='cardDetail'));
+    assert.equal(f.db.cards[0].provider_status,'DELETED');
+    assert.equal(f.db.cards[0].successful_plus,2);
+    assert.equal(f.db.cards[1].provider_status,'UNAVAILABLE');
+    assert.equal(f.db.cards[1].active_job,'unresolved-order');
+    assert.equal(f.db.cards[1].balance,null);
+    f.setCards([{...b,status:'ACTIVE'}]);
+    await f.service.synchronize(cfg);
+    assert.equal(f.db.cards[1].provider_status,'ACTIVE');
+    assert.equal(f.db.cards[1].active_job,'unresolved-order');
+});
+
+test('failed or malformed list never retires local cards',async()=>{
+    for(const response of [{success:false,status:403},{success:true,data:{list:[],total:1}},
+        {success:true,data:{list:[],total:'invalid'}}]) {
+        const f=serviceFixture({getCardList:async()=>response});
+        await f.addCard(42);
+        await assert.rejects(f.service.synchronize(cfg));
+        assert.equal(f.db.cards[0].provider_status,'ACTIVE');
+    }
+});
+
+test('deleted unconfirmed cards do not block allocation or trigger detail reads',async()=>{
+    const f=serviceFixture(),a=await f.addCard(42,false),b=await f.addCard(43);
+    f.setCards([{...a,status:'DELETED'},{...b,status:'ACTIVE',balance:50}]);
+    const task=await f.claim();
+    assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),43);
+    assert.deepEqual(f.calls.filter(call=>call.operation==='cardDetail').map(call=>call.body.card_id),[43]);
+});
+
 test('handed-off tasks never enter allocation or resume an unknown card application', async () => {
     for (const state of ['manual', 'support_locked', 'card_pending', 'funding_pending']) {
         const f = serviceFixture(), task = await f.claim();
@@ -149,6 +188,47 @@ test('a previously managed card missing from the live list is skipped and a new 
     assert.equal(f.calls.filter(call=>call.operation==='createCard').length,1);
     assert.equal(f.calls.filter(call=>call.operation==='rechargeCard').length,1);
     assert.ok(f.events.some(event=>event.event==='card_unavailable'&&event.data.reason==='missing_from_platform_list'));
+    assert.equal(f.db.cards.find(card=>card.card_id===42).provider_status,'UNAVAILABLE');
+    assert.equal(f.db.cards.find(card=>card.card_id===42).balance,null);
+});
+
+test('every selection refreshes provider removals and preserves local usage history',async()=>{
+    const f=serviceFixture(),a=await f.addCard(42),b=await f.addCard(43);
+    f.setCards([{...a,status:'ACTIVE',balance:50},{...b,status:'ACTIVE',balance:50}]);
+    const first=await f.claim();assert.equal(await f.service.allocate(cfg,first.jobKey,'plus'),42);
+    await f.settle(first,'success');
+    f.setCards([{...a,status:'DELETED'},{...b,status:'ACTIVE',balance:50}]);
+    const next=await f.claim();assert.equal(await f.service.allocate(cfg,next.jobKey,'plus'),43);
+    assert.equal(f.calls.filter(call=>call.operation==='getCardList').length,2);
+    assert.equal(f.db.cards[0].provider_status,'DELETED');
+    assert.equal(f.db.cards[0].balance,null);
+    assert.equal(f.db.cards[0].successful_plus,1);
+});
+
+test('original funded and opened cards cannot resume after removal even when detail remains ACTIVE',async()=>{
+    for(const kind of ['funded','opened']) for(const removed of ['missing','deleted','list_failure']) {
+        let failList=false;
+        const f=serviceFixture({getCardList:async()=>failList?{success:false,status:503}:
+            {success:true,data:{list:removed==='deleted'?[{card_id:42,status:'DELETED'}]:[],total:removed==='deleted'?1:0}}});
+        const card=await f.addCard(42),task=await f.claim();
+        // Override the initial empty list only while preparing the original card.
+        const originalList=f.api.listCards;
+        f.api.listCards=async()=>[f.api.normalizeCard({...card,status:'ACTIVE',balance:kind==='funded'?5:50})];
+        f.setCards([{...card,status:'ACTIVE',balance:kind==='funded'?5:50}]);
+        if(kind==='opened') {
+            const methods=f.store.cardMethods(cfg.base_url);
+            await methods.createIssue({issue_key:'removed-ready',job_key:task.jobKey,plan_type:'plus',product_code:'p1',amount:'20.00',
+                credential_hash:require('node:crypto').createHash('sha256').update(cfg.api_key).digest('hex'),request_body:'{}'});
+            await methods.completeIssue({issue_key:'removed-ready'},card);
+        }
+        assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),42);
+        f.api.listCards=originalList;failList=removed==='list_failure';
+        const before=f.calls.length;
+        await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/卡台列表|卡片列表读取失败/);
+        assert.ok(!f.calls.slice(before).some(call=>['cardDetail','createCard','rechargeCard'].includes(call.operation)));
+        assert.equal(f.db.cards[0].active_job,task.jobKey);
+        assert.equal(f.db.cards[0].provider_status,removed==='list_failure'?'ACTIVE':removed==='deleted'?'DELETED':'UNAVAILABLE');
+    }
 });
 
 test('a pending opening owned by another order is never adopted as this payment card',async () => {

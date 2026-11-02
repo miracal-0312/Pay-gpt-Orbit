@@ -12,6 +12,10 @@ function decideCards({ saved, listed, detailed, products, jobKey, planType, excl
         const id = Number(row.card_id), owned = row.active_job === jobKey;
         if (excluded.has(id)) { skipped.push({ card_id: id, reason: 'previous_payment_failed' }); continue; }
         if (!live.has(id)) { skipped.push({ card_id: id, reason: 'missing_from_platform_list' }); continue; }
+        if (live.get(id).provider_status === 'DELETED') {
+            if (owned) throw new CardPreparationError('已预占卡片已注销，请核对原订单');
+            skipped.push({ card_id: id, reason: 'inactive', status: 'DELETED' }); continue;
+        }
         if (!row.history_confirmed) { waiting.push({ card_id: id, reason: 'history_unconfirmed' }); continue; }
         const used = Number(row[`successful_${plan}`]);
         if (!Number.isInteger(used) || used < 0) throw new CardPreparationError('卡片历史次数无效，请管理员核对后继续');
