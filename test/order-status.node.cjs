@@ -34,15 +34,36 @@ test('manual failure stops payment and retains CDK without redemption notificati
     assert.equal(f.writes[0].args[3], 'support_locked');
     assert.equal(f.events.some(e => e[0] === 'redemption'), false);
 });
-test('conflicting, stale and redeemed orders cannot be changed', async () => {
-    for (const scenario of ['lock', 'stale', 'older', 'redeemed', 'success', 'reason']) {
+test('manually redeemed CDK allows original order failure without undoing redemption or resuming payment', async () => {
+    const f = fixture();
+    Object.assign(f.code, {
+        used_at: '2026-11-01', manual_redeemed_at: '2026-11-02',
+        manual_redeemed_by: 'admin@example.com', manual_redemption_reason: 'Delivered separately'
+    });
+    await f.save({ status: 'failed' });
+    assert.equal(f.writes[0].args[0], 'failed');
+    assert.equal(f.writes[0].args[3], 'support_locked');
+    const cdkWrites = f.writes.filter(w => /UPDATE cdk_codes/.test(w.sql));
+    assert.equal(cdkWrites.length, 1);
+    assert.equal(cdkWrites[0].sql, 'UPDATE cdk_codes SET used_at = COALESCE(used_at, CURRENT_TIMESTAMP) WHERE cdk_code = ?');
+    assert.ok(f.events.some(e => e[0] === 'card' && e[1] === 'job-1' && e[2] === 'failed'));
+    assert.equal(f.events.some(e => e[0] === 'redemption'), false);
+    assert.equal(f.writes[2].args[0], 'order_status_changed');
+    const automation = require('../payment-automation')({ runQuery: async sql => [sql.includes('cdk_codes')
+        ? { ...f.code, is_active: 1 } : { ...f.task, status: 'failed', orbitcard_state: 'support_locked' }] });
+    assert.equal((await automation.paymentOwner('job-1')).allowed, false);
+    assert.equal(f.events.at(-1), 'released');
+});
+
+test('conflicting, stale and successful orders cannot be changed', async () => {
+    for (const scenario of ['lock', 'stale', 'older', 'success', 'redeemed-success', 'reason']) {
         const f = fixture();
         if (scenario === 'lock') f.lock();
         if (scenario === 'stale') f.task.status = 'running';
         if (scenario === 'older') f.task.job_key = 'newer';
-        if (scenario === 'redeemed') f.code.manual_redeemed_at = '2026-11-02';
-        if (scenario === 'success') f.task.status = 'success';
-        await assert.rejects(f.save({ status: 'failed', ...(scenario === 'success' ? { expectedStatus: 'success' } : {}), ...(scenario === 'reason' ? { reason: ' ' } : {}) }), e => [400, 409].includes(e.status));
+        if (scenario === 'redeemed-success') f.code.manual_redeemed_at = '2026-11-02';
+        if (scenario.endsWith('success')) f.task.status = 'success';
+        await assert.rejects(f.save({ status: 'failed', ...(scenario.endsWith('success') ? { expectedStatus: 'success' } : {}), ...(scenario === 'reason' ? { reason: ' ' } : {}) }), e => [400, 409].includes(e.status));
         assert.equal(f.writes.length, 0);
     }
 });
