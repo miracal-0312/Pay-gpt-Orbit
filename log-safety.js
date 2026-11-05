@@ -32,4 +32,4 @@ function sanitize(value, key = '', depth = 0) {
     return String(value);
 }
 
-module.exports = { redactText, sanitize };
+module.exports = { sanitize };

@@ -1,8 +1,7 @@
 'use strict';
+const poolPolicy = require('./orbitcard-pool');
 
-const { cardScope, LIMITS } = require('./orbitcard-card-policy');
-
-const { PROVIDER_TO_PLAN: COUNTED_PLANS } = require('./plan-registry');
+const { cardScope } = require('./orbitcard-card-policy');
 
 module.exports = function createManualStore({ runQuery, runExecute, withTransaction, enqueueRedemption = async () => {} }) {
     async function getManualOrder(requestId, options) {
@@ -59,7 +58,6 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
     }
 
     async function reserveManualCard(requestId, cardId, jobKey, planType) {
-        const plan = COUNTED_PLANS[planType] || planType;
         return withTransaction(async connection => {
             const options = { connection };
             const [order] = await runQuery('SELECT * FROM orbitcard_admin_orders WHERE request_id = ? FOR UPDATE', [requestId], options);
@@ -71,12 +69,12 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
             }
             const [card] = await runQuery('SELECT * FROM orbitcard_managed_cards WHERE scope = ? AND card_id = ? FOR UPDATE',
                 [order.scope, cardId], options);
-            if (!card || !card.history_confirmed || card.provider_status !== 'ACTIVE' || card.currency !== 'USD'
-                || Number(card[`successful_${plan}`]) >= LIMITS[plan]) return null;
+            if (!card || card.provider_status !== 'ACTIVE' || card.currency !== 'USD'
+                || !poolPolicy.eligible(card)) return null;
             if (Number(order.card_id) === Number(cardId) && card.active_job === jobKey) return card;
             if (card.active_job) return null;
-            await runExecute('UPDATE orbitcard_managed_cards SET active_job = ?, active_plan = ? WHERE scope = ? AND card_id = ?',
-                [jobKey, plan, order.scope, cardId], options);
+            await runExecute('UPDATE orbitcard_managed_cards SET active_job = ? WHERE scope = ? AND card_id = ?',
+                [jobKey, order.scope, cardId], options);
             await runExecute('UPDATE orbitcard_admin_orders SET card_id = ?, message = ? WHERE request_id = ? AND state = \'preparing\'',
                 [cardId, '支付卡已预占，正在核对或补足卡内资金', requestId], options);
             return { ...card, active_job: jobKey };
@@ -105,7 +103,7 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
                 const [card] = await runQuery('SELECT * FROM orbitcard_managed_cards WHERE scope = ? AND card_id = ? FOR UPDATE',
                     [order.scope, order.card_id], options);
                 if (!card || card.active_job !== jobKey) throw new Error('管理员订单支付卡占用记录不一致，不能自动释放');
-                await runExecute('UPDATE orbitcard_managed_cards SET active_job = NULL, active_plan = NULL WHERE scope = ? AND card_id = ? AND active_job = ?',
+                await runExecute('UPDATE orbitcard_managed_cards SET active_job = NULL WHERE scope = ? AND card_id = ? AND active_job = ?',
                     [order.scope, order.card_id, jobKey], options);
             }
             if (order.cdk_code) {
@@ -155,7 +153,7 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
             const [card] = await runQuery('SELECT * FROM orbitcard_managed_cards WHERE scope = ? AND card_id = ? FOR UPDATE',
                 [order.scope, order.card_id], options);
             if (!card || card.active_job !== order.client_order_no) throw new Error('管理员订单支付卡占用记录不一致');
-            await runExecute('UPDATE orbitcard_managed_cards SET active_job = NULL, active_plan = NULL WHERE scope = ? AND card_id = ? AND active_job = ?',
+            await runExecute('UPDATE orbitcard_managed_cards SET active_job = NULL WHERE scope = ? AND card_id = ? AND active_job = ?',
                 [order.scope, order.card_id, order.client_order_no], options);
             await runExecute("UPDATE orbitcard_admin_orders SET state = 'failed', message = '提交前中断；未调用平台扣款，CDK 与支付卡已释放' WHERE request_id = ? AND state = 'prepared'", [requestId], options);
             return getManualOrder(requestId, options);
@@ -190,9 +188,7 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
                 const [card] = await runQuery('SELECT * FROM orbitcard_managed_cards WHERE scope = ? AND card_id = ? FOR UPDATE',
                     [order.scope, order.card_id], options);
                 if (!card || card.active_job !== order.client_order_no) throw new Error('管理员订单的支付卡占用记录不一致');
-                const counted = COUNTED_PLANS[order.plan_type];
-                const increment = state === 'success' && counted ? `, successful_${counted} = successful_${counted} + 1` : '';
-                await runExecute(`UPDATE orbitcard_managed_cards SET active_job = NULL, active_plan = NULL${increment}
+                await runExecute(`UPDATE orbitcard_managed_cards SET active_job = NULL
                     WHERE scope = ? AND card_id = ? AND active_job = ?`,
                 [order.scope, order.card_id, order.client_order_no], options);
             }

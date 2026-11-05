@@ -37,6 +37,8 @@ test('shared admin handlers preserve login tokens, 2FA failures and route-specif
     assert.equal(login.data.loginPath, '/admin-login'); assert.equal(auth.verifyAdminToken(login.data.token).email, config.email);
     assert.equal(logs.at(-1).event, 'login_success');
     const headers = { Authorization: `Bearer ${login.data.token}`, 'x-admin-secondary-token': auth.issueSecondaryToken(1, '127.0.0.1').token };
+    const removedSession = await fetch(base + '/api/admin/secondary/session', { headers });
+    assert.equal(removedSession.status, 404);
     assert.deepEqual(await post('/api/admin/gpt-api', {}, headers), { status: 400, data: { success: false, message: 'invalid config' } });
     assert.deepEqual(await post('/api/admin/orders/order-1/status', {}, headers), { status: 409, data: { success: false, message: 'stale order' } });
     const failedQuery = await fetch(base + '/api/admin/task-logs', { headers });

@@ -249,4 +249,4 @@ function issueResult(data) {
 }
 
 module.exports = { normalizeCard, positiveId, listCards, cardDetail, cardDetails, cardDetailsInBatches, normalizeProducts, products, planPrice, selection, chooseProduct,
-    openingSelection, chooseOpeningProduct, createCardBody, issueResult };
+    chooseOpeningProduct, createCardBody, issueResult };

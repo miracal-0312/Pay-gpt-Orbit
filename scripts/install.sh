@@ -7,4 +7,4 @@ node -e "if (Number(process.versions.node.split('.')[0]) < 24) process.exit(1)" 
 npm ci --omit=dev --ignore-scripts
 if [ ! -f .env ]; then cp .env.example .env; fi
 echo 'Dependencies installed. Configure .env and MySQL, then run npm start.'
-echo 'Set the paired Orbitcard API Key and platform card ID in the administrator UI before enabling redemptions.'
+echo 'Set ORBITCARD_API_KEY and ORBITCARD_API_SECRET in .env, then verify the API connection and card-pool permissions in the administrator UI before enabling redemptions.'

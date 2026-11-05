@@ -1,7 +1,8 @@
 'use strict';
+const poolPolicy = require('./orbitcard-pool');
 
 const money = require('./orbitcard-money');
-const { planFor, LIMITS, CardPreparationError } = require('./orbitcard-card-policy');
+const { planFor, CardPreparationError } = require('./orbitcard-card-policy');
 
 // Pure decisions over one platform snapshot. No network requests or persistence.
 function decideCards({ saved, listed, detailed, products, jobKey, planType, excludedCardIds = [], priceFor }) {
@@ -16,10 +17,10 @@ function decideCards({ saved, listed, detailed, products, jobKey, planType, excl
             if (owned) throw new CardPreparationError('已预占卡片已注销，请核对原订单');
             skipped.push({ card_id: id, reason: 'inactive', status: 'DELETED' }); continue;
         }
-        if (!row.history_confirmed) { waiting.push({ card_id: id, reason: 'history_unconfirmed' }); continue; }
-        const used = Number(row[`successful_${plan}`]);
-        if (!Number.isInteger(used) || used < 0) throw new CardPreparationError('卡片历史次数无效，请管理员核对后继续');
-        if (used >= LIMITS[plan]) { skipped.push({ card_id: id, reason: 'limit_reached', successful_uses: used, limit: LIMITS[plan] }); continue; }
+        if (row.transaction_count == null) { waiting.push({ card_id: id, reason: 'transactions_unconfirmed' }); continue; }
+        const used = Number(row.transaction_count);
+        if (!Number.isInteger(used) || used < 0) throw new CardPreparationError('平台清算次数无效，请重新同步后继续');
+        if (!poolPolicy.eligible(row)) { skipped.push({ card_id: id, reason: 'limit_reached', successful_uses: used, limit: poolPolicy.MAX_USES }); continue; }
         if (row.active_job && !owned) { waiting.push({ card_id: id, reason: 'busy' }); continue; }
         const detail = details.get(id);
         if (!detail) {

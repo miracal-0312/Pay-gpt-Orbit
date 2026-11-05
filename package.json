@@ -6,8 +6,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test test/*.node.cjs",
-    "test:orbitcard": "node --test test/*.node.cjs"
+    "test": "node --test test/*.node.cjs"
   },
   "engines": {
     "node": ">=24"

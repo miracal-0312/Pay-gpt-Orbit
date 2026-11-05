@@ -2,7 +2,7 @@
 
 const crypto = require('node:crypto');
 
-const { CARD_LIMITS: LIMITS, paymentPlan } = require('./plan-registry');
+const { paymentPlan } = require('./plan-registry');
 class CardPreparationError extends Error {}
 class AccountBalanceError extends CardPreparationError {}
 class FundingPendingError extends CardPreparationError {}
@@ -21,26 +21,6 @@ function cardScope(baseUrl) {
     return crypto.createHash('sha256').update(url.origin).digest('hex');
 }
 
-// Count unresolved orders as occupied slots. Success replaces a reservation,
-// rather than incrementing a separate counter which could be applied twice.
-function capacity(planType, reservations) {
-    const plan = planFor(planType);
-    let used = 0, reserved = 0;
-    for (const row of reservations) {
-        if (row.state === 'released') continue;
-        // Unknown ledger states cannot silently make a card available again.
-        if (!['reserved', 'consumed'].includes(row.state) || !Object.hasOwn(LIMITS, row.plan_type)) {
-            return { plan, limit: LIMITS[plan], used, reserved, remaining: 0, eligible: false, reason: 'unknown_history' };
-        }
-        if (row.plan_type !== plan) continue;
-        if (row.state === 'consumed') used++; else reserved++;
-    }
-    const remaining = Math.max(0, LIMITS[plan] - used - reserved);
-    const reason = remaining ? null : 'limit_reached';
-    return { plan, limit: LIMITS[plan], used, reserved, remaining,
-        eligible: reason === null, reason };
-}
-
 function settlementState(current, orbitcardState) {
     if (current === 'consumed') return current;
     if (orbitcardState === 'success') return 'consumed';
@@ -48,5 +28,5 @@ function settlementState(current, orbitcardState) {
     return current;
 }
 
-module.exports = { LIMITS, planFor, cardScope, capacity, settlementState, CardPreparationError, AccountBalanceError, FundingPendingError,
+module.exports = { planFor, cardScope, settlementState, CardPreparationError, AccountBalanceError, FundingPendingError,
     CardDataError, CardSwitchExhaustedError };

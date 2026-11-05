@@ -365,7 +365,6 @@ function createRequireSecondaryAuth(store, ensureStoreReady) {
 }
 
 module.exports = {
-    ADMIN_TOKEN_TTL_MS,
     ADMIN_REFRESH_AFTER_MS,
     resolveAdminTokenSecret,
     createPasswordHash,
@@ -375,7 +374,6 @@ module.exports = {
     issueLoginChallenge,
     verifyLoginChallenge,
     issueSecondaryToken,
-    verifySecondaryToken,
     getClientMeta,
     normalizeEmail,
     checkLoginRateLimit,

@@ -23,7 +23,7 @@ const DEFAULT_ADMIN_LOGIN_PATH = String(process.env.ADMIN_LOGIN_PATH || 'admin-l
 const DEFAULT_ADMIN_PANEL_PATH = String(process.env.ADMIN_PANEL_PATH || 'admin').trim().toLowerCase();
 const GPT_API_CONFIG_KEYS = [
     'gpt_api_enabled', 'gpt_api_base_url', 'gpt_api_protocol_version',
-    'orbitcard_max_fee', 'orbitcard_product_code', 'orbitcard_safety_margin', 'orbitcard_max_initial_amount', 'orbitcard_payment_regions'
+    'orbitcard_max_fee', 'orbitcard_product_code', 'orbitcard_max_initial_amount', 'orbitcard_payment_regions'
 ];
 
 function getPool() {
@@ -113,7 +113,7 @@ async function ensureGptApiConfigDefaults() {
         const saved = Object.fromEntries(rows.map(row => [row.config_key, row.config_value]));
         const defaults = { gpt_api_enabled: '0', gpt_api_base_url: orbitcardConfig.DEFAULT_BASE_URL,
             orbitcard_max_fee: '',
-            orbitcard_product_code: '', orbitcard_safety_margin: '1', orbitcard_max_initial_amount: '',
+            orbitcard_product_code: '', orbitcard_max_initial_amount: '',
             orbitcard_payment_regions: '{}',
         };
         for (const [key, value] of Object.entries(defaults)) {
@@ -143,7 +143,6 @@ async function getGptApiConfig() {
         api_key: String(process.env.ORBITCARD_API_KEY || '').trim(),
         orbitcard_max_fee: String(map.orbitcard_max_fee || ''),
         orbitcard_product_code: String(map.orbitcard_product_code || ''),
-        orbitcard_safety_margin: String(map.orbitcard_safety_margin ?? '1'),
         orbitcard_max_initial_amount: String(map.orbitcard_max_initial_amount || ''),
         orbitcard_payment_regions: orbitcardConfig.normalizePaymentRegions(JSON.parse(map.orbitcard_payment_regions || '{}'))
     };
@@ -161,7 +160,7 @@ async function saveGptApiConfig(input = {}) {
     const values = { gpt_api_enabled: cfg.enabled ? '1' : '0', gpt_api_base_url: cfg.base_url,
         gpt_api_protocol_version: orbitcardConfig.PROTOCOL_VERSION,
         orbitcard_max_fee: cfg.orbitcard_max_fee,
-        orbitcard_product_code: cfg.orbitcard_product_code, orbitcard_safety_margin: cfg.orbitcard_safety_margin,
+        orbitcard_product_code: cfg.orbitcard_product_code,
         orbitcard_max_initial_amount: cfg.orbitcard_max_initial_amount,
         orbitcard_payment_regions: JSON.stringify(cfg.orbitcard_payment_regions) };
     await saveConfigValues(values);
@@ -353,4 +352,4 @@ async function updateAdminPassword(password) {
         passwordVersion: nextVersion
     };
 }
-module.exports = { getPool, openLockConnection, createPasswordHash, runQuery, runExecute, withTransaction, ensureGptApiConfigDefaults, getGptApiConfig, saveGptApiConfig, hasColumn, ensureColumn, getAppConfigValue, getConfigValues, saveConfigValues, getTelegramConfig, saveTelegramConfig, getMaintenanceModeState, getAdminAuthConfig, saveAdmin2faLoginMode, getAdminPaths, saveAdminPaths, updateAdminEmail, updateAdminSecondaryPassword, saveAdminTotpConfig, insertAdminLoginLog, listAdminLoginLogs, updateAdminPassword, close: async () => { if (pool) await pool.end(); }, connectionInfo: { host: DB_HOST, port: DB_PORT, database: DB_NAME, user: DB_USER } };
+module.exports = { getPool, openLockConnection, createPasswordHash, runQuery, runExecute, withTransaction, ensureGptApiConfigDefaults, getGptApiConfig, saveGptApiConfig, ensureColumn, getAppConfigValue, getConfigValues, saveConfigValues, getTelegramConfig, saveTelegramConfig, getMaintenanceModeState, getAdminAuthConfig, saveAdmin2faLoginMode, getAdminPaths, saveAdminPaths, updateAdminEmail, updateAdminSecondaryPassword, saveAdminTotpConfig, insertAdminLoginLog, listAdminLoginLogs, updateAdminPassword, close: async () => { if (pool) await pool.end(); }, connectionInfo: { host: DB_HOST, port: DB_PORT, database: DB_NAME, user: DB_USER } };

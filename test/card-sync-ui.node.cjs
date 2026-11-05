@@ -3,7 +3,7 @@ const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
-function setup(syncResponse, confirmed = true) {
+function setup(syncResponse) {
     const source=fs.readFileSync(path.join(__dirname,'../public/admin.js'),'utf8');
     const block=source.slice(source.indexOf('function renderCardRow('),source.indexOf('async function loadCdkPlans('));
     const nodes=new Map();
@@ -11,8 +11,7 @@ function setup(syncResponse, confirmed = true) {
         if(!nodes.has(id))nodes.set(id,{value:'',innerHTML:'',textContent:'',disabled:false,replaceChildren(){},add(){}});
         return nodes.get(id);
     };
-    const card={card_id:42,provider_status:'ACTIVE',balance:'20.00',currency:'USD',history_confirmed:confirmed,
-        usage:{plus:{successful:0,limit:4}},last4:'4139'};
+    const card={card_id:42,provider_status:'ACTIVE',balance:'20.00',currency:'USD',transaction_count:null,transaction_limit:6,last4:'4139'};
     const request=async url=>url.endsWith('/sync')?await syncResponse():{cards:[card],issues:[],fundings:[]};
     const escapeHtml=value=>String(value ?? '').replaceAll('<','&lt;').replaceAll('>','&gt;');
     const api=new Function('$','request','escapeHtml','cardPlans','Option','notice',block+'\nreturn {loadCards,synchronizeCards};')(
@@ -27,13 +26,12 @@ test('local refresh labels cached balances and does not show green live ACTIVE',
     assert.match(f.$('cardSyncState').textContent,/不会调用平台/);
 });
 
-test('deleted and unavailable cards are omitted from rows and history reminders after local refresh',async()=>{
+test('deleted and unavailable cards are omitted from rows after local refresh',async()=>{
     for(const status of ['DELETED','UNAVAILABLE']) {
-        const f=setup(()=>{},false);
+        const f=setup(()=>{});
         f.card.provider_status=status;
         await f.api.loadCards();
         assert.match(f.$('cardRows').innerHTML,/尚无卡片/);
-        assert.equal(f.$('cardHistoryState').hidden,true);
         assert.doesNotMatch(f.$('cardRows').innerHTML,/data-card-transactions/);
     }
 });
@@ -55,55 +53,24 @@ test('successful and partial sync distinguish confirmed rows from stale ones',as
     assert.doesNotMatch(f.$('cardRows').innerHTML,/card-provider-status active/);
 });
 
-test('unconfirmed cards expose registration links and disappear from the reminder once confirmed',async()=>{
-    const f=setup(()=>{throw new Error('local snapshot must not call platform');},false);
+test('platform usage replaces editable plan counts, including unknown and retiring states',async()=>{
+    const f=setup(()=>{}); f.card.transaction_limit=6;
     await f.api.loadCards();
-    assert.equal(f.$('cardHistoryState').hidden,false);
-    assert.match(f.$('cardHistoryState').innerHTML,/1 张卡待登记历史次数/);
-    assert.match(f.$('cardHistoryState').innerHTML,/data-open-card-history="42"/);
-    assert.match(f.$('cardRows').innerHTML,/id="card-history-42"/);
-    f.card.history_confirmed=true;
-    await f.api.loadCards();
-    assert.equal(f.$('cardHistoryState').hidden,true);
-    assert.equal(f.$('cardHistoryState').innerHTML,'');
-    assert.doesNotMatch(f.$('cardRows').innerHTML,/id="card-history-42"/);
-    assert.match(f.$('cardRows').innerHTML,/修改历史次数/);
-    assert.match(f.$('cardRows').innerHTML,/data-update-card-usage="42"/);
+    assert.match(f.$('cardRows').innerHTML,/待同步/);
+    assert.doesNotMatch(f.$('cardRows').innerHTML,/data-update-card-usage|data-bind-card/);
+    f.card.transaction_count=5; await f.api.loadCards();
+    assert.match(f.$('cardRows').innerHTML,/5 \/ 6 次成功清算/);
+    f.card.retiring=true; await f.api.loadCards();
+    assert.match(f.$('cardRows').innerHTML,/待确认删卡/);
 });
 
-test('confirmed history correction pre-fills counts and is unavailable for occupied cards',async()=>{
-    const f=setup(()=>{});
-    f.card.usage.plus.successful=3;
-    await f.api.loadCards();
-    assert.match(f.$('cardRows').innerHTML,/data-previous-usage="3" value="3"/);
-    assert.match(f.$('cardRows').innerHTML,/修改原因/);
-    f.card.active_job='running-job';
-    await f.api.loadCards();
-    assert.match(f.$('cardRows').innerHTML,/任务占用中，暂不可修改/);
-    assert.doesNotMatch(f.$('cardRows').innerHTML,/data-update-card-usage/);
-});
-
-test('history editor sends all totals, original values and reason; failed saves preserve edits for retry',async()=>{
+test('manual usage editor is removed',()=>{
     const source=fs.readFileSync(path.join(__dirname,'../public/admin.js'),'utf8');
-    const block=source.slice(source.indexOf('async function saveCardUsage('),source.indexOf('async function loadCards('));
-    const plans={plus:'Plus',pro100:'Pro 100',pro200:'Pro 200',pro500:'Pro 500'};
-    const inputs=Object.fromEntries(Object.keys(plans).map(plan=>[plan,{value:plan==='plus'?'2':'0',dataset:{previousUsage:plan==='plus'?'4':'1'},checkValidity:()=>true}]));
-    const reason={value:' 人工修正 '},button={disabled:false,dataset:{updateCardUsage:'42'}};
-    const requests=[]; let refreshes=0, fail=false;
-    const save=new Function('document','$','cardPlans','request','loadCards','notice',block+'\nreturn saveCardUsage;')(
-        {querySelector:selector=>inputs[selector.match(/42-(\w+)/)[1]]},()=>reason,plans,
-        async(url,body)=>{requests.push({url,body});if(fail)throw new Error('卡片次数已发生变化');return {message:'已修改'};},
-        async()=>{refreshes++;},()=>{});
-    reason.value=''; await assert.rejects(save(button),/修改原因/); assert.equal(requests.length,0);
-    reason.value=' 人工修正 '; await save(button);
-    assert.deepEqual(requests[0],{url:'/api/admin/orbitcard/cards/42/usage',body:{usage:{plus:2,pro100:0,pro200:0,pro500:0},
-        expected_usage:{plus:4,pro100:1,pro200:1,pro500:1},reason:'人工修正'}});
-    assert.equal(refreshes,1); assert.equal(button.disabled,false);
-    fail=true; await assert.rejects(save(button),/已发生变化/);
-    assert.equal(refreshes,1); assert.equal(button.disabled,false); assert.equal(inputs.plus.value,'2');
+    assert.doesNotMatch(fs.readFileSync(path.join(__dirname,'../public/admin.html'),'utf8'),/cardHistoryState/);
+    assert.doesNotMatch(source,/async function saveCardUsage|data-bind-card|data-update-card-usage|cardHistoryState|data-open-card-history|data-manage-card-history/);
 });
 
-test('task rows distinguish unallocated payments from legacy records and link history failures to registration',()=>{
+test('task rows distinguish unallocated payments from legacy records without obsolete registration actions',()=>{
     const source=fs.readFileSync(path.join(__dirname,'../public/admin.js'),'utf8');
     const block=source.slice(source.indexOf('function renderTasks('),source.indexOf('async function loadOverview('));
     const node={innerHTML:''};
@@ -111,7 +78,7 @@ test('task rows distinguish unallocated payments from legacy records and link hi
         ()=>node,value=>String(value??'').replaceAll('<','&lt;'),value=>value);
     render([{provider:'orbitcard',orbitcard_state:'rejected',status:'failed',message:'旧卡历史次数尚未确认'}]);
     assert.match(node.innerHTML,/尚未分配支付卡/);
-    assert.match(node.innerHTML,/data-manage-card-history/);
+    assert.doesNotMatch(node.innerHTML,/data-manage-card-history/);
     render([{provider:'history',status:'failed'}]);
     assert.match(node.innerHTML,/历史未绑定/);
     assert.doesNotMatch(node.innerHTML,/data-manage-card-history/);

@@ -40,6 +40,7 @@ async function initializeBaseData() {
 async function ensureLegacyColumns() {
     // Add only fields needed by this service. Existing historical tables are never dropped.
     const columns = {
+        orbitcard_managed_cards: { transaction_count: 'INT UNSIGNED NULL', transactions_checked_at: 'DATETIME NULL', retirement_key: 'VARCHAR(80) NULL' },
         app_config: { created_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP', updated_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP' },
         cdk_codes: { is_active: 'TINYINT(1) NOT NULL DEFAULT 1', shipped_at: 'TIMESTAMP NULL', used_at: 'TIMESTAMP NULL',
             manual_redeemed_at: 'TIMESTAMP NULL', manual_redeemed_by: 'VARCHAR(255) NULL', manual_redemption_reason: 'VARCHAR(255) NULL',
@@ -48,7 +49,7 @@ async function ensureLegacyColumns() {
         orbitcard_admin_orders: { issue_key: 'VARCHAR(80) NULL' },
         task_logs: { token_preview: "VARCHAR(64) NOT NULL DEFAULT ''", session_payload: 'MEDIUMTEXT NULL', cdk_code: 'VARCHAR(32) NULL',
             status: "VARCHAR(32) NOT NULL DEFAULT 'running'", message: 'VARCHAR(255) NULL', progress: 'INT NOT NULL DEFAULT 0',
-            display_time: "VARCHAR(64) NOT NULL DEFAULT ''", raw_output: 'MEDIUMTEXT NULL',
+            display_time: "VARCHAR(64) NOT NULL DEFAULT ''",
             orbitcard_client_order_no: 'VARCHAR(128) NULL', orbitcard_state: 'VARCHAR(32) NULL', orbitcard_plan_type: 'VARCHAR(64) NULL',
             orbitcard_retry_root_job_key: 'VARCHAR(64) NULL', orbitcard_retry_attempt_no: 'TINYINT UNSIGNED NOT NULL DEFAULT 1',
             orbitcard_retry_first_card_id: 'BIGINT UNSIGNED NULL', orbitcard_retry_second_card_id: 'BIGINT UNSIGNED NULL',
@@ -221,7 +222,7 @@ function safeOrder(raw) {
 
 async function listRecentGptApiOrders(limit = 10) {
     return runQuery(`SELECT job_key, cdk_code, status, message, updated_at, orbitcard_client_order_no,
-        gpt_api_order_id, gpt_api_raw, NULL AS gpt_api_task_id, NULL AS gpt_api_topup_code
+        gpt_api_order_id, gpt_api_raw
         FROM task_logs WHERE orbitcard_client_order_no IS NOT NULL ORDER BY id DESC LIMIT ?`, [Math.min(50, Math.max(1, Number(limit) || 10))]);
 }
 
@@ -281,7 +282,7 @@ const updateCdkStatus = require('./cdk-status-service')({ runQuery, runExecute, 
     acquirePaymentLock, enqueueRedemption: redemptionWebhook.enqueue });
 const updateOrderStatus = require('./order-status-service')({ runQuery, runExecute, withTransaction, getTaskStatus,
     acquirePaymentLock, settleCardUse: cardStore.settleCardUse, enqueueRedemption: redemptionWebhook.enqueue });
-module.exports = { ...core, ...cardStore, ...orbitcardCdkStore, ...manualStore, ...paymentAutomation, acquirePaymentLock, ensureReady, initializeBaseData, createTaskLog, getTaskStatus,
+module.exports = { ...core, ...cardStore, ...orbitcardCdkStore, ...manualStore, ...paymentAutomation, acquirePaymentLock, ensureReady, createTaskLog, getTaskStatus,
     updateCdkStatus, updateOrderStatus,
     deliverRedemptionNotifications: redemptionWebhook.deliverPending,
     getRunningTaskByCdk, verifyCdkDetails, getCdkRedemptionStatus, listCdks, listCdksExportPage, insertCdks, markCdksShipped, deleteCdk,

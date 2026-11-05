@@ -177,7 +177,6 @@ async function sendTelegramTest(store, payload = {}) {
 }
 
 module.exports = {
-    formatTelegramMessage,
     sendTelegramMessage,
     dispatchTelegramNotification,
     notifyTelegramEvent,

@@ -192,7 +192,7 @@ test('late self-service failure settles the original payment card without releas
     assert.equal(f.db.tasks.length, 1);
     assert.ok(f.db.cdks[0].used_at);
     assert.equal(f.db.cards[0].active_job, null);
-    assert.equal(f.db.cards[0].successful_plus, 0);
+    assert.equal(f.db.cards[0].transaction_count, 0);
 });
 
 test('late preparation release and previously queued payment retry cannot reopen a manually redeemed CDK', async () => {

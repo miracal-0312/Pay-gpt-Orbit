@@ -13,7 +13,7 @@ function fixture() {
     const product = { product_code: 'p1', min_initial_amount: 10, min_retained_balance: 0, remaining: 10,
         prices: Object.keys(PROVIDER_PLANS).map(plan_type => ({ plan_type, price: '16.00' })) };
     const live = [{ card_id: 42, provider_status: 'ACTIVE', product_code: 'p1', currency: 'USD', balance_amount: '20.00' }];
-    const rows = [{ card_id: 42, history_confirmed: 1, successful_plus: 0, successful_pro100: 0, successful_pro200: 0, successful_pro500: 0 }];
+    const rows = [{ card_id: 42, transaction_count: 0 }];
     const state = { available: '100.00', live, rows, details: live, product };
     const provider = { fetchPlans: async config => { calls.push(['getSubscriptionPlans',config.auditJobKey]); return { success:true, plans:Object.values(PROVIDER_PLANS).map(type=>({type,name:type})) }; },
         request: async (config, operation, body) => {
@@ -43,18 +43,18 @@ test('full preflight checks all four plans with the production selection rules a
         assert.equal(f.state.rows[0].active_job,undefined);
     }
 });
-test('preflight models funding, exhausted-card opening and unknown history without mutating cards',async()=>{
+test('preflight models funding, exhausted-card opening and unconfirmed platform counts without mutating cards',async()=>{
     const fund=fixture();fund.state.details=[{...fund.state.live[0],balance_amount:'2.00'}];
     const funding=await fund.service.preflight({stage:'cards',plan_type:'plus'});
     assert.equal(funding.result.selection.action,'fund');assert.equal(funding.result.selection.funding_amount,'14.00');
-    const open=fixture();open.state.rows[0].successful_plus=4;
+    const open=fixture();open.state.rows[0].transaction_count=6;
     const opening=await open.service.preflight({stage:'cards',plan_type:'plus'});
     assert.equal(opening.result.selection.action,'open');assert.deepEqual(opening.result.selection.opening,{product_code:'p1',amount:'20.00',quantity:1});
     assert.equal(opening.result.selection.skipped[0].reason,'limit_reached');
     const wait=fixture();wait.state.rows=[];
     const waiting=await wait.service.preflight({stage:'cards',plan_type:'plus'});
     assert.equal(waiting.passed,false);assert.equal(waiting.result.selection.action,'wait');
-    assert.equal(waiting.result.selection.waiting[0].reason,'history_unconfirmed');
+    assert.equal(waiting.result.selection.waiting[0].reason,'transactions_unconfirmed');
 });
 test('invalid Session, disabled region, insufficient balance and broken batch details stop the read-only chain',async()=>{
     await assert.rejects(fixture().service.preflight({stage:'session',request_id:'../../bad',session}));

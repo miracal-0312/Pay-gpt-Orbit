@@ -307,7 +307,7 @@ app.get('/api/public/admin-paths', handle(async (req, res) => {
     });
 }));
 app.use('/api/admin', authenticateAdmin);
-require('./orbitcard-card-http')(app, { store, cardService, requireSecondaryAuth, audit: entry => runtimeLog.push(entry) });
+require('./orbitcard-card-http')(app, { store, cardService, requireSecondaryAuth });
 require('./orbitcard-manual-http')(app, { service: manualService, requireSecondaryAuth });
 require('./orbitcard-diagnostics-http')(app, { store, requireSecondaryAuth, logs: runtimeLog });
 app.get('/api/admin/runtime-logs', handle((req, res) => {
@@ -372,18 +372,6 @@ app.get('/api/admin/login-logs', handle(async (req, res) => {
     const offset = Number(req.query.offset) || 0;
     res.json({ success: true, ...(await store.listAdminLoginLogs(limit, offset)) });
 }));
-app.get('/api/admin/secondary/session', (req, res) => {
-    const token = String(req.headers['x-admin-secondary-token'] || '').trim();
-    const payload = adminAuth.verifySecondaryToken(token);
-    if (!payload) {
-        return res.json({ success: true, verified: false });
-    }
-    return res.json({
-        success: true,
-        verified: true,
-        expiresAt: payload.exp
-    });
-});
 app.post('/api/admin/verify-secondary', handle(async (req, res) => {
     const password = String(req.body?.password || '');
     const clientMeta = adminAuth.getClientMeta(req);
@@ -552,7 +540,6 @@ app.get('/api/admin/gpt-api', handle(async (req, res) => {
             provider: cfg.provider,
             orbitcard_max_fee: cfg.orbitcard_max_fee,
             orbitcard_product_code: cfg.orbitcard_product_code,
-            orbitcard_safety_margin: cfg.orbitcard_safety_margin,
             orbitcard_max_initial_amount: cfg.orbitcard_max_initial_amount,
             orbitcard_payment_regions: cfg.orbitcard_payment_regions,
             orbitcard_secret_configured: Boolean(String(process.env.ORBITCARD_API_SECRET || '').trim()),
@@ -607,16 +594,13 @@ app.get('/api/admin/gpt-api/status', handle(async (req, res) => {
         updated_at: order.updated_at,
         order_id: order.gpt_api_order_id,
         client_order_no: order.orbitcard_client_order_no,
-        task_id: order.gpt_api_task_id,
-        topup_code: order.gpt_api_topup_code || null,
         orbitcard_order: (() => {
             try { return require('./orbitcard-client').summary(JSON.parse(order.gpt_api_raw || '{}')); } catch (_) { return {}; }
         })()
     }));
     res.json({
         success: true,
-        gpt_plans: connection.gptPlans,
-        credit_plans: connection.creditPlans,
+        plans: connection.plans,
         balance: connection.balance,
         balance_error: connection.balanceError,
         target: gptApi.normalizeBaseUrl(cfg.base_url),

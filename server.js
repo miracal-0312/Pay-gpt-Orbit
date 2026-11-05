@@ -76,7 +76,6 @@ app.get('/api/admin/data', async (req, res, next) => {
 
 const handleActivationRequest = require('./activation-service')({ store, ensureStoreReady, activeJobs, runWorker, log, isDraining: () => draining });
 app.post('/api/run-process', handleActivationRequest);
-app.post('/api/admin/trigger-activation', handleActivationRequest);
 
 app.post('/api/cdk/orbitcard/status', async (req, res, next) => {
     const cdk = String(req.body?.cdk || '').trim();
@@ -148,7 +147,7 @@ async function start() {
     require('./cdk-redemption-webhook').readConfig();
     runtimeLog.initialize();
     await ensureStoreReady();
-    server = app.listen(port, () => log('', `Orbitcard 服务已启动，端口 ${port}`, 'server_ready'));
+    server = app.listen(port, process.env.HOST?.trim() || undefined, () => log('', `Orbitcard 服务已启动，端口 ${port}`, 'server_ready'));
     server.maxConnections = limit(process.env.HTTP_MAX_CONNECTIONS, 500, 10000);
     server.requestTimeout = 30000;
     server.headersTimeout = 15000;
@@ -163,7 +162,10 @@ async function start() {
         manualService.recover().catch(() => log('', '管理员订单查单暂不可用，下次继续', 'manual_recovery_error'));
         if (Date.now() >= cardRecoveryAt) {
             cardRecoveryAt = Date.now() + 60000;
-            store.getGptApiConfig().then(cfg => cardService.recover(cfg))
+            store.getGptApiConfig().then(async cfg => {
+                await cardService.recover(cfg);
+                if (cfg.enabled) await cardService.synchronize(cfg);
+            })
                 .catch(() => log('', '原开卡申请恢复暂不可用，下次继续', 'card_recovery_error'));
         }
     };

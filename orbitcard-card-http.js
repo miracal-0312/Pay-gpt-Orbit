@@ -2,12 +2,12 @@
 
 const cardsApi = require('./orbitcard-cards-client');
 const api = require('./orbitcard-client');
-const { LIMITS, CardPreparationError } = require('./orbitcard-card-policy');
+const { MAX_USES } = require('./orbitcard-pool');
+const { CardPreparationError } = require('./orbitcard-card-policy');
 const { PLAN_TYPES: CANONICAL_PLAN_TYPES } = require('./plan-registry');
 
-// Mounted after the administrator authentication middleware. Mutating monetary
-// operations and declarations/corrections of usage also require 2FA.
-module.exports = function registerCardRoutes(app, { store, cardService, requireSecondaryAuth, audit }) {
+// Mounted after administrator authentication; manual card issuance requires 2FA.
+module.exports = function registerCardRoutes(app, { store, cardService, requireSecondaryAuth }) {
     const handler = fn => async (req, res) => {
         try { await fn(req, res); }
         catch (error) { res.status(400).json({ success: false, message: error instanceof CardPreparationError ? error.message : '卡片服务暂不可用，请检查配置并确认原申请' }); }
@@ -16,11 +16,10 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
     app.get('/api/admin/orbitcard/cards', handler(async (req, res) => {
         const cfg = await config(), methods = store.cardMethods(cfg.base_url);
         const cards = (await methods.listCards()).map(card => ({
-            card_id: Number(card.card_id), history_confirmed: Boolean(card.history_confirmed), active_job: card.active_job,
-            usage: Object.fromEntries(Object.entries(LIMITS).map(([plan,limit]) => [plan,{
-                successful: Number(card[`successful_${plan}`]), limit, reserved: card.active_plan === plan ? 1 : 0,
-                remaining: Math.max(0,limit-Number(card[`successful_${plan}`])-(card.active_plan === plan ? 1 : 0))
-            }])),
+            card_id: Number(card.card_id), active_job: card.active_job,
+            transaction_count: card.transaction_count == null ? null : Number(card.transaction_count),
+            transaction_limit: MAX_USES, transactions_checked_at: card.transactions_checked_at,
+            retiring: Boolean(card.retirement_key),
             provider_status: card.provider_status, product_code: card.product_code, last4: card.last4,
             balance: card.balance, currency: card.currency, source: card.source, updated_at: card.updated_at
         }));
@@ -90,27 +89,7 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
         const planType = req.body?.plan_type;
         if (!CANONICAL_PLAN_TYPES.includes(planType)) throw new CardPreparationError('请选择有效的充值套餐');
         const card = await cardService.apply(await config(), planType);
-        res.json({ success: true, card, message: '开卡成功，首充 20 USD，已登记四项套餐额度' });
-    }));
-    app.post('/api/admin/orbitcard/cards/:cardId/bind', requireSecondaryAuth, handler(async (req, res) => {
-        const id = cardsApi.positiveId(req.params.cardId), counts = req.body?.usage;
-        if (!id || !counts || typeof counts !== 'object') throw new CardPreparationError('请填写有效卡 ID 和四种套餐的历史成功次数');
-        const cfg = await config();
-        await store.withCardAllocationLock(cfg.base_url, locked => locked.bindCard(id, counts));
-        audit({ source: 'orbitcard', event: 'card_history_confirmed', text: '管理员确认卡片四种套餐历史次数', data: { card_id: id, usage: counts } });
-        res.json({ success: true, message: '历史次数已确认；后续四种套餐独立计数' });
-    }));
-    app.post('/api/admin/orbitcard/cards/:cardId/usage', requireSecondaryAuth, handler(async (req, res) => {
-        const id = cardsApi.positiveId(req.params.cardId);
-        if (!id) throw new CardPreparationError('请填写有效卡 ID');
-        const cfg = await config();
-        const result = await store.withCardAllocationLock(cfg.base_url, locked => locked.updateCardUsage(id, {
-            usage: req.body?.usage, expected_usage: req.body?.expected_usage,
-            reason: req.body?.reason, adminEmail: req.admin?.email
-        }));
-        if (result.changed) audit({ source: 'orbitcard', event: 'card_usage_corrected', text: '管理员修改卡片历史次数',
-            data: { card_id: id, before: result.before, usage: result.usage, reason: req.body.reason, admin_email: req.admin?.email } });
-        res.json({ success: true, ...result, message: result.changed ? '历史次数已修改，后续选卡将使用新次数' : '次数未变化，无需修改' });
+        res.json({ success: true, card, message: '开卡成功，首充 20 USD，已读取平台成交次数' });
     }));
     app.post('/api/admin/orbitcard/issues/refresh', handler(async (req, res) => {
         await cardService.recover(await config());

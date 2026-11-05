@@ -75,9 +75,7 @@ function renderTasks(tasks) {
         const refresh = task.provider === 'orbitcard' ? `<button class="secondary" data-refresh-order="${escapeHtml(task.jobKey)}">查原单</button> <button type="button" class="secondary" data-edit-order="${escapeHtml(task.jobKey)}" data-order-status="${escapeHtml(task.status)}">人工修改</button>` : '<small>历史记录</small>';
         const cardLabel = task.card_id || (task.provider !== 'orbitcard' ? '历史未绑定'
             : ['prepared','rejected','balance_blocked','card_pending'].includes(task.orbitcard_state) ? '尚未分配支付卡' : '未记录支付卡');
-        const historyAction = task.provider === 'orbitcard' && /旧卡历史次数尚未确认/.test(task.message || '')
-            ? ' <button type="button" class="secondary" data-manage-card-history>登记历史次数</button>' : '';
-        return `<tr><td>${escapeHtml(task.time)}<br><code>${escapeHtml(task.cdk)}</code></td><td>${escapeHtml(task.provider === 'orbitcard' ? task.token : '历史账号')}<br><code>${escapeHtml(task.order_id || task.client_order_no || task.jobKey)}</code><br>卡 ID：${escapeHtml(cardLabel)}</td><td>${status(task.status)}<br>${escapeHtml(task.message)}</td><td>${escapeHtml(fee)}</td><td>${escapeHtml(payment)}</td><td>${refresh}${historyAction} <button class="secondary" data-download-audit="${escapeHtml(task.jobKey)}">下载日志</button> <button class="secondary" data-debug-trace="${escapeHtml(task.jobKey)}">链路日志</button></td></tr>`;
+        return `<tr><td>${escapeHtml(task.time)}<br><code>${escapeHtml(task.cdk)}</code></td><td>${escapeHtml(task.provider === 'orbitcard' ? task.token : '历史账号')}<br><code>${escapeHtml(task.order_id || task.client_order_no || task.jobKey)}</code><br>卡 ID：${escapeHtml(cardLabel)}</td><td>${status(task.status)}<br>${escapeHtml(task.message)}</td><td>${escapeHtml(fee)}</td><td>${escapeHtml(payment)}</td><td>${refresh} <button class="secondary" data-download-audit="${escapeHtml(task.jobKey)}">下载日志</button> <button class="secondary" data-debug-trace="${escapeHtml(task.jobKey)}">链路日志</button></td></tr>`;
     }).join('') || '<tr><td colspan="6">暂无任务</td></tr>';
 }
 async function loadOverview() {
@@ -181,15 +179,8 @@ function apiInput() { return { enabled: $('apiEnabled').checked, base_url: $('ba
     orbitcard_max_fee: $('maxFee').value.trim() }; }
 function renderCardRow(card, sync = null) {
     const id = escapeHtml(card.card_id);
-    const usage = Object.entries(cardPlans).map(([plan, label]) => {
-        const count = card.usage[plan];
-        return `<span class="card-usage-item${count.successful >= count.limit ? ' is-full' : ''}"><span>${escapeHtml(label)}</span><strong>${escapeHtml(count.successful)} / ${escapeHtml(count.limit)}</strong>${count.reserved ? '<small>处理中</small>' : ''}</span>`;
-    }).join('');
-    const history = card.history_confirmed
-        ? `<span class="card-history-confirmed">历史次数已确认</span>${card.active_job
-            ? '<small class="muted">任务占用中，暂不可修改次数</small>'
-            : `<details id="card-usage-${id}" class="card-history-editor"><summary>修改历史次数</summary><p class="muted">填写核对后的累计成功次数，含系统已记录的成功次数。修改将影响后续选卡，并保留审计记录。</p><div class="card-history-grid">${Object.entries(cardPlans).map(([plan, label]) => `<label>${escapeHtml(label)}<input data-card-correction="${id}-${plan}" data-previous-usage="${escapeHtml(card.usage[plan].successful)}" value="${escapeHtml(card.usage[plan].successful)}" type="number" inputmode="numeric" min="0" max="${plan === 'plus' ? 4 : 1}" step="1" required></label>`).join('')}</div><label>修改原因<input id="card-usage-reason-${id}" maxlength="255" required placeholder="例如：人工核对后修正登记次数"></label><button type="button" data-update-card-usage="${id}" class="secondary">保存历史次数</button></details>`}`
-        : `<details id="card-history-${id}" class="card-history-editor"><summary>登记历史次数</summary><p class="muted">填写这张卡已成功开通的次数，请核对后如实登记。</p><div class="card-history-grid">${Object.entries(cardPlans).map(([plan, label]) => `<label>${escapeHtml(label)}<input data-card-uses="${id}-${plan}" type="number" inputmode="numeric" min="0" max="${plan === 'plus' ? 4 : 1}" step="1" required placeholder="0–${plan === 'plus' ? 4 : 1}"></label>`).join('')}</div><button type="button" data-bind-card="${id}" class="secondary">确认历史次数</button></details>`;
+    const usage = `${escapeHtml(card.transaction_count ?? '待同步')} / ${escapeHtml(card.transaction_limit)} 次成功清算`;
+    const history = card.retiring ? '待确认删卡' : '平台清算记录自动统计';
     const last4 = card.last4 ? `****${escapeHtml(card.last4)}` : '尾号未提供';
     const confirmed = sync?.synced_ids?.includes(Number(card.card_id));
     const snapshot = confirmed ? `本次同步：${sync.checked_at}` : sync?.failed ? '同步失败 · 以下为旧快照'
@@ -199,27 +190,6 @@ function renderCardRow(card, sync = null) {
     const active = confirmed && card.provider_status === 'ACTIVE';
     return `<tr><td><strong class="card-id">${id}</strong><span class="card-meta">${last4}</span><span class="card-meta">${escapeHtml(card.product_code || '产品未知')}</span></td><td><span class="card-meta">${escapeHtml(snapshot)}</span><span class="card-provider-status${active ? ' active' : ''}">${escapeHtml(labels[card.provider_status] || card.provider_status || '未知状态')}</span><span class="card-balance">${escapeHtml(card.balance ?? '未知')} ${escapeHtml(card.currency || '')}</span></td><td><div class="card-usage-list">${usage}</div></td><td>${card.active_job ? `<code>${escapeHtml(card.active_job)}</code>` : '<span class="card-idle">空闲</span>'}</td><td><div class="card-row-actions">${history}<button type="button" data-card-transactions="${id}" class="secondary">查看交易</button></div></td></tr>`;
 }
-async function saveCardUsage(button) {
-    if (button.disabled) return;
-    const id = button.dataset.updateCardUsage, usage = {}, expected_usage = {};
-    for (const plan of Object.keys(cardPlans)) {
-        const input = document.querySelector(`[data-card-correction="${id}-${plan}"]`);
-        if (!input || !input.checkValidity()) {
-            input?.reportValidity();
-            throw new Error('请分别填写四种套餐的有效历史成功次数');
-        }
-        usage[plan] = Number(input.value);
-        expected_usage[plan] = Number(input.dataset.previousUsage);
-    }
-    const reason = $(`card-usage-reason-${id}`).value.trim();
-    if (!reason || reason.length > 255) throw new Error('请填写 1–255 字的修改原因');
-    button.disabled = true;
-    try {
-        const result = await request(`/api/admin/orbitcard/cards/${id}/usage`, { usage, expected_usage, reason });
-        await loadCards();
-        notice(result.message, 'success');
-    } finally { button.disabled = false; }
-}
 async function loadCards(sync = null) {
     const data = await request('/api/admin/orbitcard/cards');
     data.cards = data.cards.filter(card => !['DELETED', 'UNAVAILABLE'].includes(card.provider_status));
@@ -228,10 +198,6 @@ async function loadCards(sync = null) {
     for (const card of data.cards) $('transactionCardId').add(new Option(`${card.card_id} / ${card.last4 ? `****${card.last4}` : '尾号未提供'}`, card.card_id));
     if (data.cards.some(card => String(card.card_id) === currentCardId)) $('transactionCardId').value = currentCardId;
     $('cardRows').innerHTML = data.cards.map(card => renderCardRow(card, sync)).join('') || '<tr><td colspan="5">尚无卡片，请同步或申请。</td></tr>';
-    const unconfirmed = data.cards.filter(card => !card.history_confirmed);
-    $('cardHistoryState').hidden = !unconfirmed.length;
-    $('cardHistoryState').innerHTML = unconfirmed.length
-        ? `<p>本地记录有 ${unconfirmed.length} 张卡待登记历史次数，尚不能参与自动选卡。请同步平台卡片、核对使用记录后如实填写。</p><div class="row">${unconfirmed.slice(0,20).map(card => `<button type="button" class="secondary" data-open-card-history="${escapeHtml(card.card_id)}">登记卡 ${escapeHtml(card.card_id)}</button>`).join('')}</div>${unconfirmed.length > 20 ? '<p>其余待登记卡片请在下方列表查看。</p>' : ''}` : '';
     $('cardSyncState').textContent = sync?.failed ? '平台同步失败，下面显示旧的本地快照，不能用于确认当前状态和余额。'
         : sync?.checked_at ? `查询完成：${sync.checked_at}，同步 ${sync.count} 张，详情读取失败 ${sync.failed_ids.length} 张，已移出列表 ${(sync.removed_ids || []).length} 张。数值为本次查询时的快照。`
             : '当前显示本地快照。点击“同步平台卡片”查询当前状态和余额；“刷新本地记录”不会调用平台。';
@@ -566,7 +532,7 @@ $('testApi').onclick = () => runDiagnostic('testApi', 'testResult', async () => 
 $('loadCatalog').onclick = () => runDiagnostic('loadCatalog', 'catalog', async () => {
     const data = await diagnosticFetch('/api/admin/gpt-api/status');
     const balance = data.balance?.available_balance;
-    return {html:`<strong>查询完成 · ${checkedAt()}</strong><p>账户可用余额：${balance == null ? escapeHtml(data.balance_error || '查询失败') : `${escapeHtml(balance)} USD`}</p><ul>${planItems(data.gpt_plans)}</ul>`,warning:balance == null};
+    return {html:`<strong>查询完成 · ${checkedAt()}</strong><p>账户可用余额：${balance == null ? escapeHtml(data.balance_error || '查询失败') : `${escapeHtml(balance)} USD`}</p><ul>${planItems(data.plans)}</ul>`,warning:balance == null};
 });
 $('loadRegions').onclick = () => runDiagnostic('loadRegions', 'regionResult', async output => {
     const regions = {};
@@ -665,12 +631,6 @@ $('orderStatusDialog').addEventListener('cancel', event => { if (orderStatusSavi
 document.addEventListener('click', event => {
     const editOrder = event.target.closest('[data-edit-order]');
     if (editOrder) editOrderStatus(editOrder);
-    if (event.target.closest('[data-manage-card-history]')) selectView('cards');
-    const historyButton = event.target.closest('[data-open-card-history]');
-    if (historyButton) {
-        const editor = $(`card-history-${historyButton.dataset.openCardHistory}`);
-        if (editor) { editor.open = true; editor.scrollIntoView({ block: 'center' }); editor.querySelector('input')?.focus(); }
-    }
     const retryManual = event.target.closest('[data-retry-manual]');
     if (retryManual) {
         const order = manualOrders.find(item => item.request_id === retryManual.dataset.retryManual);
@@ -699,23 +659,6 @@ document.addEventListener('click', event => {
     });
     const transactions = event.target.closest('[data-card-transactions]');
     if (transactions) { $('transactionCardId').value = transactions.dataset.cardTransactions; $('transactionPage').value = '1'; $('loadTransactions').click(); }
-    const bind = event.target.closest('[data-bind-card]');
-    const correction = event.target.closest('[data-update-card-usage]');
-    if (correction) perform(() => saveCardUsage(correction));
-    if (bind) perform(async () => {
-        const id = bind.dataset.bindCard, usage = {};
-        for (const plan of Object.keys(cardPlans)) {
-            const input = document.querySelector(`[data-card-uses="${id}-${plan}"]`);
-            if (!input || !input.checkValidity()) {
-                input?.reportValidity();
-                throw new Error('请分别填写四种套餐的有效历史成功次数，不能默认当作新卡');
-            }
-            usage[plan] = Number(input.value);
-        }
-        bind.disabled = true;
-        try { await request(`/api/admin/orbitcard/cards/${id}/bind`, { usage }); await loadCards(); notice('历史次数已确认', 'success'); }
-        finally { bind.disabled = false; }
-    });
     const refresh = event.target.closest('[data-refresh-order]');
     if (refresh) perform(async () => { refresh.disabled = true; try { await request(`/api/admin/orders/${encodeURIComponent(refresh.dataset.refreshOrder)}/refresh`, {}); await loadOverview(); notice('已查询原订单', 'success'); } finally { refresh.disabled = false; } });
     const changeStatus = event.target.closest('[data-cdk-status]');

@@ -1,7 +1,8 @@
 'use strict';
+const poolPolicy = require('./orbitcard-pool');
 const { CardPreparationError } = require('./orbitcard-card-policy');
 
-const { cardScope, planFor, LIMITS, settlementState } = require('./orbitcard-card-policy');
+const { cardScope, planFor, settlementState } = require('./orbitcard-card-policy');
 
 module.exports = function createCardStore({ runQuery, runExecute, withTransaction, openLockConnection }) {
     function methods(baseUrl, connection = null) {
@@ -20,67 +21,20 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
                 [scope,card.card_id,card.provider_status,card.product_code,card.bin || '',card.last4,card.balance,card.currency]);
             }
         }
+        async function saveTransactionCount(cardId, count) {
+            if (!Number.isSafeInteger(count) || count < 0) throw new CardPreparationError('平台成交次数无效');
+            await execute('UPDATE orbitcard_managed_cards SET transaction_count=?,transactions_checked_at=UTC_TIMESTAMP() WHERE scope=? AND card_id=?', [count,scope,cardId]);
+        }
+        async function retireCard(cardId, key) {
+            const result = await execute('UPDATE orbitcard_managed_cards SET retirement_key=COALESCE(retirement_key,?) WHERE scope=? AND card_id=? AND active_job IS NULL', [key,scope,cardId]);
+            if (!result.affectedRows) throw new CardPreparationError('卡片仍被任务占用，稍后再删卡');
+        }
         async function listCards() {
-            return query('SELECT * FROM orbitcard_managed_cards WHERE scope = ? ORDER BY successful_plus+successful_pro100+successful_pro200+successful_pro500 DESC, card_id', [scope]);
+            return query('SELECT * FROM orbitcard_managed_cards WHERE scope = ? ORDER BY transaction_count DESC, card_id', [scope]);
         }
         async function issueForJob(jobKey) {
             const rows = await query('SELECT * FROM orbitcard_card_issues WHERE scope=? AND job_key=? ORDER BY created_at DESC LIMIT 1', [scope, jobKey]);
             return rows[0] || null;
-        }
-        function validateCounts(counts) {
-            if (!counts || Object.keys(counts).length !== 4 || Object.entries(LIMITS).some(([plan, limit]) =>
-                !Object.hasOwn(counts, plan) || !Number.isInteger(counts[plan]) || counts[plan] < 0 || counts[plan] > limit)) {
-                throw new CardPreparationError('请分别填写 Plus 0–4 次、Pro 100/200/500 各 0–1 次的历史成功次数');
-            }
-        }
-        async function bindCard(cardId, counts) {
-            validateCounts(counts);
-            return transaction(async tx => {
-                const opts = { connection: tx };
-                const legacy = await runQuery(`SELECT t.job_key FROM task_logs t
-                    LEFT JOIN orbitcard_card_uses u ON u.job_key=t.job_key
-                    WHERE t.orbitcard_client_order_no IS NOT NULL AND u.job_key IS NULL
-                    AND t.status IN ('running','manual') LIMIT 1`, [], opts);
-                if (legacy.length) throw new CardPreparationError('存在尚未确认的旧充值订单，请先核对原订单再绑定历史卡片');
-                const cards = await runQuery('SELECT * FROM orbitcard_managed_cards WHERE scope=? AND card_id=? FOR UPDATE', [scope,cardId], opts);
-                if (!cards[0] || cards[0].history_confirmed || cards[0].active_job) throw new CardPreparationError('卡片不存在或历史次数已确认；已有额度记录不能重置');
-                await runExecute(`UPDATE orbitcard_managed_cards SET history_confirmed=1,successful_plus=?,successful_pro100=?,
-                    successful_pro200=?,successful_pro500=? WHERE scope=? AND card_id=?`,
-                [counts.plus,counts.pro100,counts.pro200,counts.pro500,scope,cardId], opts);
-            });
-        }
-        async function updateCardUsage(cardId, { usage, expected_usage, reason, adminEmail }) {
-            validateCounts(usage);
-            validateCounts(expected_usage);
-            const note = typeof reason === 'string' ? reason.trim() : '';
-            if (!note || note.length > 255) throw new CardPreparationError('请填写 1–255 字的修改原因');
-            return transaction(async tx => {
-                const opts = { connection: tx };
-                const legacy = await runQuery(`SELECT t.job_key FROM task_logs t
-                    LEFT JOIN orbitcard_card_uses u ON u.job_key=t.job_key
-                    WHERE t.orbitcard_client_order_no IS NOT NULL AND u.job_key IS NULL
-                    AND t.status IN ('running','manual') LIMIT 1`, [], opts);
-                if (legacy.length) throw new CardPreparationError('存在尚未确认的旧充值订单，请先核对原订单再修改历史次数');
-                const [card] = await runQuery('SELECT * FROM orbitcard_managed_cards WHERE scope=? AND card_id=? FOR UPDATE', [scope,cardId], opts);
-                if (!card) throw new CardPreparationError('卡片不存在');
-                if (!card.history_confirmed) throw new CardPreparationError('请先登记并确认卡片历史次数');
-                if (card.active_job) throw new CardPreparationError('卡片正在被任务占用，请核对并结算原订单后再修改');
-                const reserved = await runQuery(`SELECT job_key FROM orbitcard_card_uses
-                    WHERE scope=? AND card_id=? AND state='reserved' LIMIT 1 FOR UPDATE`, [scope,cardId], opts);
-                if (reserved.length) throw new CardPreparationError('卡片仍有未结算的使用记录，请先核对原订单');
-                const before = Object.fromEntries(Object.keys(LIMITS).map(plan => [plan, Number(card[`successful_${plan}`])]));
-                if (Object.keys(LIMITS).some(plan => before[plan] !== expected_usage[plan])) {
-                    throw new CardPreparationError('卡片次数已发生变化，请刷新列表后重新修改');
-                }
-                if (Object.keys(LIMITS).every(plan => before[plan] === usage[plan])) return { changed: false, before, usage };
-                await runExecute(`UPDATE orbitcard_managed_cards SET history_confirmed=1,successful_plus=?,successful_pro100=?,
-                    successful_pro200=?,successful_pro500=? WHERE scope=? AND card_id=?`,
-                [usage.plus,usage.pro100,usage.pro200,usage.pro500,scope,cardId], opts);
-                await runExecute(`INSERT INTO orbitcard_card_usage_changes
-                    (scope,card_id,before_usage,after_usage,reason,admin_email) VALUES (?,?,?,?,?,?)`,
-                [scope,cardId,JSON.stringify(before),JSON.stringify(usage),note,String(adminEmail || '').slice(0,255)], opts);
-                return { changed: true, before, usage };
-            });
         }
         async function reserveCard(cardId, jobKey, planType) {
             const plan = planFor(planType);
@@ -98,10 +52,10 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
                     if (uses[0].state === 'reserved' && Number(uses[0].card_id) === Number(cardId) && card?.active_job === jobKey) return card;
                     throw new CardPreparationError('本任务已绑定卡片，不允许更换支付卡');
                 }
-                if (!card || !card.history_confirmed || card.active_job || card.provider_status !== 'ACTIVE'
-                    || Number(card[`successful_${plan}`]) >= LIMITS[plan]) return null;
+                if (!card || card.active_job || card.provider_status !== 'ACTIVE'
+                    || !poolPolicy.eligible(card)) return null;
                 await runExecute('INSERT INTO orbitcard_card_uses (job_key,scope,card_id,plan_type,state) VALUES (?,?,?,?,\'reserved\')', [jobKey,scope,cardId,plan], opts);
-                await runExecute('UPDATE orbitcard_managed_cards SET active_job=?,active_plan=? WHERE scope=? AND card_id=?', [jobKey,plan,scope,cardId], opts);
+                await runExecute('UPDATE orbitcard_managed_cards SET active_job=? WHERE scope=? AND card_id=?', [jobKey,scope,cardId], opts);
                 await runExecute('UPDATE task_logs SET orbitcard_card_id=? WHERE job_key=?', [cardId,jobKey], opts);
                 return { ...card, active_job: jobKey };
             });
@@ -129,7 +83,7 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
                 const opts = { connection: tx };
                 const rows = await runQuery('SELECT * FROM orbitcard_managed_cards WHERE scope=? AND card_id=? FOR UPDATE', [scope,card.card_id], opts);
                 if (!rows[0]) throw new CardPreparationError('新卡摘要尚未登记');
-                await runExecute(`UPDATE orbitcard_managed_cards SET history_confirmed=1,source='issued'
+                await runExecute(`UPDATE orbitcard_managed_cards SET source='issued'
                     WHERE scope=? AND card_id=?`, [scope,card.card_id], opts);
                 await runExecute(`UPDATE orbitcard_card_issues SET state='ready',card_id=?,message='开卡成功'
                     WHERE issue_key=? AND scope=?`, [card.card_id,issue.issue_key,scope], opts);
@@ -183,7 +137,7 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
             return query(`SELECT * FROM orbitcard_card_fundings WHERE scope=?${pending ? " AND state IN ('prepared','submitting','pending','unknown')" : ''}
                 ORDER BY updated_at ${pending ? 'ASC' : 'DESC'} LIMIT 100`, [scope]);
         }
-        return { syncCards, listCards, bindCard, updateCardUsage, reserveCard, pendingIssue, createIssue, updateIssue, completeIssue, listIssues, attachIssue, issueForJob,
+        return { saveTransactionCount, retireCard, syncCards, listCards, reserveCard, pendingIssue, createIssue, updateIssue, completeIssue, listIssues, attachIssue, issueForJob,
             blockBalance, fundingForJob, createFunding, updateFunding, listFundings };
     }
 
@@ -211,10 +165,8 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
         const current = uses[0], next = settlementState(current.state, orbitcardState);
         if (next === current.state) return;
         await runExecute('UPDATE orbitcard_card_uses SET state=? WHERE job_key=?', [next,jobKey], options);
-        const column = `successful_${planFor(current.plan_type)}`;
-        await runExecute(`UPDATE orbitcard_managed_cards SET ${column}=${column}+?,
-            active_plan=IF(active_job=?,NULL,active_plan),active_job=IF(active_job=?,NULL,active_job) WHERE scope=? AND card_id=?`,
-        [next === 'consumed' ? 1 : 0,jobKey,jobKey,current.scope,current.card_id], options);
+        await runExecute('UPDATE orbitcard_managed_cards SET active_job=NULL WHERE scope=? AND card_id=? AND active_job=?',
+            [current.scope,current.card_id,jobKey], options);
     }
 
     async function getCardIssueForTask(jobKey) {

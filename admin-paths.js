@@ -57,9 +57,6 @@ function buildAdminPanelUrl(paths = {}) {
 }
 
 module.exports = {
-    DEFAULT_LOGIN_PATH,
-    DEFAULT_PANEL_PATH,
-    normalizeAdminPathSegment,
     normalizeAdminPaths,
     buildAdminLoginUrl,
     buildAdminPanelUrl

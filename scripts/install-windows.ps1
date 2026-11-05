@@ -7,4 +7,4 @@ npm.cmd ci --omit=dev --ignore-scripts
 if ($LASTEXITCODE -ne 0) { throw 'npm ci failed' }
 if (!(Test-Path -LiteralPath '.env')) { Copy-Item -LiteralPath '.env.example' -Destination '.env' }
 Write-Output 'Dependencies installed. Configure .env and MySQL, then run npm.cmd start.'
-Write-Output 'Set the paired Orbitcard API Key and platform card ID in the administrator UI before enabling redemptions.'
+Write-Output 'Set ORBITCARD_API_KEY and ORBITCARD_API_SECRET in .env, then verify the API connection and card-pool permissions in the administrator UI before enabling redemptions.'

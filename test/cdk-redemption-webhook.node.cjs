@@ -199,7 +199,7 @@ test('self-service settlement records exactly one receipt in its transaction and
     await f.settle(task, 'pending'); assert.equal(receipts.length, 0);
     await assert.rejects(f.settle(task, 'success'), /outbox/);
     assert.equal(f.db.tasks[0].orbitcard_state, 'pending');
-    assert.equal(f.db.cards[0].successful_plus, 0);
+    assert.equal(f.db.cards[0].transaction_count, 0);
     fail = false;
     await f.settle(task, 'success'); await f.settle(task, 'success'); await f.settle(task, 'failed');
     assert.deepEqual(receipts, [{ cdk: f.db.cdks[0].cdk_code, orderId: task.jobKey }]);

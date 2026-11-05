@@ -219,4 +219,4 @@ async function readTask(jobKey, cursor = 0, revision = '') {
     return { entries, next_cursor: offset, has_more: !incomplete && offset < total,
         exists: files.length > 0, revision: currentRevision, reset };
 }
-module.exports = { push, tail, after, clear, stats, taskFile, initialize, LOG_DIR, readTask, downloadTask, cleanup };
+module.exports = { push, tail, after, clear, stats, taskFile, initialize, readTask, downloadTask, cleanup };

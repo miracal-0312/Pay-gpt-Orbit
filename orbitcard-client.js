@@ -111,7 +111,7 @@ async function fetchPlans(cfg) {
     if (!res.success) return res;
     const plans = res.data?.enabled === true && Array.isArray(res.data.plans)
         ? res.data.plans.map(p => ({ type: p.type, name: p.name, key: p.type, enabled: true })) : [];
-    return { ...res, plans, gptPlans: plans, creditPlans: [] };
+    return { ...res, plans };
 }
 
 function outcome(data, detail = false) {
@@ -152,10 +152,6 @@ function captcha(data) {
     return { id: cap.id, url: cap.url, expires_at: cap.expires_at };
 }
 
-async function queryBalance(cfg) {
-    return request(cfg, 'getAccountBalance');
-}
-
 async function testConnection(cfg) {
     async function check(operation, action) {
         const started = Date.now();
@@ -167,16 +163,16 @@ async function testConnection(cfg) {
     }
     const [planCheck, balanceCheck] = await Promise.all([
         check('getSubscriptionPlans', () => fetchPlans(cfg)),
-        check('getAccountBalance', () => queryBalance(cfg))
+        check('getAccountBalance', () => request(cfg, 'getAccountBalance'))
     ]);
     const plans = planCheck.result, balance = balanceCheck.result;
     const checks = [planCheck.log, balanceCheck.log];
     if (!plans.success) return { success: false, error: `套餐查询失败: ${plans.error}`, checks };
     return { success: true, message: `Orbitcard HMAC 连接成功，可用套餐 ${plans.plans.length} 个`,
-        plans: plans.plans, gptPlans: plans.gptPlans, creditPlans: [],
+        plans: plans.plans,
         balance: balance.success ? balance.data : null,
         balanceError: balance.success ? null : balance.error, checks };
 }
 
-module.exports = { DEFAULT_BASE_URL, normalizeBaseUrl, request, fetchPlans, queryBalance,
+module.exports = { DEFAULT_BASE_URL, normalizeBaseUrl, request, fetchPlans,
     testConnection, outcome, summary, captcha, PLAN_MAP };

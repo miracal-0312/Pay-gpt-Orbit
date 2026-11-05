@@ -18,8 +18,6 @@ CREATE TABLE IF NOT EXISTS cdk_codes (
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     type VARCHAR(16) NOT NULL DEFAULT '自助',
     plan_type VARCHAR(64) NOT NULL DEFAULT 'plus' COMMENT 'Self-service canonical type or manual Orbitcard plan ID',
-    fail_count INT DEFAULT 0,
-    cooldown_until TIMESTAMP NULL DEFAULT NULL,
     UNIQUE KEY uniq_cdk_codes_code (cdk_code)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -59,7 +57,6 @@ CREATE TABLE IF NOT EXISTS task_logs (
     message VARCHAR(255) NULL,
     progress INT NOT NULL DEFAULT 0,
     display_time VARCHAR(64) NOT NULL,
-    raw_output MEDIUMTEXT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE KEY uniq_task_logs_job_key (job_key),
@@ -108,13 +105,10 @@ CREATE TABLE IF NOT EXISTS admin_login_logs (
 CREATE TABLE IF NOT EXISTS orbitcard_managed_cards (
     scope CHAR(64) NOT NULL,
     card_id BIGINT UNSIGNED NOT NULL,
-    history_confirmed TINYINT(1) NOT NULL DEFAULT 0,
-    successful_plus INT UNSIGNED NOT NULL DEFAULT 0,
-    successful_pro100 INT UNSIGNED NOT NULL DEFAULT 0,
-    successful_pro200 INT UNSIGNED NOT NULL DEFAULT 0,
-    successful_pro500 INT UNSIGNED NOT NULL DEFAULT 0,
+    transaction_count INT UNSIGNED NULL,
+    transactions_checked_at DATETIME NULL,
+    retirement_key VARCHAR(80) NULL,
     active_job VARCHAR(64) NULL,
-    active_plan VARCHAR(16) NULL,
     provider_status VARCHAR(32) NOT NULL DEFAULT '',
     product_code VARCHAR(128) NOT NULL DEFAULT '',
     card_bin VARCHAR(8) NOT NULL DEFAULT '',
@@ -125,18 +119,6 @@ CREATE TABLE IF NOT EXISTS orbitcard_managed_cards (
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (scope, card_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE TABLE IF NOT EXISTS orbitcard_card_usage_changes (
-    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    scope CHAR(64) NOT NULL,
-    card_id BIGINT UNSIGNED NOT NULL,
-    before_usage JSON NOT NULL,
-    after_usage JSON NOT NULL,
-    reason VARCHAR(255) NOT NULL,
-    admin_email VARCHAR(255) NOT NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    KEY idx_oc_usage_changes (scope, card_id, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS orbitcard_card_uses (

@@ -39,7 +39,7 @@ Session 必须是 JSON 对象，包含 `user`、`account`、字符串 `accessTok
 
 创建任务的事务先锁定 CDK，检查类型、套餐、是否已用及未结束任务，再创建任务、保存唯一 `client_order_no`、标记 CDK 占用。同一 CDK 的并发请求只能创建一笔新任务。完整 Session 不传给任务写库函数，只在当前请求和工作流内存中使用。四档默认充值地区保存在 `orbitcard_payment_regions` 中。选择「平台默认」时省略 `payment_region`；指定地区时在选卡、补款或开卡前调用 `getSubscriptionPaymentRegions` 校验，查询失败或地区失效时停止，不回退到其他地区。用户兑换和管理员开通共用此逻辑。已提交的订单继续按原订单号查询，修改默认地区不会触发重提。
 
-之后读取账户余额及产品目录中的套餐 USD 推荐价；当前套餐缺价时停止自动充值，不用旧预算或 USDT 服务费代替。付款时再读取卡片，同一卡 Plus 4 次、Pro 100/200/500 各 1 次，独立计数且允许混用。选卡通过 MySQL 命名锁串行化：拉取平台卡列表和批量详情，只选 ACTIVE、USD、资料与次数合格且未占用的卡；批量详情缺项时跳过缺失卡，不逐张复核。合格卡不足支付金额时按持久化原补款意图补差额；没有合格旧卡则自动开卡，固定首充 20 USD。整批详情缺失或归属异常属于读卡失败，停止开卡。历史卡必须先确认四项历史次数。详见 [ORBITCARD-CARDS.md](ORBITCARD-CARDS.md)。
+之后读取账户余额及产品目录中的套餐 USD 推荐价；当前套餐缺价时停止自动充值，不用旧预算或 USDT 服务费代替。付款时再读取卡片，所有套餐统一采用每卡 6 次平台成功清算上限，达到上限后删卡补位，维持 5 张卡。选卡通过 MySQL 命名锁串行化：拉取平台卡列表和批量详情，只选 ACTIVE、USD、资料与次数合格且未占用的卡；批量详情缺项时跳过缺失卡，不逐张复核。合格卡不足支付金额时按持久化原补款意图补差额；启用接单时将卡池补足到 5 张，每张新卡首充 20 USD；池满但没有可用卡时停止选卡，不额外开卡。整批详情缺失或归属异常属于读卡失败，停止开卡。历史卡通过交易接口自动统计，已删除旧套餐次数登记与修改代码。详见 [ORBITCARD-CARDS.md](ORBITCARD-CARDS.md)。
 
 ## 提交和结果确认
 
@@ -55,11 +55,11 @@ Session 必须是 JSON 对象，包含 `user`、`account`、字符串 `accessTok
 | --- | --- | --- |
 | 已建任务未提交 | `prepared` | 占用 |
 | 账户可用余额不足 | `balance_blocked` / `failed` | 锁定；首笔准备阶段可在补足后释放，重试阶段转人工售后 |
-| 个别卡异常或次数已满 | 继续选卡 | 无合格旧卡且没有待处理条件时按原意图自动开卡 |
-| 只有占用中或历史待登记的候选卡 | 首次任务 `rejected` | 提示等待或登记，释放本次 CDK；本次不花钱开卡，重试任务保留售后锁定 |
+| 个别卡异常或达到 6 次成功清算 | 继续选卡或暂停 | 达限的空闲卡确认删除后补位；池满且没有可用卡时暂停 |
+| 只有占用中的候选卡，或平台清算次数读取失败 | 暂停选卡 | 等待原订单或重新同步平台记录；不把未知次数当作零次 |
 | 准备记录临时无法读取 | `prepared` / `manual` | 保留 CDK 与支付卡，恢复时先核对原开卡或补款，不查询尚未创建的订阅 |
 | 批量详情整体缺失或归属异常 | `support_locked` / `failed` | 锁定，提示联系人工售后；不盲目开卡 |
-| 无卡或当前套餐次数全满 | `card_pending` 或继续支付 | 自动开卡首充 20 USD；原申请待确认时保留 CDK 与原幂等键 |
+| 启用接单且卡池不足 5 张 | 补卡或等待原申请 | 逐张首充 20 USD 补卡；未确认申请沿用原正文及幂等键 |
 | 卡补款尚待确认，订阅未提交 | `funding_pending` / `manual` | 卡片与 CDK 保持占用，确认原补款后再提示重新提交 Session |
 | 可能已发送 | `submitting` | 占用 |
 | 等待上游或验证 | `pending` / `running` | 占用 |
@@ -97,14 +97,14 @@ Session 必须是 JSON 对象，包含 `user`、`account`、字符串 `accessTok
 | 位置 | 内容 |
 | --- | --- |
 | `task_logs` | 当前状态、CDK、原订单身份、账号预览、最新安全摘要 |
-| `orbitcard_managed_cards` / `orbitcard_card_uses` | 四项独立成功次数、卡占用及每笔任务的预占/结算状态 |
+| `orbitcard_managed_cards` / `orbitcard_card_uses` | 平台成功清算次数、卡片占用及每笔任务的预占/结算状态 |
 | `orbitcard_card_fundings` | 固定补款身份、原卡/金额、目标余额、订单及费用结果；不覆盖未知订单 |
 | `orbitcard_card_issues` | 固定申请身份、产品、首充金额及开卡结果；不删除待确认身份 |
 | `data/logs/task-<jobKey>.jsonl` | 按任务保存的请求、响应摘要、状态变化和恢复事件 |
 | `data/logs/runtime-YYYY-MM-DD.jsonl` | 按 UTC 日期保存的运行事件 |
 | 后台“下载日志” | 管理员认证后下载对应完整任务文件 |
 
-支付前新增 `card_funds_before_subscription` 与 `card_payment_preflight` 资金快照；订阅明确成功后只读复查卡片余额、账户可用余额及首批消费交易数量，写入 `payment_funds_snapshot`。后台“卡片与开卡”可按卡 ID 分页查看脱敏的 `cardTransaction` 记录。交易明细只用于对账，不能仅据此核销 CDK、确认订阅成功或自动退还卡内资金；订阅结论继续以归属核验后的 `getSubscription` 为准。对账接口失败不改变已确认的订阅结论。
+支付前新增 `card_funds_before_subscription` 与 `card_payment_preflight` 资金快照；订阅明确成功后只读复查卡片余额、账户可用余额及首批消费交易数量，写入 `payment_funds_snapshot`。后台“卡片与开卡”可按卡 ID 分页查看脱敏的 `cardTransaction` 记录。交易明细用于对账及统一清算次数统计，达到次数上限后由卡池维护删除空闲卡。不能仅据交易记录核销 CDK 或确认订阅成功；订阅结论继续以归属核验后的 `getSubscription` 为准。对账接口失败不改变已确认的订阅结论。
 
 实际 HTTP 请求记录开始/结束、耗时、操作、HTTP 状态、平台码、请求结果类型、原订单身份及服务费/支付金额白名单字段。不会写 Session 请求体、API Key、HMAC Secret、签名、验证码凭据或含原始请求的 Axios 错误对象。
 
@@ -120,7 +120,7 @@ CDK 与订单关联记录不提供删除接口；有历史任务或使用记录�
 | --- | --- |
 | `activation-service.js` | 输入校验、接单门禁、并发名额、创建与调度 |
 | `payment-execution-lock.js` / `mysql-transaction.js` | 跨进程执行互斥、连接失效检查、仅数据库事务的有界冲突重试 |
-| `plan-registry.js` | 四档本地套餐、平台套餐映射及单卡独立次数上限 |
+| `plan-registry.js` | 四档本地套餐、平台套餐映射及历史套餐别名 |
 | `payment-service.js` | CDK 支付编排、三张不同卡的明确失败重试、异常保留和最终结算通知 |
 | `orbitcard-cdk-store.js` | CDK 与原单绑定、事务结算和防止旧任务回滚 |
 | `orbitcard-client.js` | HMAC 请求、超时和平台限流、响应安全摘要 |
@@ -131,7 +131,7 @@ CDK 与订单关联记录不提供删除接口；有历史任务或使用记录�
 | `orbitcard-cards-client.js` / `orbitcard-card-service.js` | 账户可用余额、批量选卡、产品预算、补款及管理员开卡恢复 |
 | `orbitcard-manual-service.js` / `orbitcard-manual-store.js` | 管理员测试与人工交付受理、并发占位、原订单恢复和结算 |
 | `orbitcard-money.js` / `orbitcard-funding-service.js` | 十进制差额、幂等补款、原流水恢复和卡余额复核 |
-| `orbitcard-card-store.js` / `orbitcard-card-http.js` | 持久化额度和申请、同事务结算、管理员卡片入口 |
+| `orbitcard-card-store.js` / `orbitcard-card-http.js` | 持久化平台计数和申请、同事务预占结算、管理员卡片入口 |
 | `mysql-core.js` / `mysql-store.js` | 数据库、安全配置、核心表迁移及历史保护 |
 | `runtime-log.js` / `log-safety.js` | 持久化审计及敏感字段过滤 |
 | `server.js` / `admin-http.js` | 用户与管理员 HTTP、任务订阅 |

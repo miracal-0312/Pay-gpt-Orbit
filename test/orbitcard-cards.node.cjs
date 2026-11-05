@@ -17,56 +17,57 @@ function load(name,mocks) {
 }
 const product={product_code:'p1',bin:'55565979',min_initial_amount:20,min_retained_balance:1,remaining_open_card_num:100,
     gpt_plan_prices:[{id:'plus',price:20,currency:'USD'},{id:'pro100',price:100,currency:'USD'},{id:'pro200',price:200,currency:'USD'},{id:'pro500',price:500,currency:'USD'}]};
-const cfg={enabled:true,base_url:'https://orbitcard.test',api_key:'fixture',orbitcard_safety_margin:'1'};
+const cfg={enabled:true,base_url:'https://orbitcard.test',api_key:'fixture'};
 
-test('Plus card is serialized and exactly four successes exhaust it',async () => {
+test('card is serialized and six provider settlements exhaust it',async () => {
     const f=fixture(); await f.addCard(); const m=f.store.cardMethods(f.base);
-    for (let n=0;n<4;n++) {
+    for (let n=0;n<6;n++) {
         const first=await f.claim(),second=await f.claim();
         const results=await Promise.all([m.reserveCard(42,first.jobKey,'plus'),m.reserveCard(42,second.jobKey,'plus')]);
         assert.equal(results.filter(Boolean).length,1);
         await f.settle(first,'success'); await f.settle(first,'success');
-        assert.equal(f.db.cards[0].successful_plus,n+1);
+        assert.equal(f.db.uses.filter(row=>row.state==='consumed').length,n+1);
+        assert.equal(f.db.cards[0].transaction_count,n);
+        await m.saveTransactionCount(42,n+1);
         await f.settle(second,'rejected');
     }
     const next=await f.claim(); assert.equal(await m.reserveCard(42,next.jobKey,'plus'),null);
-    assert.equal(f.db.uses.filter(u => u.state==='consumed').length,4);
+    assert.equal(f.db.uses.filter(u => u.state==='consumed').length,6);
 });
 
-test('one card accepts four Plus and one of each Pro, with separate limits and mixed order',async () => {
+test('all plans share six platform settlements',async () => {
     const f=fixture(); await f.addCard(); const m=f.store.cardMethods(f.base);
-    for(const plan of ['plus','pro100','plus','pro200','plus','pro500','plus']) {
+    for(const plan of ['plus','pro100','plus','pro200','plus','pro500']) {
         const task=await f.claim(plan); assert.ok(await m.reserveCard(42,task.jobKey,plan)); await f.settle(task,'success');
+        await m.saveTransactionCount(42,f.db.uses.filter(u=>u.state==='consumed').length);
     }
     for(const plan of ['plus','pro100','pro200','pro500']) {
         const task=await f.claim(plan); assert.equal(await m.reserveCard(42,task.jobKey,plan),null);
     }
-    assert.equal(f.db.uses.filter(row => row.state==='consumed').length,7);
+    assert.equal(f.db.uses.filter(row => row.state==='consumed').length,6);
 });
 
 test('manual and pending hold a card; confirmed failure releases without counting',async () => {
     const f=fixture(); await f.addCard(); const task=await f.claim(),m=f.store.cardMethods(f.base); await m.reserveCard(42,task.jobKey,'plus');
     for (const state of ['submitting','pending','manual']) { await f.settle(task,state); assert.equal(f.db.cards[0].active_job,task.jobKey); }
-    await f.settle(task,'failed'); assert.equal(f.db.cards[0].successful_plus,0); assert.equal(f.db.cards[0].active_job,null);
+    await f.settle(task,'failed'); assert.equal(f.db.cards[0].transaction_count,0); assert.equal(f.db.cards[0].active_job,null);
     const next=await f.claim(); assert.ok(await m.reserveCard(42,next.jobKey,'plus'));
 });
 
-test('CDK, task, quota and card release all roll back if quota settlement fails',async () => {
+test('CDK, task and reservation all roll back if card release fails',async () => {
     const f=fixture(); await f.addCard(); const task=await f.claim(); await f.store.cardMethods(f.base).reserveCard(42,task.jobKey,'plus');
-    f.db.failIncrement=true; await assert.rejects(f.settle(task,'success'),/injected/);
-    assert.equal(f.db.tasks[0].orbitcard_state,'prepared'); assert.equal(f.db.uses[0].state,'reserved'); assert.equal(f.db.cards[0].successful_plus,0); assert.ok(f.db.cdks[0].used_at);
-    f.db.failIncrement=false; await f.settle(task,'success'); await f.settle(task,'failed');
-    assert.equal(f.db.cards[0].successful_plus,1); assert.equal(f.db.tasks[0].status,'success');
+    f.db.failRelease=true; await assert.rejects(f.settle(task,'success'),/injected/);
+    assert.equal(f.db.tasks[0].orbitcard_state,'prepared'); assert.equal(f.db.uses[0].state,'reserved'); assert.equal(f.db.cards[0].transaction_count,0); assert.ok(f.db.cdks[0].used_at);
+    f.db.failRelease=false; await f.settle(task,'success'); await f.settle(task,'failed');
+    assert.equal(f.db.uses[0].state,'consumed');assert.equal(f.db.cards[0].transaction_count,0); assert.equal(f.db.tasks[0].status,'success');
 });
 
-test('sync does not reset history or active reservations; imports require one-time binding',async () => {
-    const f=fixture(); const card=await f.addCard(42,false); const m=f.store.cardMethods(f.base);
-    const task=await f.claim(); assert.equal(await m.reserveCard(42,task.jobKey,'plus'),null);
-    const counts={plus:2,pro100:1,pro200:0,pro500:0};
-    await assert.rejects(m.bindCard(42,counts),/旧充值订单/); await f.settle(task,'rejected');
-    await m.bindCard(42,counts); await m.syncCards([{...card,balance:90}]); assert.equal(f.db.cards[0].successful_plus,2);
-    await assert.rejects(m.bindCard(42,counts),/已确认/);
-    const next=await f.claim(); await m.reserveCard(42,next.jobKey,'plus'); await m.syncCards([card]); assert.equal(f.db.cards[0].active_job,next.jobKey);
+test('platform count enables imported cards and metadata sync preserves count and reservation',async()=>{
+    const f=fixture(),card=await f.addCard(42,false),m=f.store.cardMethods(f.base),task=await f.claim();
+    assert.equal(await m.reserveCard(42,task.jobKey,'plus'),null);
+    await m.saveTransactionCount(42,3);assert.ok(await m.reserveCard(42,task.jobKey,'plus'));
+    await m.syncCards([{...card,balance:90}]);assert.equal(f.db.cards[0].transaction_count,3);
+    assert.equal(f.db.cards[0].active_job,task.jobKey);
 });
 
 function serviceFixture(overrides={}) {
@@ -74,6 +75,7 @@ function serviceFixture(overrides={}) {
     const transport={request:async (config,operation,body={},key='') => {
         calls.push({operation,body,key});
         if (overrides[operation]) return {status:200,...await overrides[operation](body,key,config)};
+        if(operation==='cardTransaction') return {success:true,data:{list:[],total:0}};
         if(operation==='getAccountBalance') return {success:true,status:200,data:{available_balance:accountBalance.toFixed(8)}};
         if (operation==='getCardList') return {success:true,data:{list:providerCards,total:providerCards.length}};
         if (operation==='getProductCode') return {success:true,data:[product]};
@@ -91,7 +93,10 @@ function serviceFixture(overrides={}) {
         throw new Error(`Unexpected operation ${operation}`);
     }};
     const api=load('orbitcard-cards-client.js',{'./orbitcard-client':transport});
-    const make=load('orbitcard-card-service.js',{'./orbitcard-client':transport,'./orbitcard-cards-client':api});
+    // These tests isolate payment/issuance recovery from pool replenishment.
+    // The production five-card target is covered end-to-end in card-pool.node.cjs.
+    const policy={...require('../orbitcard-pool'),get SIZE(){return Math.max(1,providerCards.filter(card=>card.status!=='DELETED').length);}};
+    const make=load('orbitcard-card-service.js',{'./orbitcard-client':transport,'./orbitcard-cards-client':api,'./orbitcard-pool':policy});
     const service=make({store:f.store,audit:event => events.push(event),sleep:async ms => {clock+=ms;},now:() => clock,maxIssuePolls:1});
     return {...f,calls,events,api,service,advance:(ms=60000) => {clock+=ms;},setCards:cards => {providerCards=cards;},setAccount:balance => {accountBalance=balance;}};
 }
@@ -99,15 +104,15 @@ function serviceFixture(overrides={}) {
 test('sync retires deleted and absent cards without reading deleted details or erasing history',async()=>{
     const f=serviceFixture();
     const a=await f.addCard(42),b=await f.addCard(43);
-    f.db.cards[0].successful_plus=2;
+    f.db.cards[0].transaction_count=2;
     f.db.cards[1].active_job='unresolved-order';
     f.setCards([{...a,status:'DELETED'}]);
     const result=await f.service.synchronize(cfg);
     assert.deepEqual(result.failed_ids,[]);
     assert.deepEqual(result.removed_ids,[42,43]);
-    assert.ok(!f.calls.some(call=>call.operation==='cardDetail'));
+    assert.ok(!f.calls.some(call=>call.operation==='cardDetail' && (call.body.card_id===42 || call.body.card_ids?.includes(42))));
     assert.equal(f.db.cards[0].provider_status,'DELETED');
-    assert.equal(f.db.cards[0].successful_plus,2);
+    assert.equal(f.db.cards[0].transaction_count,2);
     assert.equal(f.db.cards[1].provider_status,'UNAVAILABLE');
     assert.equal(f.db.cards[1].active_job,'unresolved-order');
     assert.equal(f.db.cards[1].balance,null);
@@ -144,6 +149,7 @@ test('handed-off tasks never enter allocation or resume an unknown card applicat
     }
     const f = serviceFixture({ createCard: async () => ({ success: false, status: 502 }) }), task = await f.claim();
     await assert.rejects(f.service.allocate(cfg, task.jobKey, 'plus'), /原开卡申请仍待确认/);
+    f.db.issues[0].job_key=task.jobKey;
     await f.settle(task, 'card_pending'); f.advance();
     const before = f.calls.length, issue = structuredClone(f.db.issues[0]);
     await f.service.recover(cfg); await f.service.recover(cfg);
@@ -166,6 +172,7 @@ test('funding rechecks handoff after balance lookup and before sending money', a
 test('background card recovery shares execution ownership and rechecks a handoff after acquiring it', async () => {
     const f = serviceFixture({ createCard: async () => ({ success: false, status: 502 }) }), task = await f.claim();
     await assert.rejects(f.service.allocate(cfg, task.jobKey, 'plus'));
+    f.db.issues[0].job_key=task.jobKey;
     f.advance(); const before = f.calls.length;
     const guard = await f.store.acquirePaymentLock('cdk:code-1');
     await f.service.recover(cfg); assert.equal(f.calls.length, before); await guard.release();
@@ -208,7 +215,7 @@ test('every selection refreshes provider removals and preserves local usage hist
     assert.equal(f.calls.filter(call=>call.operation==='getCardList').length,2);
     assert.equal(f.db.cards[0].provider_status,'DELETED');
     assert.equal(f.db.cards[0].balance,null);
-    assert.equal(f.db.cards[0].successful_plus,1);
+    assert.equal(f.db.uses[0].state,'consumed');assert.equal(f.db.cards[0].transaction_count,0);
 });
 
 test('original funded and opened cards cannot resume after removal even when detail remains ACTIVE',async()=>{
@@ -230,7 +237,7 @@ test('original funded and opened cards cannot resume after removal even when det
         assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),42);
         f.api.listCards=originalList;failList=removed==='list_failure';
         const before=f.calls.length;
-        await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/卡台列表|卡片列表读取失败/);
+        await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/卡台列表|平台列表|卡片列表读取失败/);
         assert.ok(!f.calls.slice(before).some(call=>['cardDetail','createCard','rechargeCard'].includes(call.operation)));
         assert.equal(f.db.cards[0].active_job,task.jobKey);
         assert.equal(f.db.cards[0].provider_status,removed==='list_failure'?'ACTIVE':removed==='deleted'?'DELETED':'UNAVAILABLE');
@@ -241,7 +248,7 @@ test('a pending opening owned by another order is never adopted as this payment 
     const f=serviceFixture();f.setCards([]);const task=await f.claim();
     f.db.issues.push({issue_key:'card-other',scope:require('../orbitcard-card-policy').cardScope(cfg.base_url),
         job_key:'another-order',plan_type:'plus',state:'pending'});
-    await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/另一笔开卡申请/);
+    await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/待确认开卡申请|另一笔开卡申请/);
     assert.equal(f.calls.filter(call=>call.operation==='createCard').length,0);
 });
 
@@ -249,7 +256,7 @@ test('an already reserved card missing from the live list cannot trigger a secon
     const f=serviceFixture();await f.addCard(42);const task=await f.claim();
     await f.store.cardMethods(f.base).reserveCard(42,task.jobKey,'plus');
     f.setCards([]);
-    await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/预占卡片/);
+    await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/预占卡片|原订单卡片/);
     assert.equal(f.calls.filter(call=>call.operation==='createCard').length,0);
 });
 
@@ -260,7 +267,7 @@ test('documented product response automatically supplies the exact createCard fi
     assert.equal((await f.service.apply(cfg,'pro500')).card_id,100);
     const create=f.calls.find(c=>c.operation==='createCard');assert.deepEqual(create.body,{product_code:'p1',amount:'20.00',quantity:1});
     assert.equal(f.db.issues[0].request_body,JSON.stringify(create.body));assert.equal(f.db.issues[0].issue_key,create.key);
-    assert.equal(f.calls[0].operation,'getAccountBalance');assert.equal(f.db.fundings.length,0);
+    assert.equal(f.calls[0].operation,'getCardList');assert.equal(f.db.fundings.length,0);
     const event=f.events.find(e=>e.event==='card_issue_prepared');assert.deepEqual(event.data.parameters,create.body);
     const normalized=f.api.normalizeProducts({list:[documented]})[0];assert.equal(normalized.network,'MASTERCARD');
 });
@@ -348,7 +355,7 @@ test('unknown issuance is durable and a new worker or restart uses the same body
     f.advance(); await assert.rejects(f.service.apply(cfg,'plus')); assert.equal(f.db.issues.length,1);
     const before=f.calls.filter(c => c.operation==='createCard'); assert.equal(before[0].key,before[1].key); assert.deepEqual(before[0].body,before[1].body);
     ready=true; f.advance(); f.setCards([{card_id:77,status:'ACTIVE',product_code:'p1',balance:85,currency:'USD'}]); await f.service.recover({...cfg,enabled:false});
-    assert.equal(f.db.issues[0].state,'ready'); assert.equal(f.db.cards[0].history_confirmed,1); assert.equal(f.db.uses.length,0);
+    assert.equal(f.db.issues[0].state,'ready'); assert.equal(f.db.cards[0].transaction_count,0); assert.equal(f.db.uses.length,0);
 });
 
 test('list failures, malformed pages and a budget cap never result in an application',async () => {
@@ -427,7 +434,7 @@ test('order identity changes stop fulfillment and preserve the original order nu
     let changed=false;
     const f=serviceFixture({createCard:async () => ({success:true,data:changed?{status:'success',card_id:77,order_no:'WRONG'}:{status:'pending_confirm',order_no:'ORIGINAL',completed:false}})});
     const task=await f.claim(); await assert.rejects(f.service.apply(cfg,'plus'));f.advance();changed=true;
-    await assert.rejects(f.service.apply(cfg,'plus'),/归属不一致/);
+    await assert.rejects(f.service.apply(cfg,'plus'),/归属/);
     assert.equal(f.db.issues[0].order_no,'ORIGINAL');assert.equal(f.db.issues[0].state,'unknown');assert.equal(f.db.cards.length,0);
 });
 
@@ -440,12 +447,12 @@ test('Retry-After is persisted and changing credentials or original parameters n
     await assert.rejects(f.service.apply(cfg,'plus'),/原开卡参数/);assert.equal(count(),1);assert.equal(f.db.issues.length,1);
 });
 
-test('exhausting one plan does not prevent selecting the same funded card for another plan',async () => {
+test('local order success does not consume platform settlement quota for other plans',async () => {
     const f=serviceFixture();const card=await f.addCard(42,true,4);
     f.setCards([{...card,status:'ACTIVE',balance:1000}]);const task=await f.claim('pro200');
     assert.equal(await f.service.allocate(cfg,task.jobKey,'pro200'),42);
     assert.equal(f.calls.filter(c => c.operation==='createCard').length,0);await f.settle(task,'success');
-    assert.equal(f.db.cards[0].successful_plus,4);assert.equal(f.db.cards[0].successful_pro200,1);assert.equal(f.db.cards[0].successful_pro100,0);
+    assert.equal(f.db.cards[0].transaction_count,0);assert.equal(f.db.uses[0].state,'consumed');
 });
 
 test('available account balance is checked before cards; frozen, total and card balances cannot bypass the locked CDK',async () => {
@@ -474,7 +481,7 @@ test('a card with quota but insufficient balance receives only the exact deficit
     assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),42);
     assert.equal(f.calls[0].operation,'getAccountBalance');assert.equal(f.calls.filter(c => c.operation==='createCard').length,0);
     const request=f.calls.find(c => c.operation==='rechargeCard');assert.deepEqual(request.body,{card_id:42,amount:'16.00'});assert.match(request.key,/^fund-/);
-    assert.equal(f.db.fundings[0].state,'ready');assert.equal(f.db.cards[0].successful_plus,0);assert.equal(f.db.cards[0].active_job,task.jobKey);
+    assert.equal(f.db.fundings[0].state,'ready');assert.equal(f.db.cards[0].transaction_count,0);assert.equal(f.db.cards[0].active_job,task.jobKey);
 });
 
 test('a funded card is preferred to another eligible card needing a topup',async () => {
@@ -489,7 +496,7 @@ test('unknown topup without an order number is never resent after handoff to sup
     await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/补款结果仍待确认/);assert.equal(f.db.fundings[0].state,'unknown');assert.equal(f.db.cards[0].active_job,task.jobKey);
     await f.settle(task,'funding_pending');f.advance();ready=true;f.setCards([{...card,status:'ACTIVE',balance:21}]);await f.service.recover(cfg);
     const calls=f.calls.filter(c => c.operation==='rechargeCard');assert.equal(calls.length,1);
-    assert.equal(f.db.fundings[0].state,'unknown');assert.equal(f.db.fundings.length,1);assert.equal(f.db.cards[0].successful_plus,0);
+    assert.equal(f.db.fundings[0].state,'unknown');assert.equal(f.db.fundings.length,1);assert.equal(f.db.cards[0].transaction_count,0);
     await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/转人工/);
     assert.equal(f.calls.filter(c => c.operation==='rechargeCard').length,1);
 });
@@ -520,11 +527,11 @@ test('fixed 20 USD issue never silently raises the amount to satisfy a higher pr
     assert.throws(() => f.api.chooseProduct(rows,'plus',cfg),/20 USD/);
 });
 
-test('quota-available cards with unsupported state or currency are skipped for a new card',async () => {
+test('unavailable cards cannot cause opening beyond the pool target',async () => {
     for(const change of [{status:'CANCELLED'},{currency:'EUR'}]) {
         const f=serviceFixture(),card=await f.addCard();f.setCards([{...card,status:'ACTIVE',...change}]);const task=await f.claim();
-        assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),101);
-        assert.equal(f.db.issues.length,1);
+        await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/卡池已满/);
+        assert.equal(f.db.issues.length,0);
     }
 });
 
@@ -532,12 +539,12 @@ test('funding-pending handoff cannot return to automatic payment even when the o
     const f=serviceFixture({rechargeCard:async body => ({success:true,data:{order_no:'ORIGINAL',amount:body.amount,status:'pending_confirm'}})});
     const card=await f.addCard();f.setCards([{...card,status:'ACTIVE',balance:5}]);const task=await f.claim();
     await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'));
-    const recovery=require('../order-recovery')({store:f.store,activeJobs:new Set(),audit() {},reconcileCards:async () => {},
+    const recovery=require('../order-recovery')({store:f.store,activeJobs:new Set(),audit() {},
         query:{refresh:async () => {throw new Error('must not query a nonexistent subscription');}}});
     await recovery.refreshTask({...f.db.tasks[0]});assert.equal(f.db.tasks[0].orbitcard_state,'funding_pending');assert.ok(f.db.cdks[0].used_at);
     await recovery.refreshTask({...f.db.tasks[0]});assert.equal(f.db.cards[0].active_job,task.jobKey);
     f.db.fundings[0].state='ready';await recovery.refreshTask({...f.db.tasks[0]});
-    assert.equal(f.db.tasks[0].status,'manual');assert.ok(f.db.cdks[0].used_at);assert.equal(f.db.cards[0].active_job,task.jobKey);assert.equal(f.db.cards[0].successful_plus,0);
+    assert.equal(f.db.tasks[0].status,'manual');assert.ok(f.db.cdks[0].used_at);assert.equal(f.db.cards[0].active_job,task.jobKey);assert.equal(f.db.cards[0].transaction_count,0);
 });
 
 test('funding Retry-After and changed credential/body cannot cause duplicate topups',async () => {
@@ -601,7 +608,7 @@ test('full worker path passes selected card to create and atomically consumes it
             selectCard:() => f.service.allocate(cfg,task.jobKey,'plus'),onSubmission() {},broadcast() {},sleep:async () => {},maxPolls:1,
             setProgress:(status,progress,message,extra) => f.store.settleOrbitcardTask(task.jobKey,{status,progress,message,...extra})});
         assert.equal(calls.find(c => c.operation==='createSubscription').body.card_id,100);
-        assert.equal(f.db.cards[0].successful_plus,1); assert.equal(f.db.cards[0].active_job,null); assert.equal(f.db.tasks[0].status,'success');
+        assert.equal(f.db.uses[0].state,'consumed');assert.equal(f.db.cards[0].transaction_count,0); assert.equal(f.db.cards[0].active_job,null); assert.equal(f.db.tasks[0].status,'success');
         assert.ok(!JSON.stringify(f.db).includes('private-session')); assert.ok(!JSON.stringify(f.events).includes('private-session'));
     } finally {if(previous===undefined) delete process.env.ORBITCARD_API_SECRET; else process.env.ORBITCARD_API_SECRET=previous;}
 });
@@ -653,7 +660,7 @@ test('payment core completes all four plans and settles CDK and card quota exact
     for (const plan of ['plus', 'pro100', 'pro200', 'pro500']) {
         const f = await runPaymentCore({ plan, balance: 600 });
         assert.equal(f.db.tasks[0].status, 'success'); assert.ok(f.db.cdks[0].used_at);
-        assert.equal(f.db.cards[0][`successful_${plan}`], 1); assert.equal(f.db.cards[0].active_job, null);
+        assert.equal(f.db.uses[0].state, 'consumed');assert.equal(f.db.cards[0].transaction_count, 0); assert.equal(f.db.cards[0].active_job, null);
         assert.equal(f.db.uses[0].state, 'consumed'); assert.equal(f.db.issues.length, 0); assert.equal(f.db.fundings.length, 0);
         assert.deepEqual(f.requests.map(row => row.operation), ['createSubscription', 'getSubscription']);
         assert.equal(f.notices.at(-1).status, 'success');
@@ -674,7 +681,7 @@ test('payment core keeps unknown payments on the original identity and retains C
     const f = await runPaymentCore({ result: 'unknown' });
     assert.equal(f.db.tasks.length, 1); assert.equal(f.db.tasks[0].orbitcard_state, 'manual');
     assert.ok(f.db.cdks[0].used_at); assert.equal(f.db.cards[0].active_job, f.db.tasks[0].job_key);
-    assert.equal(f.db.cards[0].successful_plus, 0);
+    assert.equal(f.db.cards[0].transaction_count, 0);
     assert.deepEqual(f.requests.map(row => row.operation), ['createSubscription', 'getSubscription']);
     assert.equal(f.requests[1].body.client_order_no, f.requests[0].key);
 });
@@ -687,7 +694,7 @@ test('payment core rotates only confirmed failures and locks after three distinc
     assert.equal(new Set(writes.map(row => row.key)).size, 3);
     assert.equal(new Set(writes.map(row => row.body.card_id)).size, 3);
     assert.deepEqual(writes.map(row => row.jobKey), f.db.tasks.map(row => row.job_key));
-    assert.ok(f.db.cards.every(row => row.successful_plus === 0 && !row.active_job));
+    assert.ok(f.db.cards.every(row => row.transaction_count === 0 && !row.active_job));
 });
 
 test('payment core rejects invalid session before funding and locks an insufficient account before payment', async () => {
@@ -730,22 +737,22 @@ test('advisory allocation lock is always released and lock timeout never runs al
     assert.equal(calls.length,2);assert.equal(calls.at(-1),'destroy');
 });
 
-test('card management HTTP routes require secondary auth for applying and binding',async t => {
+test('card application requires secondary auth and retired usage routes are absent',async t => {
     const express=require('express'),{once}=require('node:events'),app=express();app.use(express.json());
-    let applications=0,bindings=0;
+    let applications=0;
     const register=load('orbitcard-card-http.js',{'./orbitcard-cards-client':{positiveId:value => Number(value)}});
-    register(app,{store:{getGptApiConfig:async () => cfg,withCardAllocationLock:async (_,fn) => fn({bindCard:async () => {bindings++;}}),
+    register(app,{store:{getGptApiConfig:async () => cfg,
         cardMethods:() => ({listCards:async () => [],listIssues:async () => [],listFundings:async () => []})},
         cardService:{apply:async () => {applications++;return {card_id:99};}},audit() {},
         requireSecondaryAuth:(req,res,next) => req.headers['x-secondary']==='valid'?next():res.status(403).json({success:false})});
     const server=app.listen(0,'127.0.0.1');await once(server,'listening');t.after(async () => {server.closeAllConnections();await new Promise(resolve => server.close(resolve));});
     const base=`http://127.0.0.1:${server.address().port}`;
     const post=(route,body,secondary=false) => fetch(base+route,{method:'POST',headers:{'Content-Type':'application/json',...(secondary?{'x-secondary':'valid'}:{})},body:JSON.stringify(body)});
-    for(const route of ['/api/admin/orbitcard/cards/apply','/api/admin/orbitcard/cards/42/bind']) assert.equal((await post(route,{})).status,403);
-    assert.equal(applications,0);assert.equal(bindings,0);
+    assert.equal((await post('/api/admin/orbitcard/cards/apply',{})).status,403);
+    for(const route of ['bind','usage']) assert.equal((await post('/api/admin/orbitcard/cards/42/'+route,{},true)).status,404);
+    assert.equal(applications,0);
     assert.equal((await post('/api/admin/orbitcard/cards/apply',{plan_type:'arbitrary'},true)).status,400);
     assert.equal((await post('/api/admin/orbitcard/cards/apply',{plan_type:'plus'},true)).status,200);assert.equal(applications,1);
-    assert.equal((await post('/api/admin/orbitcard/cards/42/bind',{usage:{plus:2,pro100:0,pro200:0,pro500:0}},true)).status,200);assert.equal(bindings,1);
 });
 
 test('eligible cards are inspected in one batch without per-card rereads',async () => {
@@ -759,21 +766,21 @@ test('eligible cards are inspected in one batch without per-card rereads',async 
     assert.equal(f.calls.filter(call=>call.operation==='rechargeCard'||call.operation==='createCard').length,0);
 });
 
-test('live V1 items/data batch updates balances, status and masked tail without resetting quota',async () => {
+test('live V1 batch refreshes card metadata and platform count',async () => {
     const f=serviceFixture({cardDetail:async () => ({success:true,data:{total:2,succeeded:2,failed:0,items:[
         {index:1,card_id:42,success:true,data:{card_id:42,card_type:'save',status:'ACTIVE',product_code:'p1',
             available_amount:'0.03000000',card_number_masked:'400052******4139',billing_address:'private-address'}},
         {index:2,card_id:43,success:true,data:{card_id:43,card_type:'save',status:'CANCELLED',product_code:'p1',
             available_amount:'20.00000000',card_number_masked:'400052******7464'}}]}})});
-    const a=await f.addCard(42),b=await f.addCard(43); f.db.cards[0].successful_plus=2;
+    const a=await f.addCard(42),b=await f.addCard(43); f.db.cards[0].transaction_count=2;
     f.setCards([{...a,status:'ACTIVE',balance:20},{...b,status:'ACTIVE',balance:20}]);
     const result=await f.service.synchronize(cfg);
     assert.deepEqual(result.synced_ids,[42,43]); assert.deepEqual(result.failed_ids,[]);
     assert.equal(f.db.cards[0].balance,0.03); assert.equal(f.db.cards[0].currency,'USD');
-    assert.equal(f.db.cards[0].last4,'4139'); assert.equal(f.db.cards[0].successful_plus,2);
+    assert.equal(f.db.cards[0].last4,'4139'); assert.equal(f.db.cards[0].transaction_count,0);
     assert.equal(f.db.cards[1].provider_status,'CANCELLED');
     assert.ok(!JSON.stringify(f.db.cards).includes('private-address'));
-    assert.ok(f.calls.every(call=>['getCardList','cardDetail'].includes(call.operation)));
+    assert.ok(f.calls.every(call=>['getCardList','cardDetail','cardTransaction'].includes(call.operation)));
 });
 
 test('partial batch failure syncs confirmed cards and identifies stale card snapshots',async () => {
@@ -902,7 +909,7 @@ test('transaction query filters sensitive fields, rejects foreign ownership and 
     assert.ok(!JSON.stringify(result).includes('private'));
     assert.equal(f.db.uses.length,0);
     rows[0].card_id=43;
-    await assert.rejects(f.service.transactions(cfg,42),/归属不一致/);
+    await assert.rejects(f.service.transactions(cfg,42),/归属/);
     rows[0]=null;
     await assert.rejects(f.service.transactions(cfg,42),/格式无效/);
 });
@@ -962,51 +969,37 @@ test('batch selection uses one platform snapshot and never rereads candidates be
     assert.equal(f.calls.filter(call=>call.operation==='createCard').length,0);
 });
 
-test('empty inventory or exhausted plan quota automatically opens one card with 20 USD',async () => {
-    for(const setup of ['empty','exhausted']) {
-        const f=serviceFixture();
-        if(setup==='exhausted') {
-            const card=await f.addCard(42,true,4);
-            f.setCards([{...card,status:'ACTIVE',balance:50}]);
-        }
-        const task=await f.claim();
-        const cardId=await f.service.allocate(cfg,task.jobKey,'plus');
-        assert.equal(cardId,setup==='empty'?100:101);
-        const opens=f.calls.filter(call=>call.operation==='createCard');
-        assert.equal(opens.length,1);
-        assert.deepEqual(opens[0].body,{product_code:'p1',amount:'20.00',quantity:1});
-        assert.equal(f.db.issues.length,1);
-        assert.equal(f.db.issues[0].job_key,task.jobKey);
-        assert.equal(f.db.cards.find(card=>card.card_id===cardId).active_job,task.jobKey);
+test('empty inventory opens a pool card, while obsolete plan quotas do not force opening',async()=>{
+    for(const existing of [false,true]) {
+        const f=serviceFixture(); if(existing){const card=await f.addCard(42,true,4);f.setCards([{...card,status:'ACTIVE',balance:50}]);}
+        const task=await f.claim();const id=await f.service.allocate(cfg,task.jobKey,'plus');
+        assert.equal(id,existing?42:100);
+        assert.equal(f.calls.filter(call=>call.operation==='createCard').length,existing?0:1);
+        if(!existing)assert.equal(f.db.issues[0].job_key,null);
+        assert.equal(f.db.cards.find(card=>card.card_id===id).active_job,task.jobKey);
     }
 });
 
-test('unknown automatic opening stays bound to the CDK and reuses its original key and body',async () => {
-    const f=serviceFixture({createCard:async () => ({success:false,status:502})});
-    const task=await f.claim();
+test('unknown pool opening retains its identity independently of the requesting CDK',async()=>{
+    const f=serviceFixture({createCard:async()=>({success:false,status:502})}),task=await f.claim();
     await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/原开卡申请仍待确认/);
-    assert.equal(f.db.issues.length,1);
-    assert.equal(f.db.issues[0].job_key,task.jobKey);
-    const pendingCard=await f.addCard(77,false);
-    f.setCards([{...pendingCard,status:'ACTIVE',balance:20}]);
-    f.advance();
+    assert.equal(f.db.issues[0].job_key,null);f.advance();
     await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/原开卡申请仍待确认/);
-    const calls=f.calls.filter(call=>call.operation==='createCard');
-    assert.equal(calls.length,2);
-    assert.equal(calls[0].key,calls[1].key);
-    assert.deepEqual(calls[0].body,calls[1].body);
-    assert.equal(f.db.issues.length,1);
+    const calls=f.calls.filter(call=>call.operation==='createCard');assert.equal(calls.length,2);
+    assert.equal(calls[0].key,calls[1].key);assert.deepEqual(calls[0].body,calls[1].body);assert.equal(f.db.issues.length,1);
 });
 
 test('unconfirmed imported history pauses instead of buying another card',async()=>{
     const f=serviceFixture(),card=await f.addCard(42,false);f.setCards([{...card,status:'ACTIVE'}]);
-    const task=await f.claim();await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/历史次数尚未确认/);
+    const task=await f.claim();assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),42);
+    assert.equal(f.db.cards[0].transaction_count,0);
     assert.ok(!f.calls.some(call=>['createCard','rechargeCard'].includes(call.operation)));
 });
 
 test('an original pending opening cannot be bypassed by another funded card',async()=>{
     const f=serviceFixture({createCard:async()=>({success:true,data:{order_no:'OPEN-1',status:'pending_confirm',completed:false}})});
     const task=await f.claim();await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/原开卡申请仍待确认/);
+    f.db.issues[0].job_key=task.jobKey;
     const available=await f.addCard(42);f.setCards([{...available,status:'ACTIVE',balance:100}]);f.advance();
     await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/原开卡申请仍待确认/);
     assert.equal(f.db.cards[0].active_job,null);assert.equal(f.db.issues.length,1);
@@ -1027,7 +1020,7 @@ test('a ready original opening resumes its own card without applying account thr
     assert.ok(!f.calls.some(call=>call.operation==='createCard'));
 });
 
-test('busy cards wait without spending; unavailable cards can trigger a new card',async () => {
+test('busy and frozen cards keep their pool slots without additional spending',async () => {
     for(const setup of ['busy','frozen']) {
         const f=serviceFixture(),card=await f.addCard(42);
         f.setCards([{...card,status:setup==='frozen'?'FROZEN':'ACTIVE',balance:50}]);
@@ -1038,8 +1031,8 @@ test('busy cards wait without spending; unavailable cards can trigger a new card
             assert.equal(f.calls.filter(call=>['createCard','rechargeCard'].includes(call.operation)).length,0);
             continue;
         }
-        assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),101);
-        assert.equal(f.calls.filter(call=>call.operation==='createCard').length,1);
+        await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/卡池已满/);
+        assert.equal(f.calls.filter(call=>call.operation==='createCard').length,0);
     }
 });
 
@@ -1052,10 +1045,10 @@ test('a confirmed failed card is excluded on the next platform selection',async 
     assert.equal(f.calls.filter(call=>call.operation==='createCard').length,0);
 });
 
-test('confirmed failed card is excluded and a new card is opened when no unused card remains',async () => {
+test('excluded failed cards cannot cause the pool target to be exceeded',async () => {
     const f=serviceFixture(),card=await f.addCard(42);
     f.setCards([{...card,status:'ACTIVE',balance:50}]);
     const task=await f.claim();
-    assert.equal(await f.service.allocate(cfg,task.jobKey,'plus',{excludedCardIds:[42]}),101);
-    assert.equal(f.calls.filter(call=>call.operation==='createCard').length,1);
+    await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus',{excludedCardIds:[42]}),/卡池已满/);
+    assert.equal(f.calls.filter(call=>call.operation==='createCard').length,0);
 });

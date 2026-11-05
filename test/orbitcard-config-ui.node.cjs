@@ -121,7 +121,7 @@ test('card ID preview reads platform card list and returns only safe summary fie
     const register = load('orbitcard-card-http.js', {
         './orbitcard-cards-client': { listCards: async () => cards },
         './orbitcard-client': {},
-        './orbitcard-card-policy': { LIMITS: { plus: 4 }, CardPreparationError: class extends Error {} }
+        './orbitcard-card-policy': { CardPreparationError: class extends Error {} }
     });
     register(app, { store: { getGptApiConfig: async () => ({ api_key: 'fixture' }) },
         cardService: {}, requireSecondaryAuth: (_req, _res, next) => next(), audit() {} });

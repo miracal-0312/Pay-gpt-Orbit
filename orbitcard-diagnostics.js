@@ -1,10 +1,11 @@
 'use strict';
+const poolPolicy = require('./orbitcard-pool');
 
 const crypto = require('node:crypto');
 const { parseSession } = require('./session-input');
 const { PLAN_TYPES, PROVIDER_PLANS, paymentPlan } = require('./plan-registry');
 const { paymentRegion } = require('./orbitcard-config');
-const { LIMITS, CardPreparationError } = require('./orbitcard-card-policy');
+const { CardPreparationError } = require('./orbitcard-card-policy');
 const { decideCards } = require('./orbitcard-payment-decision');
 const money = require('./orbitcard-money');
 
@@ -72,10 +73,10 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
             const existing = await store.cardMethods(cfg.base_url).listCards();
             const saved = [...existing];
             for (const card of listed) if (!saved.some(row => Number(row.card_id) === card.card_id)) {
-                saved.push({ card_id: card.card_id, history_confirmed: false });
+                saved.push({ card_id: card.card_id, transaction_count: null });
             }
             const relevant = saved.filter(row => listed.some(card => card.card_id === Number(row.card_id))
-                && row.history_confirmed && Number(row[`successful_${plan}`]) < LIMITS[plan] && !row.active_job);
+                && poolPolicy.eligible(row) && !row.active_job);
             const detailed = await cards.cardDetailsInBatches(cfg, relevant.map(row => Number(row.card_id)), { allowPartial: true });
             if (relevant.length && !detailed.length) throw new CardPreparationError('批量卡片详情全部缺失，停止选卡，请联系售后');
             const decision = decideCards({ saved, listed, detailed, products, jobKey: traceId, planType: plan, priceFor: cards.planPrice });
