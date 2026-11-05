@@ -51,8 +51,8 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
     }));
     app.get('/api/admin/orbitcard/products', handler(async (req, res) => {
         const cfg = await config(), products = await cardsApi.products(cfg);
-        const catalog = products.map(({ prices, ...product }) => ({ ...product, plans: Object.fromEntries(CANONICAL_PLAN_TYPES.map(plan => {
-            const selected = cardsApi.selection({ ...product, prices }, plan, cfg);
+        const catalog = products.map(product => ({ ...product, plans: Object.fromEntries(CANONICAL_PLAN_TYPES.map(plan => {
+            const selected = cardsApi.selection(product, plan, cfg);
             return [plan, selected ? { amount: selected.amount, available: true } : null];
         })) }));
         let application=null,applicationError=null;

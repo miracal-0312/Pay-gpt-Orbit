@@ -15,13 +15,13 @@ function load(name,mocks) {
     const filename=path.resolve(__dirname,'..',name), real=createRequire(filename), module={exports:{}};
     new Function('require','module','exports',fs.readFileSync(filename,'utf8'))(id => Object.hasOwn(mocks,id)?mocks[id]:real(id),module,module.exports); return module.exports;
 }
-const product={product_code:'p1',bin:'55565979',min_initial_amount:20,min_retained_balance:1,remaining_open_card_num:100,
-    gpt_plan_prices:[{id:'plus',price:20,currency:'USD'},{id:'pro100',price:100,currency:'USD'},{id:'pro200',price:200,currency:'USD'},{id:'pro500',price:500,currency:'USD'}]};
-const cfg={enabled:true,base_url:'https://orbitcard.test',api_key:'fixture'};
+const product={product_code:'p1',bin:'55565979',min_initial_amount:'20.00',min_retained_balance:'1.00',remaining_open_card_num:100};
+const cfg={enabled:true,base_url:'https://orbitcard.test',api_key:'fixture',
+    orbitcard_plan_prices:{plus:'20.00',pro100:'100.00',pro200:'200.00',pro500:'500.00'}};
 
-test('card is serialized and six provider authorizations exhaust it without counting local results twice',async () => {
+test('card is serialized and seven provider authorizations exhaust it without counting local results twice',async () => {
     const f=fixture(); await f.addCard(); const m=f.store.cardMethods(f.base);
-    for (let n=0;n<6;n++) {
+    for (let n=0;n<7;n++) {
         const first=await f.claim(),second=await f.claim();
         const results=await Promise.all([m.reserveCard(42,first.jobKey,'plus'),m.reserveCard(42,second.jobKey,'plus')]);
         assert.equal(results.filter(Boolean).length,1);
@@ -35,12 +35,12 @@ test('card is serialized and six provider authorizations exhaust it without coun
         await f.settle(second,'rejected');
     }
     const next=await f.claim(); assert.equal(await m.reserveCard(42,next.jobKey,'plus'),null);
-    assert.equal(f.db.uses.filter(u => u.state==='consumed').length,6);
+    assert.equal(f.db.uses.filter(u => u.state==='consumed').length,7);
 });
 
-test('all plans share six successful provider authorizations',async () => {
+test('all plans share seven successful provider authorizations',async () => {
     const f=fixture(); await f.addCard(); const m=f.store.cardMethods(f.base);
-    for(const plan of ['plus','pro100','plus','pro200','plus','pro500']) {
+    for(const plan of ['plus','pro100','plus','pro200','plus','pro500','plus']) {
         const task=await f.claim(plan); assert.ok(await m.reserveCard(42,task.jobKey,plan)); await f.settle(task,'success');
         const count=f.db.uses.filter(u=>u.state==='consumed').length;
         assert.equal(f.db.cards[0].authorization_count,count-1);
@@ -50,7 +50,7 @@ test('all plans share six successful provider authorizations',async () => {
     for(const plan of ['plus','pro100','pro200','pro500']) {
         const task=await f.claim(plan); assert.equal(await m.reserveCard(42,task.jobKey,plan),null);
     }
-    assert.equal(f.db.uses.filter(row => row.state==='consumed').length,6);
+    assert.equal(f.db.uses.filter(row => row.state==='consumed').length,7);
 });
 
 test('manual and pending hold a card; confirmed failure releases without counting',async () => {
@@ -88,7 +88,7 @@ function serviceFixture(overrides={}) {
         if(operation==='cardTransaction') return {success:true,data:{list:[],total:0}};
         if(operation==='getAccountBalance') return {success:true,status:200,data:{available_balance:accountBalance.toFixed(8)}};
         if (operation==='getCardList') return {success:true,data:{list:providerCards,total:providerCards.length}};
-        if (operation==='getProductCode') return {success:true,data:[product]};
+        if (operation==='getProductCode') return {success:true,data:{list:[product]}};
         if (operation==='cardDetail') return {success:true,data:body.card_ids?{list:body.card_ids.map(id=>providerCards.find(c=>c.card_id===id))}:providerCards.find(c => c.card_id===body.card_id)};
         if (operation==='createCard') {
             const id=100+providerCards.length; providerCards.push({card_id:id,status:'ACTIVE',product_code:'p1',available_balance:Number(body.amount),currency:'USD',last4:'9876',bin:'55565979'});
@@ -168,9 +168,8 @@ test('handed-off tasks never enter allocation or resume an unknown card applicat
 });
 
 test('funding rechecks handoff after balance lookup and before sending money', async () => {
-    let checks = 0;
     const f = serviceFixture({ getAccountBalance: async () => {
-        if (++checks === 2) f.db.tasks[0].status = 'manual';
+        f.db.tasks[0].status = 'manual';
         return { success: true, data: { available_balance: '100.00' } };
     } });
     const card = await f.addCard(); f.setCards([{ ...card, status: 'ACTIVE', balance: 5 }]);
@@ -386,35 +385,71 @@ test('card list pagination continues when the server caps the requested page siz
     assert.deepEqual((await f.api.listCards(cfg)).map(c => c.card_id),[1,2]);
 });
 
-test('missing platform plan prices cannot fall back to another plan or retired manual budgets',() => {
-    const f=serviceFixture(); const rows=f.api.normalizeProducts([{...product,gpt_plan_prices:[{id:'plus',price:20,currency:'USD'}]}]);
-    assert.throws(() => f.api.chooseProduct(rows,'pro500',cfg),/没有符合/);
-    assert.equal(f.api.chooseProduct(rows,'plus',cfg).amount,'20.00');
-    const documentedRows=f.api.normalizeProducts({list:[{...product,gpt_plan_prices:undefined}]});
-    assert.throws(() => f.api.chooseProduct(documentedRows,'pro100',cfg));
-    assert.throws(() => f.api.chooseProduct(documentedRows,'pro100',{...cfg,orbitcard_price_pro100:'100'}));
+test('card list rejects inconsistent pagination before its contents can drive pool maintenance',async t=>{
+    const card=id=>({card_id:id,status:'ACTIVE'});
+    const first=Array.from({length:100},(_,i)=>card(i+1));
+    const cases=[
+        ['duplicate card in one page',{list:[card(1),card(1)],total:2}],
+        ['duplicate card across pages',{list:first,total:101},{list:[card(1)],total:101}],
+        ['wrong first page echo',{list:[card(1)],total:1,page:2}],
+        ['wrong later page echo',{list:first,total:101,page:1},{list:[card(101)],total:101,page:1}],
+        ['wrong page size echo',{list:[card(1)],total:1,page_size:20}],
+        ['boolean total',{list:[],total:false}],
+        ['boolean page echo',{list:[card(1)],total:1,page:true}],
+        ['array total',{list:[],total:[]}],
+        ['array page size echo',{list:[card(1)],total:1,page_size:[100]}],
+        ['total changes between pages',{list:first,total:101},{list:[card(101)],total:102}],
+        ['total disappears on later page',{list:first,total:101},{list:[card(101)]}],
+        ['total appears on later page',{list:first},{list:[card(101)],total:101}],
+        ['page exceeds requested size',{list:[...first,card(101)],total:101}]
+    ];
+    for(const [name,one,two] of cases) await t.test(name,async()=>{
+        const f=serviceFixture({getCardList:async body=>({success:true,data:body.page===1?one:two})});
+        await assert.rejects(f.api.listCards(cfg),require('../orbitcard-card-policy').CardPreparationError);
+        assert.ok(f.calls.every(call=>call.operation==='getCardList'));
+    });
 });
 
-test('documented GPT price IDs map to four plans and retain fixed decimal strings',() => {
+test('card list still accepts legacy arrays and consistent pagination without totals',async()=>{
+    const card=id=>({card_id:id,status:'ACTIVE'});
+    const legacy=serviceFixture({getCardList:async()=>({success:true,data:[card(1),card(2)]})});
+    assert.deepEqual((await legacy.api.listCards(cfg)).map(c=>c.card_id),[1,2]);
+    const rows=Array.from({length:101},(_,i)=>card(i+1));
+    const paged=serviceFixture({getCardList:async body=>({success:true,data:{
+        list:rows.slice((body.page-1)*body.page_size,body.page*body.page_size),page:body.page,page_size:body.page_size}})});
+    assert.deepEqual((await paged.api.listCards(cfg)).map(c=>c.card_id),rows.map(c=>c.card_id));
+    assert.deepEqual(paged.calls.map(call=>call.body.page),[1,2]);
+});
+
+test('missing configured prices cannot fall back to product prices, another plan or retired manual budgets',() => {
     const f=serviceFixture();
-    const rows=f.api.normalizeProducts({list:[{...product,gpt_plan_prices:[
-        {id:'plus',name:'Plus',price:'20.00000000',currency:'USD',source:'config'},
-        {id:'pro',name:'Pro 100',price:'100.50',currency:'USD',source:'transaction'},
-        {id:'pro_20x',name:'Pro 200',price:'200.00',currency:'USD',source:'config'},
-        {id:'pro_max',name:'Pro 100',price:'500.00',currency:'USD',source:'transaction'}
-    ]}]});
-    assert.equal(f.api.planPrice(rows[0],'plus'),'20.00000000');
-    assert.equal(f.api.planPrice(rows[0],'pro100'),'100.50');
-    assert.equal(f.api.planPrice(rows[0],'pro200'),'200.00');
-    assert.equal(f.api.planPrice(rows[0],'pro500'),'500.00');
-    assert.equal(rows[0].prices.find(price => price.plan_type==='pro100').source,'transaction');
-    assert.equal(f.api.chooseProduct(rows,'pro500',cfg).price,'500.00');
+    const rows=f.api.normalizeProducts({list:[{...product,gpt_plan_prices:[{id:'pro',price:'100.00',currency:'USD'}]}]});
+    const partial={...cfg,orbitcard_plan_prices:{plus:'20.00'}};
+    assert.equal(f.api.chooseProduct(rows,'plus',partial).amount,'20.00');
+    assert.throws(() => f.api.chooseProduct(rows,'pro100',partial));
+    assert.throws(() => f.api.chooseProduct(rows,'pro100',{...partial,orbitcard_price_pro100:'100'}));
+    assert.equal(Object.hasOwn(rows[0],'prices'),false);
 });
 
-test('CDK redemption stops before card funding or issuing when the product has no USD price',async () => {
-    const f=serviceFixture({getProductCode:async()=>({success:true,data:[{...product,gpt_plan_prices:undefined}]})});
+test('configured USD payment prices remain decimal strings and do not come from product metadata',() => {
+    const f=serviceFixture();
+    const rows=f.api.normalizeProducts({list:[{...product,gpt_plan_prices:[{id:'plus',price:'999.00',currency:'USD'}],
+        min_retained_balance:'1.00000001'}]});
+    const configured={...cfg,orbitcard_plan_prices:{plus:'15.54000001',pro100:'100.50',pro200:'200.00',pro500:'500.00'}};
+    const units=require('../orbitcard-money').units;
+    for(const plan of ['plus','pro100','pro200','pro500']) {
+        const selected=f.api.chooseProduct(rows,plan,configured);
+        assert.equal(typeof selected.price,'string');
+        assert.equal(units(selected.price),units(configured.orbitcard_plan_prices[plan]));
+    }
+    assert.equal(rows[0].min_retained_balance,'1.00000001');
+    assert.equal(Object.hasOwn(rows[0],'prices'),false);
+});
+
+test('CDK redemption stops before card funding or issuing when its configured USD price is missing',async () => {
+    const f=serviceFixture();
     const task=await f.claim();
-    await assert.rejects(f.service.allocate({...cfg,orbitcard_price_plus:'1'},task.jobKey,'plus'),/未返回当前套餐的 USD 推荐价/);
+    await assert.rejects(f.service.allocate({...cfg,orbitcard_plan_prices:{},orbitcard_price_plus:'1'},task.jobKey,'plus'),/支付金额|USD/);
     assert.equal(f.calls.some(call => ['createCard','rechargeCard'].includes(call.operation)),false);
 });
 
@@ -472,31 +507,43 @@ test('confirmed order success waits for another provider authorization before al
     assert.ok(await m.reserveCard(42,next.jobKey,'plus'));
 });
 
-test('available account balance is checked before cards; frozen, total and card balances cannot bypass the locked CDK',async () => {
-    const f=serviceFixture({getAccountBalance:async () => ({success:true,data:{available_balance:'19.99',total_balance:'9999',frozen_balance:'9000',estimated_card_balance:'5000'}})});
+test('a sufficiently funded card remains usable with zero available account balance',async () => {
+    const f=serviceFixture({getAccountBalance:async () => ({success:true,data:{available_balance:'0.00',total_balance:'9999',frozen_balance:'9000',estimated_card_balance:'5000'}})});
     const card=await f.addCard();f.setCards([{...card,status:'ACTIVE',balance:1000}]);const task=await f.claim();
+    assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),42);
+    assert.equal(f.db.issues.length,0);assert.equal(f.db.fundings.length,0);
+    assert.equal(f.calls.some(call=>['createCard','rechargeCard'].includes(call.operation)),false);
+    assert.notEqual(f.db.tasks[0].orbitcard_state,'balance_blocked');
+});
+
+test('only available account funds satisfy an actual topup deficit; total and frozen balances cannot bypass it',async () => {
+    const f=serviceFixture({getAccountBalance:async () => ({success:true,data:{available_balance:'15.99',total_balance:'9999',frozen_balance:'9000',estimated_card_balance:'5000'}})});
+    const card=await f.addCard();f.setCards([{...card,status:'ACTIVE',balance:5}]);const task=await f.claim();
     await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/联系管理员/);
-    assert.deepEqual(f.calls.map(c => c.operation),['getAccountBalance','getProductCode']);
-    assert.equal(f.db.tasks[0].orbitcard_state,'balance_blocked');assert.equal(f.db.tasks[0].status,'failed');assert.equal(f.db.tasks[0].orbitcard_required_balance,'20.00000000');
+    assert.equal(f.db.tasks[0].orbitcard_state,'balance_blocked');assert.equal(f.db.tasks[0].status,'failed');assert.equal(f.db.tasks[0].orbitcard_required_balance,'16.00000000');
     assert.ok(f.db.cdks[0].used_at);assert.equal(f.db.issues.length,0);assert.equal(f.db.fundings.length,0);
 });
 
 test('restoring account balance only releases the CDK for a fresh Session, never pays automatically',async () => {
     const f=serviceFixture(),task=await f.claim();f.setAccount(0);
     await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'));
+    assert.equal(f.db.tasks[0].orbitcard_state,'balance_blocked');
+    assert.equal(f.db.tasks[0].orbitcard_required_balance,'20.00000000');
+    const preparedCalls=f.calls.length;
     const recovery=require('../order-recovery')({store:f.store,activeJobs:new Set(),audit() {},checkBalance:task => f.service.canResumeBalance(cfg,task),
         query:{refresh:async () => {throw new Error('must not query a nonexistent subscription');}}});
     await recovery.refreshTask({...f.db.tasks[0]});assert.ok(f.db.cdks[0].used_at);
     f.setAccount(20);f.advance();await recovery.refreshTask({...f.db.tasks[0]});
     assert.equal(f.db.tasks[0].status,'retry');assert.equal(f.db.cdks[0].used_at,null);
-    assert.equal(f.calls.filter(c => c.operation==='getProductCode').length,1);
-    assert.equal(f.calls.some(c => ['getCardList','createCard','rechargeCard'].includes(c.operation)),false);
+    assert.ok(f.calls.slice(preparedCalls).every(c=>c.operation==='getAccountBalance'));
+    assert.equal(f.calls.some(c => ['createCard','rechargeCard'].includes(c.operation)),false);
 });
 
 test('a card with quota but insufficient balance receives only the exact deficit, without creating a new card',async () => {
     const f=serviceFixture();const card=await f.addCard();f.setCards([{...card,status:'ACTIVE',balance:5}]);const task=await f.claim();
     assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),42);
-    assert.equal(f.calls[0].operation,'getAccountBalance');assert.equal(f.calls.filter(c => c.operation==='createCard').length,0);
+    assert.equal(f.calls.filter(c => c.operation==='createCard').length,0);
+    assert.ok(f.calls.findIndex(c=>c.operation==='cardDetail')<f.calls.findIndex(c=>c.operation==='getAccountBalance'));
     const request=f.calls.find(c => c.operation==='rechargeCard');assert.deepEqual(request.body,{card_id:42,amount:'16.00'});assert.match(request.key,/^fund-/);
     assert.equal(f.db.fundings[0].state,'ready');assert.equal(f.db.cards[0].authorization_count,0);assert.equal(f.db.cards[0].active_job,task.jobKey);
 });
@@ -533,8 +580,7 @@ test('topup completion must be followed by confirmed sufficient card balance',as
 });
 
 test('fresh account shortage before topup locks both the selected card and CDK without sending money',async () => {
-    let calls=0;
-    const f=serviceFixture({getAccountBalance:async () => ({success:true,data:{available_balance:++calls===1?'100.00':'1.00'}})});
+    const f=serviceFixture({getAccountBalance:async () => ({success:true,data:{available_balance:'1.00'}})});
     const card=await f.addCard();f.setCards([{...card,status:'ACTIVE',balance:5}]);const task=await f.claim();
     await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/余额不足/);assert.equal(f.db.tasks[0].orbitcard_state,'balance_blocked');assert.equal(f.db.cards[0].active_job,task.jobKey);assert.equal(f.db.fundings.length,0);
 });
@@ -584,7 +630,10 @@ test('wrong amount on a matching funding flow keeps the card locked and does not
 
 test('missing account balance fails closed rather than treating totals as available money',async () => {
     const f=serviceFixture({getAccountBalance:async () => ({success:true,data:{total_balance:'999.00'}})}),task=await f.claim();
-    await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/金额缺失/);assert.deepEqual(f.calls.map(c => c.operation),['getAccountBalance']);assert.equal(f.db.fundings.length,0);assert.equal(f.db.issues.length,0);
+    await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/金额缺失/);
+    assert.equal(f.calls.filter(c=>c.operation==='getAccountBalance').length,1);
+    assert.equal(f.calls.some(c=>['createCard','rechargeCard'].includes(c.operation)),false);
+    assert.equal(f.db.fundings.length,0);assert.equal(f.db.issues.length,0);
 });
 
 test('money calculations are decimal-exact and deficits round upward only to cents',() => {
@@ -716,10 +765,10 @@ test('payment core rotates only confirmed failures and locks after three distinc
     assert.ok(f.db.cards.every(row => row.authorization_count === 0 && !row.active_job));
 });
 
-test('payment core rejects invalid session before funding and locks an insufficient account before payment', async () => {
+test('payment core rejects invalid session before funding and locks an account lacking the required topup', async () => {
     const invalid = await runPaymentCore({ invalidSession: true, empty: true });
     assert.equal(invalid.calls.length, 0); assert.equal(invalid.requests.length, 0); assert.equal(invalid.db.cdks[0].used_at, null);
-    const low = await runPaymentCore({ account: 1 });
+    const low = await runPaymentCore({ account: 1, balance: 5 });
     assert.equal(low.requests.length, 0); assert.equal(low.db.tasks[0].orbitcard_state, 'balance_blocked');
     assert.ok(low.db.cdks[0].used_at); assert.equal(low.db.fundings.length, 0); assert.equal(low.db.issues.length, 0);
 });
@@ -1024,6 +1073,47 @@ test('an original pending opening cannot be bypassed by another funded card',asy
     assert.equal(f.db.cards[0].active_job,null);assert.equal(f.db.issues.length,1);
     const requests=f.calls.filter(call=>call.operation==='createCard');
     assert.equal(requests.length,2);assert.equal(requests[0].key,requests[1].key);
+});
+
+test('an original pending opening with no card ID resumes its own new card despite unrelated transaction failure',async()=>{
+    let ready=false;
+    const f=serviceFixture({
+        createCard:async()=>({success:true,data:ready
+            ?{order_no:'OPEN-DIRECT',status:'success',completed:true,card_id:77}
+            :{order_no:'OPEN-DIRECT',status:'pending_confirm',completed:false}}),
+        cardTransaction:async body=>body.card_id===43?{success:false,status:404}:{success:true,data:{list:[],total:0}}
+    });
+    const direct={...cfg,enabled:false},task=await f.claim();
+    await assert.rejects(f.service.allocate(direct,task.jobKey,'plus'),/原开卡申请仍待确认/);
+    assert.equal(f.db.issues[0].card_id==null,true);assert.equal(f.db.issues[0].job_key,task.jobKey);
+    const original=f.calls.find(call=>call.operation==='createCard');
+    f.setCards([{card_id:43,status:'ACTIVE',product_code:'p1',balance:50,currency:'USD'},
+        {card_id:77,status:'ACTIVE',product_code:'p1',balance:21,currency:'USD'}]);
+    f.advance();ready=true;const before=f.calls.length;
+    assert.equal(await f.service.allocate(direct,task.jobKey,'plus'),77);
+    const retries=f.calls.filter(call=>call.operation==='createCard');
+    assert.equal(retries.length,2);assert.equal(retries[1].key,original.key);assert.deepEqual(retries[1].body,original.body);
+    assert.equal(f.db.issues.length,1);assert.equal(f.db.issues[0].state,'ready');
+    assert.equal(f.db.cards.find(card=>card.card_id===77).active_job,task.jobKey);
+    assert.ok(!f.calls.slice(before).some(call=>call.operation==='cardTransaction'&&call.body.card_id===43));
+});
+
+test('an original funding confirmation reads only its owned card authorization history',async()=>{
+    const f=serviceFixture({
+        rechargeCard:async body=>({success:true,data:{order_no:'FUND-OWNED',amount:body.amount,status:'pending_confirm'}}),
+        getCardFlow:async()=>({success:true,data:{card_id:42,type:'recharge',total:1,list:[{order_no:'FUND-OWNED',amount:'16.00',status:'success'}]}}),
+        cardTransaction:async body=>body.card_id===43?{success:false,status:404}:{success:true,data:{list:[],total:0}}
+    });
+    const card=await f.addCard(),task=await f.claim();f.setCards([{...card,status:'ACTIVE',balance:5}]);
+    await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/补款结果仍待确认/);
+    f.setCards([{...card,status:'ACTIVE',balance:21},{card_id:43,status:'ACTIVE',product_code:'p1',balance:50,currency:'USD'}]);
+    f.advance();const before=f.calls.length;
+    assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),42);
+    assert.equal(f.db.fundings[0].state,'ready');assert.equal(f.db.cards.find(row=>row.card_id===42).active_job,task.jobKey);
+    assert.equal(f.calls.filter(call=>call.operation==='rechargeCard').length,1);
+    assert.ok(f.calls.slice(before).some(call=>call.operation==='cardTransaction'&&call.body.card_id===42));
+    assert.ok(!f.calls.slice(before).some(call=>call.operation==='cardTransaction'&&call.body.card_id===43));
+    assert.equal(f.calls.filter(call=>call.operation==='createCard').length,0);
 });
 
 test('a ready original opening resumes its own card without applying account threshold twice',async()=>{

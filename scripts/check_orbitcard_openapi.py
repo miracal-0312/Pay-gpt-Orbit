@@ -234,14 +234,11 @@ def summarize(operation: str, data: Any) -> Any:
         products = []
         for item in items:
             product = {key: item.get(key) for key in (
-                "product_code", "remaining_open_card_num", "min_initial_amount", "min_retained_balance"
+                "product_code", "card_type", "remaining_open_card_num", "open_card_inventory_mode",
+                "min_initial_amount", "min_retained_balance"
             ) if key in item}
-            prices = item.get("gpt_plan_prices")
-            product["plan_ids_with_price"] = [price.get("id") for price in prices
-                                               if isinstance(price, dict) and price.get("price") is not None] if isinstance(prices, list) else []
             products.append(product)
-        return {"count": len(items), "products": products,
-                "price_field_present": any(isinstance(item.get("gpt_plan_prices"), list) for item in items)}
+        return {"count": len(items), "products": products}
     if operation in ("getSubscriptionPlans", "getSubscriptionCatalog"):
         if not isinstance(data, dict) or not isinstance(data.get("plans"), list):
             return None
@@ -390,7 +387,7 @@ def run_product_check(client: OrbitcardClient, config: dict[str, Any]) -> dict[s
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="只读检查 Orbitcard Open API，不执行资金或订阅写操作")
     parser.add_argument("--config", type=Path, required=True, help="JSON 配置文件路径；可放在项目外")
-    parser.add_argument("--products-only", action="store_true", help="只检查 getProductCode 及套餐价格字段")
+    parser.add_argument("--products-only", action="store_true", help="只检查 getProductCode 的储值卡产品、库存和最低金额")
     parser.add_argument("--timeout", type=float, default=30.0, help="单次请求超时秒数，默认 30")
     args = parser.parse_args(argv)
     if not 1 <= args.timeout <= 60:

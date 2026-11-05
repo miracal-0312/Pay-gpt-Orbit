@@ -97,6 +97,7 @@ async function loadApi() {
     $('maxInitialAmount').value = config.orbitcard_max_initial_amount || ''; $('maxFee').value = config.orbitcard_max_fee;
     paymentRegionLoadSequence++;
     for (const plan of Object.keys(cardPlans)) {
+        $(`planPrice_${plan}`).value = config.orbitcard_plan_prices?.[plan] || '';
         renderPaymentRegionOptions(plan, [], config.orbitcard_payment_regions?.[plan] || '');
         $(`regionHint_${plan}`).textContent = '等待从已保存的平台读取可选地区。';
     }
@@ -176,6 +177,7 @@ async function loadCardIdPreview() {
 function apiInput() { return { enabled: $('apiEnabled').checked, base_url: $('baseUrl').value.trim(),
     orbitcard_product_code: $('productCode').value.trim(), orbitcard_max_initial_amount: $('maxInitialAmount').value.trim(),
     orbitcard_payment_regions: Object.fromEntries(Object.keys(cardPlans).map(plan => [plan, $(`paymentRegion_${plan}`).value])),
+    orbitcard_plan_prices: Object.fromEntries(Object.keys(cardPlans).map(plan => [plan, $(`planPrice_${plan}`).value.trim()])),
     orbitcard_max_fee: $('maxFee').value.trim() }; }
 function renderCardRow(card, sync = null) {
     const id = escapeHtml(card.card_id);

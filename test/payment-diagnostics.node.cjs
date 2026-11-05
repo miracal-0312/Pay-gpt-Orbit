@@ -10,12 +10,12 @@ const cardApi = require('../orbitcard-cards-client');
 const session = { accessToken: 'never-log-access', sessionToken: 'never-log-session', account: {}, user: { email: 'preview@example.test' } };
 const authorization=(id,card_id=42)=>({transaction_id:id,card_id,transaction_type:'Authorization',status:'success',authorization_amount:'15.54',currency:'USD'});
 function fixture() {
-    const events = [], calls = [], writes = [], cfg = { base_url: 'https://orbitcard.test', orbitcard_payment_regions: { plus: 'PH' } };
-    const product = { product_code: 'p1', min_initial_amount: 10, min_retained_balance: 0, remaining: 10,
-        prices: Object.keys(PROVIDER_PLANS).map(plan_type => ({ plan_type, price: '16.00' })) };
+    const events = [], calls = [], writes = [], cfg = { base_url: 'https://orbitcard.test', orbitcard_payment_regions: { plus: 'PH' },
+        orbitcard_plan_prices:Object.fromEntries(Object.keys(PROVIDER_PLANS).map(plan=>[plan,'16.00'])) };
+    const product = { product_code: 'p1', min_initial_amount: '10.00', min_retained_balance: '0.00', remaining: 10 };
     const live = [{ card_id: 42, provider_status: 'ACTIVE', product_code: 'p1', currency: 'USD', balance_amount: '20.00' }];
     const rows = [{ card_id: 42, authorization_count: 0 }];
-    const state = { available: '100.00', live, rows, details: live, product, transactions:new Map(), savedIds:new Map() };
+    const state = { available: '100.00', live, rows, details: live, product, transactions:new Map(), savedIds:new Map(), singleDetails:new Map() };
     const persisted=id=>state.savedIds.get(id)||Array.from({length:Number(state.rows.find(row=>row.card_id===id)?.authorization_count)||0},(_,i)=>'saved-'+id+'-'+i);
     const provider = { fetchPlans: async config => { calls.push(['getSubscriptionPlans',config.auditJobKey]); return { success:true, plans:Object.values(PROVIDER_PLANS).map(type=>({type,name:type})) }; },
         request: async (config, operation, body) => {
@@ -32,6 +32,11 @@ function fixture() {
     const cards = { ...cardApi,
         products: async config => { calls.push(['getProductCode',config.auditJobKey]); return [product]; },
         listCards: async config => { calls.push(['getCardList',config.auditJobKey]); return state.live; },
+        cardDetail: async (config,id) => {
+            calls.push(['cardDetail',config.auditJobKey,{card_id:id}]);
+            if(state.singleDetailError)throw state.singleDetailError;
+            return state.singleDetails.get(id)||state.live.find(card=>card.card_id===id);
+        },
         cardDetailsInBatches: async (config, ids) => { calls.push(['cardDetail',config.auditJobKey]); if(state.detailError)throw state.detailError;return state.details.filter(card=>ids.includes(card.card_id)); } };
     const write = name => async () => { writes.push(name); throw Error('Diagnostics must not write'); };
     const store = { getGptApiConfig: async()=>cfg, withCardAllocationLock:write('allocation_lock'),
@@ -40,6 +45,14 @@ function fixture() {
             syncCards:write('sync_cards'), saveAuthorizations:write('save_authorizations'), reserveCard:write('reserve_card'), retireCard:write('retire_card') }) };
     const service = createDiagnostics({store,provider,cards,audit:entry=>events.push(entry)});
     return {service,events,calls,writes,state,cfg};
+}
+
+function managedPool(count=5,balance='20.00') {
+    const f=fixture();f.cfg.enabled=true;
+    f.state.live=Array.from({length:count},(_,i)=>({...f.state.live[0],card_id:42+i,balance_amount:balance}));
+    f.state.details=f.state.live;
+    f.state.rows=f.state.live.map(card=>({card_id:card.card_id,authorization_count:0}));
+    return f;
 }
 
 test('full preflight checks all four plans with readonly authorization queries', async()=>{
@@ -59,24 +72,122 @@ test('preflight models funding and exhausted-card replacement from authorization
     const fund=fixture();fund.state.details=[{...fund.state.live[0],balance_amount:'2.00'}];
     const funding=await fund.service.preflight({stage:'cards',plan_type:'plus'});
     assert.equal(funding.result.selection.action,'fund');assert.equal(funding.result.selection.funding_amount,'14.00');
-    const open=fixture();open.state.rows[0].authorization_count=6;
+    const open=fixture();open.state.rows[0].authorization_count=7;
     const opening=await open.service.preflight({stage:'cards',plan_type:'plus'});
     assert.equal(opening.result.selection.action,'open');assert.deepEqual(opening.result.selection.opening,{product_code:'p1',amount:'20.00',quantity:1});
-    assert.equal(opening.result.selection.skipped[0].reason,'limit_reached');assert.equal(open.state.rows[0].authorization_count,6);
+    assert.equal(opening.result.selection.skipped[0].reason,'limit_reached');assert.equal(open.state.rows[0].authorization_count,7);
     assert.deepEqual(open.writes,[]);
+});
+
+test('preflight checks the actual funding deficit and does not require account funds for a funded card',async()=>{
+    const funded=fixture();funded.state.available='0.00';
+    const pay=await funded.service.preflight({stage:'cards',plan_type:'plus'});
+    assert.equal(pay.passed,true);assert.equal(pay.result.selection.action,'pay');assert.deepEqual(funded.writes,[]);
+    const sufficient=fixture();sufficient.state.available='14.00';sufficient.state.details=[{...sufficient.state.live[0],balance_amount:'2.00'}];
+    const fund=await sufficient.service.preflight({stage:'cards',plan_type:'plus'});
+    assert.equal(fund.passed,true);assert.equal(fund.result.selection.action,'fund');assert.equal(fund.result.selection.funding_amount,'14.00');
+    sufficient.state.available='13.99';
+    const short=await sufficient.service.preflight({stage:'cards',plan_type:'plus'});
+    assert.equal(short.passed,false);assert.deepEqual(sufficient.writes,[]);
+});
+
+test('preflight rejects missing configured USD prices without financial writes',async()=>{
+    const f=fixture();f.cfg.orbitcard_plan_prices={};
+    const result=await f.service.preflight({stage:'cards',plan_type:'plus'});
+    assert.equal(result.passed,false);assert.deepEqual(f.writes,[]);
+});
+
+test('enabled preflight budgets each missing pool card together with the selected payment deficit',async()=>{
+    const full=managedPool(5);full.state.available='0.00';
+    const ready=await full.service.preflight({stage:'cards',plan_type:'plus'});
+    assert.equal(ready.passed,true);assert.equal(ready.result.selection.maintenance.open_count,0);
+    assert.equal(ready.result.selection.maintenance.required_balance,'0.00');
+    for(const [count,balance,required] of [[4,'20.00','20.00'],[4,'2.00','34.00'],[3,'2.00','54.00']]) {
+        const f=managedPool(count,balance);f.state.available=required;
+        const before=structuredClone(f.state.rows);
+        const enough=await f.service.preflight({stage:'cards',plan_type:'plus'});
+        assert.equal(enough.passed,true);
+        const maintenance=enough.result.selection.maintenance;
+        assert.equal(maintenance.target_size,5);assert.equal(maintenance.current_size,count);
+        assert.equal(maintenance.open_count,5-count);assert.equal(maintenance.opening_amount,((5-count)*20).toFixed(2));
+        assert.equal(maintenance.funding_amount,balance==='2.00'?'14.00':'0.00');
+        assert.equal(maintenance.required_balance,required);assert.equal(maintenance.fees_included,false);
+        assert.equal(maintenance.snapshot_only,true);assert.deepEqual(maintenance.retire_card_ids,[]);
+        f.state.available=(Number(required)-0.01).toFixed(2);
+        const short=await f.service.preflight({stage:'cards',plan_type:'plus'});
+        assert.equal(short.passed,false);assert.equal(short.result.selection.account_check,'failed');
+        assert.deepEqual(f.state.rows,before);assert.deepEqual(f.writes,[]);
+    }
+});
+
+test('enabled preflight includes a seventh-use card replacement even when another card can pay',async()=>{
+    const f=managedPool();f.state.rows[0].authorization_count=7;f.state.available='19.99';
+    const before=structuredClone(f.state.rows);
+    const short=await f.service.preflight({stage:'cards',plan_type:'plus'});
+    assert.equal(short.passed,false);assert.equal(short.result.selection.account_check,'failed');
+    assert.deepEqual(short.result.selection.maintenance.retire_card_ids,[42]);
+    assert.equal(short.result.selection.maintenance.open_count,1);
+    assert.equal(short.result.selection.maintenance.required_balance,'20.00');
+    f.state.available='20.00';
+    const ready=await f.service.preflight({stage:'cards',plan_type:'plus'});
+    assert.equal(ready.passed,true);assert.equal(ready.result.selection.action,'pay');
+    assert.equal(ready.result.selection.card_id,43);assert.deepEqual(f.state.rows,before);assert.deepEqual(f.writes,[]);
+});
+
+test('enabled empty-pool preflight budgets five openings plus the selected new card payment deficit',async()=>{
+    const f=managedPool(0);f.cfg.orbitcard_plan_prices.pro100='100.00';f.state.available='179.99';
+    const short=await f.service.preflight({stage:'cards',plan_type:'pro100'});
+    assert.equal(short.passed,false);assert.equal(short.result.selection.account_check,'failed');
+    assert.equal(short.result.selection.maintenance.open_count,5);
+    assert.equal(short.result.selection.maintenance.opening_amount,'100.00');
+    assert.equal(short.result.selection.maintenance.funding_amount,'80.00');
+    assert.equal(short.result.selection.maintenance.required_balance,'180.00');
+    f.state.available='180.00';
+    const ready=await f.service.preflight({stage:'cards',plan_type:'pro100'});
+    assert.equal(ready.passed,true);assert.equal(ready.result.selection.action,'open');
+    assert.deepEqual(f.state.rows,[]);assert.deepEqual(f.writes,[]);
+});
+
+test('preflight waits on an uncertain deletion before reading its consumption history',async()=>{
+    for(const state of ['ACTIVE','CANCELLED','error']) {
+        const f=managedPool();Object.assign(f.state.rows[0],{retirement_key:'private-retirement-key',retirement_state:'unknown'});
+        if(state==='error')f.state.singleDetailError=Error('private-provider-error');
+        else f.state.singleDetails.set(42,{...f.state.live[0],provider_status:state});
+        const before=structuredClone(f.state.rows);
+        const result=await f.service.preflight({stage:'cards',plan_type:'plus'});
+        assert.equal(result.passed,false);assert.deepEqual(result.result.selection.waiting,[{card_id:42,reason:'retirement_unconfirmed'}]);
+        assert.ok(!f.calls.some(([op,,body])=>op==='cardTransaction'&&body.card_id===42));
+        assert.ok(!JSON.stringify([result,f.events]).includes('private-'));
+        assert.deepEqual(f.state.rows,before);assert.deepEqual(f.writes,[]);
+    }
+});
+
+test('preflight confirms an unknown deletion readonly before skipping its unavailable transaction API',async()=>{
+    const f=managedPool();Object.assign(f.state.rows[0],{retirement_key:'private-retirement-key',retirement_state:'unknown'});
+    f.state.singleDetails.set(42,{...f.state.live[0],provider_status:'DELETED'});
+    f.state.transactionError=42;f.state.available='20.00';
+    const before=structuredClone(f.state.rows);
+    const result=await f.service.preflight({stage:'cards',plan_type:'plus'});
+    assert.equal(result.passed,true);assert.equal(result.result.selection.card_id,43);
+    assert.equal(result.result.selection.maintenance.current_size,4);
+    assert.equal(result.result.selection.maintenance.open_count,1);
+    assert.equal(result.result.selection.maintenance.required_balance,'20.00');
+    assert.ok(f.calls.some(([op,,body])=>op==='cardDetail'&&body?.card_id===42));
+    assert.ok(!f.calls.some(([op,,body])=>op==='cardTransaction'&&body.card_id===42));
+    assert.deepEqual(f.state.rows,before);assert.deepEqual(f.writes,[]);
 });
 test('preflight imports observable external card history in memory without exposing transactions',async()=>{
     const f=fixture();f.state.rows=[];f.state.transactions.set(42,[authorization('private-transaction-one'),authorization('private-transaction-two')]);
     Object.assign(f.state.live[0],{card_number:'5556597912341234',cvv:'private-cvv',merchant:'private-merchant'});
     const result=await f.service.preflight({stage:'cards',plan_type:'plus'});
     assert.equal(result.passed,true);assert.equal(result.result.selection.action,'pay');
-    const card=result.result.selection.cards[0];assert.equal(card.card_id,42);assert.equal(card.authorization_count,2);assert.equal(card.authorization_limit,6);
+    const card=result.result.selection.cards[0];assert.equal(card.card_id,42);assert.equal(card.authorization_count,2);assert.equal(card.authorization_limit,7);
     assert.ok(Date.parse(card.authorizations_checked_at));assert.deepEqual(f.state.rows,[]);assert.deepEqual(f.writes,[]);
     const output=JSON.stringify([result,f.events]);
     for(const secret of ['5556597912341234','private-cvv','private-merchant','private-transaction'])assert.ok(!output.includes(secret));
 });
-test('preflight follows the six-authorization boundary using all transaction pages',async()=>{
-    for(const [count,action] of [[0,'pay'],[5,'pay'],[6,'open'],[102,'open']]) {
+test('preflight follows the seven-authorization boundary using all transaction pages',async()=>{
+    for(const [count,action] of [[0,'pay'],[6,'pay'],[7,'open'],[102,'open']]) {
         const f=fixture();f.state.transactions.set(42,Array.from({length:count},(_,i)=>authorization('live-'+i)));
         const before=structuredClone(f.state.rows), result=await f.service.preflight({stage:'cards',plan_type:'plus'});
         assert.equal(result.passed,true);assert.equal(result.result.selection.action,action);assert.equal(result.result.selection.cards[0].authorization_count,count);
@@ -85,18 +196,18 @@ test('preflight follows the six-authorization boundary using all transaction pag
     }
 });
 test('persisted authorization IDs survive settlement conversion and merge new authorizations once',async()=>{
-    const f=fixture();f.state.rows[0].authorization_count=5;
+    const f=fixture();f.state.rows[0].authorization_count=6;
     f.state.transactions.set(42,[{...authorization('saved-42-0'),transaction_type:'Settlement'},authorization('saved-42-1'),authorization('new-authorization')]);
     const result=await f.service.preflight({stage:'cards',plan_type:'plus'});
-    assert.equal(result.result.selection.cards[0].authorization_count,6);assert.equal(result.result.selection.action,'open');
-    assert.equal(f.state.rows[0].authorization_count,5);assert.deepEqual(f.writes,[]);
+    assert.equal(result.result.selection.cards[0].authorization_count,7);assert.equal(result.result.selection.action,'open');
+    assert.equal(f.state.rows[0].authorization_count,6);assert.deepEqual(f.writes,[]);
 });
 test('preflight reads busy but not deleted cards without leaking active job identifiers',async()=>{
     const f=fixture();f.state.live.push({...f.state.live[0],card_id:43},{...f.state.live[0],card_id:44,provider_status:'DELETED'});
-    f.state.rows.push({card_id:43,authorization_count:3,active_job:'private-active-job'},{card_id:44,authorization_count:6});f.state.rows[0].authorization_count=6;
+    f.state.rows.push({card_id:43,authorization_count:3,active_job:'private-active-job'},{card_id:44,authorization_count:7});f.state.rows[0].authorization_count=7;
     const result=await f.service.preflight({stage:'cards',plan_type:'plus'});
     assert.equal(result.passed,false);assert.equal(result.result.selection.action,'wait');
-    assert.deepEqual(result.result.selection.cards.map(card=>[card.card_id,card.authorization_count,card.busy]),[[42,6,false],[43,3,true],[44,null,false]]);
+    assert.deepEqual(result.result.selection.cards.map(card=>[card.card_id,card.authorization_count,card.busy]),[[42,7,false],[43,3,true],[44,null,false]]);
     assert.deepEqual(f.calls.filter(([op])=>op==='cardTransaction').map(call=>call[2].card_id),[42,43]);
     assert.ok(!JSON.stringify([result,f.events]).includes('private-active-job'));assert.deepEqual(f.writes,[]);
 });
@@ -146,7 +257,7 @@ test('a full pool waits instead of predicting a sixth card unless an idle exhaus
     for(const replaceable of [false,true]) {
         const f=fixture();f.state.live=Array.from({length:5},(_,index)=>({...f.state.live[0],card_id:42+index,provider_status:'CANCELLED'}));
         f.state.details=f.state.live;f.state.rows=f.state.live.map(card=>({card_id:card.card_id,authorization_count:0}));
-        if(replaceable)f.state.rows[0].authorization_count=6;
+        if(replaceable)f.state.rows[0].authorization_count=7;
         const response=await f.service.preflight({stage:'cards',plan_type:'plus'});
         assert.equal(response.passed,replaceable);assert.equal(response.result.selection.action,replaceable?'open':'wait');
         if(!replaceable) {assert.equal(response.result.selection.opening,undefined);assert.deepEqual(response.result.selection.waiting,[{reason:'pool_full'}]);}
@@ -160,9 +271,8 @@ test('invalid Session, disabled region, insufficient balance and broken batch de
     const region=fixture();region.cfg.orbitcard_payment_regions.plus='JP';
     assert.equal((await region.service.preflight({stage:'full',plan_type:'plus',session})).ready,false);
     assert.ok(!region.calls.some(c=>c[0]==='getCardList'));
-    const funds=fixture();funds.state.available='0.01';
+    const funds=fixture();funds.state.available='0.01';funds.state.details=[{...funds.state.live[0],balance_amount:'2.00'}];
     assert.equal((await funds.service.preflight({stage:'cards',plan_type:'plus'})).passed,false);
-    assert.ok(!funds.calls.some(c=>c[0]==='getCardList'));
     const batch=fixture();batch.state.detailError=new CardDataError('批量响应异常');
     assert.equal((await batch.service.preflight({stage:'cards',plan_type:'plus'})).passed,false);
     const empty=fixture();empty.state.details=[];

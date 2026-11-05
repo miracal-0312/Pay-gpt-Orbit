@@ -65,8 +65,18 @@ module.exports = function fixture({ enqueueRedemption } = {}) {
         }
         if (q.startsWith('UPDATE orbitcard_managed_cards SET retirement_key=')) {
             const card = db.cards.find(c => c.scope === p[1] && c.card_id === p[2]);
-            if (!card || card.active_job) return {affectedRows:0};
-            card.retirement_key ||= p[0]; return {affectedRows:1};
+            if (!card || card.active_job || card.retirement_key) return {affectedRows:0};
+            Object.assign(card, {retirement_key:p[0],retirement_state:'prepared'}); return {affectedRows:1};
+        }
+        if (q.startsWith("UPDATE orbitcard_managed_cards SET retirement_state='unknown'")) {
+            const card = db.cards.find(c => c.scope === p[0] && c.card_id === p[1] && c.retirement_key === p[2]);
+            if (!card || card.retirement_state !== 'prepared' || card.active_job || card.provider_status === 'DELETED') return {affectedRows:0};
+            card.retirement_state = 'unknown'; return {affectedRows:1};
+        }
+        if (q.startsWith("UPDATE orbitcard_managed_cards SET retirement_state='confirmed'")) {
+            const card = db.cards.find(c => c.scope === p[0] && c.card_id === p[1] && c.retirement_key === p[2]);
+            if (!card) return {affectedRows:0};
+            card.retirement_state = 'confirmed'; return {affectedRows:1};
         }
         if(q.startsWith('INSERT INTO orbitcard_card_fundings')) {
             assert.ok(!db.fundings.some(f => f.job_key===p[2]));db.fundings.push({funding_key:p[0],scope:p[1],job_key:p[2],plan_type:p[3],card_id:p[4],credential_hash:p[5],request_body:p[6],amount:p[7],target_balance:p[8],state:'prepared',retry_at:0});
@@ -78,7 +88,7 @@ module.exports = function fixture({ enqueueRedemption } = {}) {
             Object.assign(task,{orbitcard_state:'balance_blocked',status:'failed',orbitcard_required_balance:p[0],message:p[1]});
         } else if (q.startsWith('INSERT INTO orbitcard_managed_cards')) {
             let card = db.cards.find(c => c.scope === p[0] && c.card_id === p[1]);
-            if (!card) { card = { scope:p[0],card_id:p[1],authorization_count:null,authorizations_checked_at:null,authorization_pending_count:null,active_job:null,source:'imported' }; db.cards.push(card); }
+            if (!card) { card = { scope:p[0],card_id:p[1],authorization_count:null,authorizations_checked_at:null,authorization_pending_count:null,retirement_key:null,retirement_state:null,active_job:null,source:'imported' }; db.cards.push(card); }
             Object.assign(card,{ provider_status:p[2],product_code:p[3] || card.product_code || '',card_bin:p[4] || card.card_bin || '',last4:p[5] || card.last4 || '',balance:p[6],currency:p[7] });
         } else if (q.startsWith('INSERT INTO orbitcard_card_uses')) {
             assert.ok(!db.uses.some(u => u.job_key === p[0])); db.uses.push({ job_key:p[0],scope:p[1],card_id:p[2],plan_type:p[3],state:'reserved',authorization_baseline:p[4] });

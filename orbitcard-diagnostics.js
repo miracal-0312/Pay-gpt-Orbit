@@ -5,7 +5,7 @@ const { readAuthorizations } = require('./orbitcard-authorizations');
 const crypto = require('node:crypto');
 const { parseSession } = require('./session-input');
 const { PLAN_TYPES, PROVIDER_PLANS, paymentPlan } = require('./plan-registry');
-const { paymentRegion } = require('./orbitcard-config');
+const { paymentRegion, planPrice } = require('./orbitcard-config');
 const { CardPreparationError } = require('./orbitcard-card-policy');
 const { decideCards } = require('./orbitcard-payment-decision');
 const money = require('./orbitcard-money');
@@ -65,11 +65,8 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
             return result.region;
         }
         async function selection() {
+            if (!planPrice(cfg, plan)) throw new CardPreparationError('请先在后台配置当前套餐的 USD 支付金额，已停止代充');
             const products = await cards.products(cfg);
-            const prices = products.map(product => cards.planPrice(product, plan)).filter(Boolean).map(money.units);
-            if (!prices.length) throw new CardPreparationError('缺少当前套餐的资金校验依据，停止支付准备');
-            const threshold = prices.reduce((a,b) => a < b ? a : b);
-            if (available < threshold) throw new CardPreparationError('账户可用余额不足，实际支付将停止，请联系管理员充值');
             const listed = await cards.listCards(cfg);
             const methods = store.cardMethods(cfg.base_url);
             const existing = await methods.listCards();
@@ -84,9 +81,27 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
                 balance: null, currency: card.currency || null }));
             result.selection = { action: 'wait', card_id: null, candidate_count: 0, skipped: [], waiting: [],
                 cards: summaries, reserved: false, account_check: 'passed', snapshot_only: true };
+            const retired = new Set();
+            // Mirror lifecycle recovery without changing the saved card or its
+            // intent. A missing list item alone never confirms a deletion.
+            for (const row of saved.filter(row => row.retirement_key)) {
+                const id = Number(row.card_id);
+                const present = listed.some(card => Number(card.card_id) === id);
+                if (!present && row.provider_status === 'DELETED') continue;
+                result.selection.waiting = [{card_id:id,reason:'retirement_unconfirmed'}];
+                if (row.active_job) throw new CardPreparationError('待删除卡片仍有订单占用，实际支付需先确认原订单');
+                const detail = await cards.cardDetail(cfg, id);
+                if (Number(detail?.card_id) !== id || detail?.provider_status !== 'DELETED') {
+                    throw new CardPreparationError('原删卡结果仍未确认，实际支付需要先只读查询确认删除');
+                }
+                retired.add(id);
+                const summary = summaries.find(card => card.card_id === id);
+                if (summary) summary.status = 'DELETED';
+            }
+            result.selection.waiting = [];
             // Merge observed authorization identities in temporary copies only.
             // A later settlement must neither double count nor erase an observed authorization.
-            const readable = listed.filter(card => card.provider_status !== 'DELETED');
+            const readable = listed.filter(card => card.provider_status !== 'DELETED' && !retired.has(Number(card.card_id)));
             for (const card of readable) {
                 const row = saved.find(row => Number(row.card_id) === card.card_id);
                 const summary = summaries.find(item => item.card_id === card.card_id);
@@ -115,7 +130,8 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
                 && poolPolicy.eligible(row) && !row.active_job);
             const detailed = await cards.cardDetailsInBatches(cfg, relevant.map(row => Number(row.card_id)), { allowPartial: true });
             if (relevant.length && !detailed.length) throw new CardPreparationError('批量卡片详情全部缺失，停止选卡，请联系售后');
-            const decision = decideCards({ saved, listed, detailed, products, jobKey: traceId, planType: plan, priceFor: cards.planPrice });
+            const decision = decideCards({ saved, listed:readable, detailed, products, jobKey: traceId, planType: plan,
+                priceFor: (_product, type) => planPrice(cfg, type) });
             const selected = decision.candidates[0];
             for (const card of detailed) {
                 const summary = summaries.find(item => item.card_id === card.card_id);
@@ -123,10 +139,9 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
             }
             Object.assign(result.selection, { action: decision.action, card_id: selected?.card.card_id || null,
                 candidate_count: decision.candidates.length, skipped: decision.skipped, waiting: decision.waiting });
+            let funding = selected ? money.units(money.cents(selected.deficit)) : 0n;
+            let opening;
             if (selected) {
-                if (available < selected.price || available < money.units(money.cents(selected.deficit))) {
-                    throw new CardPreparationError('账户可用余额不足以完成所选卡片的支付准备');
-                }
                 result.selection.funding_amount = money.cents(selected.deficit);
             } else if (decision.action === 'open') {
                 const canRetire = saved.some(row => !row.active_job
@@ -137,10 +152,34 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
                     result.selection.waiting.push({ reason: 'pool_full' });
                     throw new CardPreparationError('卡池已满且没有可淘汰的空闲卡，实际支付需要等待可用卡片');
                 }
-                const opening = cards.chooseProduct(products, plan, cfg);
+                opening = cards.chooseProduct(products, plan, cfg);
                 result.selection.opening = cards.createCardBody(opening);
-                if (available < money.units(opening.amount)) throw new CardPreparationError('账户可用余额不足以首充开卡');
+                const target = money.units(planPrice(cfg, plan)) + money.units(opening.min_retained_balance);
+                const deficit = target - money.units(opening.amount);
+                funding = deficit > 0n ? money.units(money.cents(deficit)) : 0n;
             } else throw new CardPreparationError('卡片被占用或消费授权仍待同步，实际支付需要等待处理');
+            let required = selected ? funding : money.units(opening.amount) + funding;
+            if (cfg.enabled) {
+                const retiring = saved.filter(row => !row.active_job && Number(row.authorization_count) >= poolPolicy.MAX_USES
+                    && readable.some(card => card.card_id === Number(row.card_id)));
+                const openCount = Math.max(0, poolPolicy.SIZE - (readable.length - retiring.length));
+                const openingAmount = money.units('20.00') * BigInt(openCount);
+                required = openingAmount + funding;
+                result.selection.maintenance = { target_size:poolPolicy.SIZE, current_size:readable.length,
+                    retire_card_ids:retiring.map(row => Number(row.card_id)), open_count:openCount,
+                    opening_amount:money.cents(openingAmount), funding_amount:money.cents(funding),
+                    required_balance:money.cents(required), fees_included:false, snapshot_only:true };
+                if (openCount) cards.chooseOpeningProduct(products, cfg);
+                if (readable.length > poolPolicy.SIZE) {
+                    result.selection.action = 'wait';
+                    result.selection.waiting.push({reason:'pool_maintenance_required'});
+                    throw new CardPreparationError('卡池超过五张，实际支付会先整理卡池，请同步后重新预检');
+                }
+            }
+            if (available < required) {
+                result.selection.account_check = 'failed';
+                throw new CardPreparationError('账户可用余额不足以完成卡池补位和支付补款；基础预算不含平台额外费用');
+            }
             return result.selection;
         }
         record('preflight_created', '已建立只读支付预检记录', { stage, read_only: true });

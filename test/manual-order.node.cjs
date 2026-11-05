@@ -8,7 +8,8 @@ const { cardScope } = require('../orbitcard-card-policy');
 
 function fixture({ unknown = false, pendingAllocation = false, now = Date.now } = {}) {
     const orders = new Map(), calls = [], created = [], allocations = [], auditEntries = [], auditContexts = [];
-    const cfg = { enabled: true, base_url: 'https://orbitcard.cc', api_key: 'key' };
+    const cfg = { enabled: true, base_url: 'https://orbitcard.cc', api_key: 'key',
+        orbitcard_plan_prices: { plus: '20.00', pro100: '100.00', pro200: '200.00', pro500: '500.00' } };
     const plans = [
         { type: 'gpt-go', name: 'Go' }, { type: 'gpt-plus', name: 'Plus' },
         { type: 'gpt-credits-250', name: '250 credits' }
@@ -438,9 +439,9 @@ test('manual CDK and card reservation settle atomically on verified success or f
     assert.equal(db.card.authorization_pending_count, 4);
 });
 
-test('administrator success waits for its authorization; six observed authorizations stop further allocations', async () => {
+test('administrator success waits for its authorization; seven observed authorizations stop further allocations', async () => {
     const { db, store } = storeFixture();
-    for (let count = 0; count < 6; count++) {
+    for (let count = 0; count < 7; count++) {
         const requestId = `00000000-0000-4000-8000-${String(count).padStart(12, '0')}`;
         const input = manualInput(requestId, { mode: 'test', cdkCode: null });
         await prepareOrder(store, input);
@@ -460,10 +461,10 @@ test('administrator success waits for its authorization; six observed authorizat
         // This fixture stands in for a successful transaction-ID synchronization.
         db.card.authorization_count = count + 1;
     }
-    const seventh = manualInput(id, { mode: 'test', cdkCode: null });
-    const order = await store.prepareManualOrder(seventh);
-    assert.equal(await store.reserveManualCard(id, 12, order.client_order_no, seventh.planType), null);
-    assert.equal(db.card.authorization_count, 6);
+    const eighth = manualInput(id, { mode: 'test', cdkCode: null });
+    const order = await store.prepareManualOrder(eighth);
+    assert.equal(await store.reserveManualCard(id, 12, order.client_order_no, eighth.planType), null);
+    assert.equal(db.card.authorization_count, 7);
     assert.equal(db.card.active_job, null);
 });
 

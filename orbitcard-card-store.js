@@ -50,8 +50,32 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
             });
         }
         async function retireCard(cardId, key) {
-            const result = await execute('UPDATE orbitcard_managed_cards SET retirement_key=COALESCE(retirement_key,?) WHERE scope=? AND card_id=? AND active_job IS NULL', [key,scope,cardId]);
-            if (!result.affectedRows) throw new CardPreparationError('卡片仍被任务占用，稍后再删卡');
+            return transaction(async tx => {
+                const opts = { connection: tx };
+                const [card] = await runQuery('SELECT * FROM orbitcard_managed_cards WHERE scope=? AND card_id=? FOR UPDATE', [scope,cardId], opts);
+                if (!card || card.active_job) throw new CardPreparationError('卡片不存在或仍被任务占用，稍后再删卡');
+                if (card.retirement_key) return card;
+                await runExecute("UPDATE orbitcard_managed_cards SET retirement_key=?,retirement_state='prepared' WHERE scope=? AND card_id=? AND retirement_key IS NULL AND active_job IS NULL", [key,scope,cardId], opts);
+                return { ...card, retirement_key: key, retirement_state: 'prepared' };
+            });
+        }
+        async function markRetirementSubmitted(cardId, key) {
+            // Save uncertainty before sending: a process crash must never cause a second delete POST.
+            const result = await execute("UPDATE orbitcard_managed_cards SET retirement_state='unknown' WHERE scope=? AND card_id=? AND retirement_key=? AND retirement_state='prepared' AND active_job IS NULL AND provider_status<>'DELETED'", [scope,cardId,key]);
+            return result.affectedRows === 1;
+        }
+        async function confirmRetirement(cardId, key, card) {
+            if (Number(card?.card_id) !== Number(cardId) || card?.provider_status !== 'DELETED') {
+                throw new CardPreparationError('删卡确认缺少相符的卡 ID 或 DELETED 状态');
+            }
+            return transaction(async tx => {
+                const opts = { connection: tx };
+                const [current] = await runQuery('SELECT * FROM orbitcard_managed_cards WHERE scope=? AND card_id=? FOR UPDATE', [scope,cardId], opts);
+                if (!current || current.active_job || current.retirement_key !== key) throw new CardPreparationError('删卡意图已变更，不能确认删除');
+                await methods(baseUrl, tx).syncCards([card]);
+                await runExecute("UPDATE orbitcard_managed_cards SET retirement_state='confirmed' WHERE scope=? AND card_id=? AND retirement_key=?", [scope,cardId,key], opts);
+                return card;
+            });
         }
         async function listCards() {
             return query('SELECT * FROM orbitcard_managed_cards WHERE scope = ? ORDER BY authorization_count DESC, card_id', [scope]);
@@ -161,7 +185,7 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
             return query(`SELECT * FROM orbitcard_card_fundings WHERE scope=?${pending ? " AND state IN ('prepared','submitting','pending','unknown')" : ''}
                 ORDER BY updated_at ${pending ? 'ASC' : 'DESC'} LIMIT 100`, [scope]);
         }
-        return { retireCard, syncCards, listCards, listAuthorizations, saveAuthorizations, reserveCard, pendingIssue, createIssue, updateIssue, completeIssue, listIssues, attachIssue, issueForJob,
+        return { retireCard, markRetirementSubmitted, confirmRetirement, syncCards, listCards, listAuthorizations, saveAuthorizations, reserveCard, pendingIssue, createIssue, updateIssue, completeIssue, listIssues, attachIssue, issueForJob,
             blockBalance, fundingForJob, createFunding, updateFunding, listFundings };
     }
 

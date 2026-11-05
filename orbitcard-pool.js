@@ -1,5 +1,5 @@
 'use strict';
-const SIZE = 5, MAX_USES = 6;
+const SIZE = 5, MAX_USES = 7;
 function awaitingAuthorization(card) {
     return card.authorization_pending_count != null
         && (card.authorization_count == null || Number(card.authorization_count) < Number(card.authorization_pending_count));

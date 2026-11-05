@@ -43,13 +43,30 @@ test('Orbitcard credentials come only from environment, never admin input or old
         assert.equal(Object.hasOwn(config, 'orbitcard_card_id'), false);
         await assert.rejects(core.saveGptApiConfig({ api_key: 'browser-key' }), /环境变量/);
         await assert.rejects(core.saveGptApiConfig({ api_secret: 'browser-secret' }), /环境变量/);
-        await assert.rejects(core.saveGptApiConfig({ orbitcard_price_plus: '1' }), /平台推荐价/);
+        await assert.rejects(core.saveGptApiConfig({ orbitcard_price_plus: '1' }), /orbitcard_plan_prices/);
         await assert.rejects(core.saveGptApiConfig({ orbitcard_region_plus: 'US' }), /地区/);
         await core.saveGptApiConfig({ enabled: true, base_url: 'https://orbitcard.test' });
         assert.equal(rows.get('gpt_api_base_url'), 'https://orbitcard.test');
         await core.ensureGptApiConfigDefaults();
         assert.equal(rows.has('gpt_api_key'), false);
         assert.equal(rows.has('orbitcard_api_secret_ciphertext'), false);
+
+        assert.deepEqual((await core.getGptApiConfig()).orbitcard_plan_prices, { plus: '', pro100: '', pro200: '', pro500: '' });
+        await core.saveGptApiConfig({ orbitcard_plan_prices: { plus: ' 15.54000001 ', pro100: '100', pro200: '', pro500: '500.25' } });
+        const savedPrices = { plus: '15.54000001', pro100: '100.00000000', pro200: '', pro500: '500.25000000' };
+        assert.deepEqual((await core.getGptApiConfig()).orbitcard_plan_prices, savedPrices);
+        assert.deepEqual(JSON.parse(rows.get('orbitcard_plan_prices')), savedPrices);
+        await core.saveGptApiConfig({ orbitcard_max_fee: '2' });
+        assert.deepEqual((await core.getGptApiConfig()).orbitcard_plan_prices, savedPrices);
+        await core.saveGptApiConfig({ orbitcard_plan_prices: { plus: '' } });
+        savedPrices.plus = '';
+        await core.ensureGptApiConfigDefaults();
+        assert.deepEqual((await core.getGptApiConfig()).orbitcard_plan_prices, savedPrices);
+        for (const bad of [null, [], '20', { go: '20' }, { plus: 20 }, { plus: null }, { plus: {} },
+            { plus: '0' }, { plus: '-1' }, { plus: '1e2' }, { plus: 'NaN' }, { plus: '1.000000001' }, { plus: '100000000000000' }]) {
+            await assert.rejects(core.saveGptApiConfig({ orbitcard_plan_prices: bad }), /USD/);
+            assert.deepEqual((await core.getGptApiConfig()).orbitcard_plan_prices, savedPrices);
+        }
 
         assert.deepEqual((await core.getGptApiConfig()).orbitcard_payment_regions, { plus: '', pro100: '', pro200: '', pro500: '' });
         await core.saveGptApiConfig({ orbitcard_payment_regions: { plus: ' ph ', pro100: 'US', pro200: 'JP', pro500: 'CL' } });
@@ -75,7 +92,12 @@ test('Orbitcard credentials come only from environment, never admin input or old
         assert.doesNotMatch(html, /id="price_plus"|id="region_plus"/);
         assert.match(html, /id="testResult"/);
         assert.match(html, /id="regionResult"/);
-        for (const plan of ['plus', 'pro100', 'pro200', 'pro500']) assert.match(html, new RegExp(`id="paymentRegion_${plan}"`));
+        for (const plan of ['plus', 'pro100', 'pro200', 'pro500']) {
+            assert.match(html, new RegExp(`id="paymentRegion_${plan}"`));
+            assert.match(html, new RegExp(`id="planPrice_${plan}"`));
+        }
+        assert.match(html, /USD 金额加产品最低留存余额/);
+        assert.match(html, /与平台收取的 USDT 服务费不同/);
         assert.doesNotMatch(script, /api_key:\s*\$|api_secret:\s*\$/);
     } finally {
         if (oldKey === undefined) delete process.env.ORBITCARD_API_KEY;
@@ -83,6 +105,56 @@ test('Orbitcard credentials come only from environment, never admin input or old
         if (oldSecret === undefined) delete process.env.ORBITCARD_API_SECRET;
         else process.env.ORBITCARD_API_SECRET = oldSecret;
     }
+});
+
+test('configured card prices preserve decimal precision and never fall back to platform fees or removed product prices', () => {
+    const { normalizePlanPrices, planPrice } = require('../orbitcard-config');
+    assert.equal(normalizePlanPrices({ plus: '00020.12345678' }).plus, '20.12345678');
+    assert.equal(normalizePlanPrices({ plus: '0.00000001' }).plus, '0.00000001');
+    assert.equal(normalizePlanPrices({ plus: '99999999999999.99999999' }).plus, '99999999999999.99999999');
+    assert.equal(planPrice({ orbitcard_plan_prices: { plus: '15.54' } }, 'gpt-plus'), '15.54000000');
+    assert.equal(planPrice({ orbitcard_plan_prices: { pro100: '100' } }, 'pro_5x'), '100.00000000');
+    for (const config of [{}, { orbitcard_plan_prices: {} }, { orbitcard_plan_prices: { plus: '' } },
+        { orbitcard_plan_prices: { plus: '0' } }, { orbitcard_plan_prices: { plus: 'garbage' } },
+        { prices: [{ plan_type: 'plus', price: '20' }], gpt_plan_prices: [{ id: 'plus', price: '20' }], service_fee: '0.15' }]) {
+        assert.equal(planPrice(config, 'plus'), null);
+    }
+});
+
+test('configuration form submits independent USD plan amounts and USDT service fee without Number conversion', () => {
+    const source = fs.readFileSync(path.resolve(__dirname, '../public/admin.js'), 'utf8');
+    const block = source.slice(source.indexOf('function apiInput()'), source.indexOf('function renderCardRow('));
+    const values = { apiEnabled: { checked: true }, baseUrl: { value: 'https://orbitcard.test' },
+        productCode: { value: '' }, maxInitialAmount: { value: '' }, maxFee: { value: ' 0.15 ' } };
+    const amounts = { plus: '15.54000001', pro100: '100', pro200: '', pro500: '500.25' };
+    for (const plan of Object.keys(amounts)) {
+        values[`planPrice_${plan}`] = { value: ` ${amounts[plan]} ` };
+        values[`paymentRegion_${plan}`] = { value: plan === 'plus' ? 'PH' : '' };
+    }
+    const input = new Function('$', 'cardPlans', block + '\nreturn apiInput();')(id => values[id], amounts);
+    assert.deepEqual(input.orbitcard_plan_prices, amounts);
+    assert.equal(input.orbitcard_max_fee, '0.15');
+    assert.equal(input.orbitcard_payment_regions.plus, 'PH');
+});
+
+test('configuration page reloads saved USD amounts and leaves unconfigured plans empty', async () => {
+    const source = fs.readFileSync(path.resolve(__dirname, '../public/admin.js'), 'utf8');
+    const block = source.slice(source.indexOf('async function loadApi()'), source.indexOf('function regionLabel('));
+    const nodes = new Map();
+    const node = id => {
+        if (!nodes.has(id)) nodes.set(id, { value: '', textContent: '', dataset: {} });
+        return nodes.get(id);
+    };
+    const config = { base_url: 'https://orbitcard.test', enabled: false, orbitcard_max_fee: '0.15',
+        orbitcard_plan_prices: { plus: '15.54000001', pro100: '100.00000000', pro500: '500.25000000' } };
+    const loadApi = new Function('$', 'request', 'cardPlans', 'renderPaymentRegionOptions',
+        'let savedBaseUrl; let paymentRegionLoadSequence=0;\n' + block + '\nreturn loadApi;')(
+        node, async () => ({ config }), { plus: 'Plus', pro100: 'Pro 100', pro200: 'Pro 200', pro500: 'Pro 500' }, () => {});
+    await loadApi();
+    assert.equal(node('planPrice_plus').value, '15.54000001');
+    assert.equal(node('planPrice_pro100').value, '100.00000000');
+    assert.equal(node('planPrice_pro200').value, '');
+    assert.equal(node('maxFee').value, '0.15');
 });
 
 test('client signs with environment Secret even if config contains an obsolete Secret', async () => {

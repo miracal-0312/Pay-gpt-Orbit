@@ -27,9 +27,9 @@ class FakeClient:
         payloads = {
             "getAccountBalance": {"available_balance": "50.00", "total_balance": "70.00"},
             "getProductCode": {"list": [{"product_code": "p1", "min_initial_amount": "20.00",
-                                         "gpt_plan_prices": [{"id": "plus", "price": "20.00", "currency": "USD",
-                                                              "source": "transaction",
-                                                              "internal_note": "do-not-print"}]}]},
+                                         "min_retained_balance": "1.00", "card_type": "save",
+                                         "open_card_inventory_mode": "provider_validated",
+                                         "internal_note": "do-not-print"}]},
             "getSubscriptionPlans": {"enabled": True, "plans": [{"type": "gpt-plus", "name": "Plus"}]},
             "getSubscriptionCatalog": {"enabled": True, "plans": [{"type": "gpt-plus", "name": "Plus"}]},
             "getSubscriptionPaymentRegions": {"plan_type": "gpt-plus", "payment_regions": [{"code": "US", "default": True}]},
@@ -92,7 +92,7 @@ class OpenApiProbeTests(unittest.TestCase):
         self.assertEqual(request.get_header("X-signature"), expected)
         self.assertEqual(request.get_header("X-api-key"), "example-key")
         self.assertNotIn("Idempotency-key", request.headers)
-        for write in ("createCard", "rechargeCard", "createSubscription", "refundCard"):
+        for write in ("createCard", "rechargeCard", "createSubscription", "refundCard", "deleteCard", "freezeCard"):
             with self.assertRaises(ValueError):
                 client.signed_request(write, {})
 
@@ -112,9 +112,9 @@ class OpenApiProbeTests(unittest.TestCase):
         self.assertEqual(next(item for item in report["checks"] if item["operation"] == "getSubscriptionList")["summary"]["statuses"],
                          ["succeeded"])
         products = next(item for item in report["checks"] if item["operation"] == "getProductCode")["summary"]
-        self.assertTrue(products["price_field_present"])
-        self.assertEqual(products["products"][0]["plan_ids_with_price"], ["plus"])
-        self.assertNotIn("gpt_plan_prices", products["products"][0])
+        self.assertEqual(products["products"][0]["card_type"], "save")
+        self.assertEqual(products["products"][0]["open_card_inventory_mode"], "provider_validated")
+        self.assertEqual(products["products"][0]["min_retained_balance"], "1.00")
         self.assertNotIn("do-not-print", json.dumps(products))
 
     def test_missing_balance_and_batch_card_are_reported_as_failures(self):
@@ -133,17 +133,18 @@ class OpenApiProbeTests(unittest.TestCase):
         self.assertEqual(report["checks"][0]["status"], "failed")
         self.assertTrue(any(item.get("error") == "卡片详情缺项或卡 ID 归属不一致" for item in report["checks"]))
 
-    def test_product_probe_marks_missing_price_field(self):
-        summary = probe.summarize("getProductCode", {"list": [{"product_code": "p1"}]})
-        self.assertFalse(summary["price_field_present"])
-        self.assertEqual(summary["products"][0]["plan_ids_with_price"], [])
+    def test_product_probe_uses_current_fields_without_inventing_plan_prices(self):
+        summary = probe.summarize("getProductCode", {"list": [{"product_code": "p1",
+            "remaining_open_card_num": 8, "min_initial_amount": "20.00", "min_retained_balance": "1.00"}]})
+        self.assertEqual(summary, {"count": 1, "products": [{"product_code": "p1",
+            "remaining_open_card_num": 8, "min_initial_amount": "20.00", "min_retained_balance": "1.00"}]})
 
     def test_products_only_probe_calls_no_other_api(self):
         client = FakeClient()
         result = probe.run_product_check(client, {"base_url": "https://orbitcard.cc"})
         self.assertEqual(client.calls, [("getProductCode", {})])
         self.assertEqual(result["status"], "ok")
-        self.assertEqual(result["summary"]["products"][0]["plan_ids_with_price"], ["plus"])
+        self.assertEqual(result["summary"]["products"][0]["product_code"], "p1")
 
 
 if __name__ == "__main__":

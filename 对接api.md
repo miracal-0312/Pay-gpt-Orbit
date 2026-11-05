@@ -4,11 +4,17 @@
 
 ## 服务端配置
 
-在服务器环境变量中填写平台签发且配对的 `ORBITCARD_API_KEY` 和 `ORBITCARD_API_SECRET`；后台填写 HTTPS 根域名、四档默认充值地区及开卡策略，不接收或保存 API 凭据。四档套餐金额只采用 `getProductCode` 返回的对应 USD 推荐价；接口未返回价格时停止自动充值。后台可为 Plus、Pro 100、Pro 200、Pro 500 分别指定默认充值地区，选项由 `getSubscriptionPaymentRegions` 返回。选择「平台默认」则不传 `payment_region`；指定地区在资金操作前校验可用性，再传入 `createSubscription`。该设置同时适用于用户兑换和管理员开通，已提交订单仍只查询原单。地区接口没有保证返回地区价格，不能将产品推荐价视为地区报价。新充值先查询 `available_balance`，不足套餐金额即失败并锁定 CDK；再查卡片实时 ACTIVE 状态与次数。旧卡余额不足自动补差额；卡 ID 从 `getCardList` 自动读取，不填写固定卡 ID。所有套餐统一采用每卡 6 次成功消费授权上限，次数来自 cardTransaction 的成功消费授权，按唯一交易 ID 持久去重；同笔清算不重复计数，本地开通结果不直接加次数。达到上限的空闲卡自动删除并补位，启用接单时维持 5 张卡，每张新卡首充 20 USD；完整读取接口可见的历史消费，包含其他项目记录；未识别状态或分页不完整时暂停选卡，详见 [ORBITCARD-CARDS.md](ORBITCARD-CARDS.md)。
+在服务器环境变量中填写平台签发且配对的 `ORBITCARD_API_KEY` 和 `ORBITCARD_API_SECRET`；后台填写 HTTPS 根域名、四档 USD 支付金额、默认充值地区及开卡策略，不接收或保存 API 凭据。`getProductCode` 只提供储值卡产品、库存和最低金额，不再提供套餐支付金额。后台为 Plus、Pro 100、Pro 200、Pro 500 分别配置实际所需 USD 支付金额；当前套餐未配置时停止新的代充，已提交订单仍可恢复查询。订阅目录中的 `service_fee` 是平台服务费，不能替代卡片支付金额。
+
+后台可为四档套餐分别指定默认充值地区，选项由 `getSubscriptionPaymentRegions` 返回。选择「平台默认」则不传 `payment_region`；指定地区在资金操作前校验可用性，再传入 `createSubscription`。该设置同时适用于用户兑换和管理员开通，已提交订单仍只查询原单。地区接口没有保证返回地区价格，后台金额需要与实际支付地区相符。
+
+选卡读取实时 ACTIVE 状态、成功消费授权次数和余额，目标余额为后台 USD 支付金额加产品最低留存余额。余额足够的卡直接使用；余额不足则按真实差额补款，并向上取整到美分，账户余额只按此次所需补款金额检查。新卡按 20.00 USD 首充检查账户资金，平台另行校验实际费用；不会因为账户余额低于整档套餐金额而拒绝一张余额已足够的卡。卡 ID 从 `getCardList` 自动读取，不填写固定卡 ID。
+
+所有套餐统一采用每卡 7 次成功消费授权上限，次数来自 `cardTransaction` 的成功消费授权，按唯一交易 ID 持久去重；同笔清算不重复计数，本地开通结果不直接加次数。达到上限的卡停止分配，空闲后删除并补位，启用接单时维持 5 张卡，每张新卡首充 20 USD。ACTIVE 和 CANCELLED 卡直接申请删除，无需预先解冻；删除结果未知时保留原幂等键，仅通过 `cardDetail` 查询恢复，确认 `DELETED` 后才补卡，不重复提交删卡或按余额估算退款。完整读取接口可见的历史消费，包含其他项目记录；未识别状态或分页不完整时暂停选卡，详见 [ORBITCARD-CARDS.md](ORBITCARD-CARDS.md)。
 
 订阅调用需要 `subscriptions:read`、`subscriptions:create` 权限，余额查询另需 `account:read`。卡池还需 `cards:create`、`cards:read`、`cards:manage`、`products:read`、`cards:fund`；交易对账另需 `transactions:read`，不需要敏感卡资料。连接测试只查询套餐和余额，不创建订阅或开卡。卡片协议见 [Open API](Orbitcard-Open-API-V1.md)。
 
-开卡仅自动提交 `{product_code,amount:"20.00",quantity:1}`；产品码来自开卡前最新 `getProductCode`，不额外提交身份资料或卡号。后台产品查询返回只读 `automatic_application` 预览；单独申请卡不要求会员价格，CDK 兑换需产品目录返回对应套餐金额。详见 [开卡参数](ORBITCARD-CARDS.md#次数与卡池规则)。
+开卡仅自动提交 `{product_code,amount:"20.00",quantity:1}`；产品码来自开卡前最新 `getProductCode`，不额外提交身份资料或卡号。后台产品查询返回只读 `automatic_application` 预览；卡池补位与单独申请卡不要求会员价格，新的 CDK 代充需后台已配置对应套餐 USD 支付金额。详见 [开卡参数](ORBITCARD-CARDS.md#次数与卡池规则)。
 
 项目向平台发送 `POST /api/open/v1/<operation>`，使用 HMAC-SHA256-V1 对精确请求字节、主机、路径、时间戳、随机数及幂等键签名，不使用旧充值 Bearer 协议。
 
@@ -48,4 +54,4 @@
 
 `GET /api/admin/orbitcard/cards` 同时返回脱敏的 `cards`、`issues`、`fundings`；`POST /api/admin/orbitcard/issues/refresh` 确认原开卡及补款，不创建新身份。提供平台卡片同步、申请卡与原申请确认接口；历史次数绑定和手动修改接口已删除，见 [卡片管理 API](ORBITCARD-CARDS.md#本项目管理-api)。旧本地 Stripe 卡池、代理、账单地址、验证码求解、浏览器池、Session 导出、支付链接生成、本地账单及开卡 Webhook 接口均已移除，不提供充值回退路径。
 
-选卡和同步使用 `cardDetail({card_ids:[...],reveal_sensitive:false})`，每批最多 20 张；缺项跳过对应卡，不在选中后逐张复核。成功消费授权按交易 ID 去重累计，达到 6 次后停止分配并在空闲时删卡；确认删除后补足 5 张卡池。本地开通成功不直接加次数，新授权尚未同步时暂不复用该卡。满池但无可用卡时停止，不额外开卡。补款提交前及确认后仍核对卡片资金。`getSubscriptionPlans` 只确认套餐开放，目录服务费不参与本地支付预检或后台展示。后台若设置最高服务费，下单时仍传 `max_service_fee` 交由平台校验；订单结果中的实际服务费保留用于对账。同一 API Key 收到 HTTP 429 后所有 Open API 操作共同遵守 `Retry-After`。管理员可用 `GET /api/admin/orbitcard/cards/:cardId/transactions?page=1` 读取完整授权记录更新次数，并查看指定页脱敏交易，不据此自动核销或退款。计次、选卡和交易对账均需要 transactions:read。
+选卡和同步使用 `cardDetail({card_ids:[...],reveal_sensitive:false})`，每批最多 20 张；缺项跳过对应卡，不在选中后逐张复核。成功消费授权按交易 ID 去重累计，达到 7 次后停止分配并在空闲时删卡；确认删除后补足 5 张卡池。本地开通成功不直接加次数，新授权尚未同步时暂不复用该卡。满池但无可用卡时停止，不额外开卡。已存在的删卡意图先恢复，已确认删除的卡不再读取交易；原开卡、补款和订阅订单均沿用原身份与请求参数，未确认前不更换身份。补款提交前及确认后仍核对卡片资金。`getSubscriptionPlans` 只确认套餐开放，目录服务费不参与本地支付预检或后台展示。后台若设置最高服务费，下单时仍传 `max_service_fee` 交由平台校验；订单结果中的实际服务费保留用于对账。同一 API Key 收到 HTTP 429 后所有 Open API 操作共同遵守 `Retry-After`。管理员可用 `GET /api/admin/orbitcard/cards/:cardId/transactions?page=1` 读取完整授权记录更新次数，并查看指定页脱敏交易，不据此自动核销或退款。计次、选卡和交易对账均需要 `transactions:read`。

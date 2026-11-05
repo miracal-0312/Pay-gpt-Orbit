@@ -38,8 +38,7 @@ function decideCards({ saved, listed, detailed, products, jobKey, planType, excl
         }
         const product = products.find(item => item.product_code === card.product_code), price = priceFor(product, plan);
         try {
-            if (!price || card.currency !== 'USD' || !Number.isFinite(product?.min_retained_balance)
-                || product.min_retained_balance < 0 || card.balance_amount == null) throw new CardPreparationError('支付资料不完整');
+            if (!price || !product || card.currency !== 'USD' || card.balance_amount == null) throw new CardPreparationError('支付资料不完整');
             const target = money.units(price) + money.units(product.min_retained_balance);
             const difference = target - money.units(card.balance_amount), deficit = difference > 0n ? difference : 0n;
             candidates.push({ card, row, price: money.units(price), target, deficit, action: deficit ? 'fund' : 'pay' });

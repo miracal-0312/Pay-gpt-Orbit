@@ -1,5 +1,6 @@
 'use strict';
 const { PLAN_TYPES, paymentPlan } = require('./plan-registry');
+const money = require('./orbitcard-money');
 
 const DEFAULT_BASE_URL = 'https://orbitcard.cc';
 const PROTOCOL_VERSION = 'orbitcard-hmac-v1';
@@ -19,6 +20,26 @@ function normalizePaymentRegions(input = {}, existing = {}) {
 
 function paymentRegion(cfg, planType) {
     return normalizePaymentRegions(cfg.orbitcard_payment_regions)[paymentPlan(planType)];
+}
+
+function normalizePlanPrices(input = {}, existing = {}) {
+    if (!input || typeof input !== 'object' || Array.isArray(input)
+        || Object.keys(input).some(key => !PLAN_TYPES.includes(key))) throw new Error('请配置四档套餐各自的 USD 卡支付金额');
+    return Object.fromEntries(PLAN_TYPES.map(plan => {
+        const raw = Object.hasOwn(input, plan) ? input[plan] : existing[plan] ?? '';
+        if (typeof raw !== 'string') throw new Error('套餐 USD 卡支付金额必须为正数金额字符串，或留空暂停该套餐');
+        const value = raw.trim();
+        if (!value) return [plan, ''];
+        let amount;
+        try { amount = money.units(value); } catch (_) { throw new Error('套餐 USD 卡支付金额格式无效，最多 14 位整数和 8 位小数'); }
+        if (amount <= 0n) throw new Error('套餐 USD 卡支付金额必须大于零，或留空暂停该套餐');
+        return [plan, money.decimal(amount)];
+    }));
+}
+
+function planPrice(cfg, planType) {
+    try { return normalizePlanPrices(cfg?.orbitcard_plan_prices)[paymentPlan(planType)] || null; }
+    catch (_) { return null; }
 }
 
 function normalizeBaseUrl(raw) {
@@ -49,7 +70,8 @@ function prepareConfig(input, existing = {}, secretAvailable = false) {
         orbitcard_max_fee: String(input.orbitcard_max_fee ?? existing.orbitcard_max_fee ?? '').trim(),
         orbitcard_product_code: String(input.orbitcard_product_code ?? existing.orbitcard_product_code ?? '').trim(),
         orbitcard_max_initial_amount: String(input.orbitcard_max_initial_amount ?? existing.orbitcard_max_initial_amount ?? '').trim(),
-        orbitcard_payment_regions: normalizePaymentRegions(input.orbitcard_payment_regions, existing.orbitcard_payment_regions)
+        orbitcard_payment_regions: normalizePaymentRegions(input.orbitcard_payment_regions, existing.orbitcard_payment_regions),
+        orbitcard_plan_prices: normalizePlanPrices(input.orbitcard_plan_prices, existing.orbitcard_plan_prices)
     };
     if (cfg.orbitcard_max_fee && !/^\d+(?:\.\d+)?$/.test(cfg.orbitcard_max_fee)) throw new Error('最高服务费必须为非负十进制金额');
     if (cfg.orbitcard_product_code.length > 128 || /[\x00-\x1f]/.test(cfg.orbitcard_product_code)) throw new Error('开卡产品代码无效');
@@ -61,4 +83,4 @@ function prepareConfig(input, existing = {}, secretAvailable = false) {
 }
 
 module.exports = { DEFAULT_BASE_URL, PROTOCOL_VERSION, RETIRED_CONFIG_KEYS, normalizeBaseUrl, migrationValues, prepareConfig,
-    normalizePaymentRegions, paymentRegion };
+    normalizePaymentRegions, paymentRegion, normalizePlanPrices, planPrice };
