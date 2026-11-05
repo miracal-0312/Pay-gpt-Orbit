@@ -17,9 +17,9 @@ function decideCards({ saved, listed, detailed, products, jobKey, planType, excl
             if (owned) throw new CardPreparationError('已预占卡片已注销，请核对原订单');
             skipped.push({ card_id: id, reason: 'inactive', status: 'DELETED' }); continue;
         }
-        if (row.transaction_count == null) { waiting.push({ card_id: id, reason: 'transactions_unconfirmed' }); continue; }
-        const used = Number(row.transaction_count);
-        if (!Number.isInteger(used) || used < 0) throw new CardPreparationError('平台清算次数无效，请重新同步后继续');
+        if (row.activation_count == null) { waiting.push({ card_id: id, reason: 'activations_unconfirmed' }); continue; }
+        const used = Number(row.activation_count);
+        if (!Number.isSafeInteger(used) || used < 0) throw new CardPreparationError('成功开通次数无效，请检查数据库记录后继续');
         if (!poolPolicy.eligible(row)) { skipped.push({ card_id: id, reason: 'limit_reached', successful_uses: used, limit: poolPolicy.MAX_USES }); continue; }
         if (row.active_job && !owned) { waiting.push({ card_id: id, reason: 'busy' }); continue; }
         const detail = details.get(id);

@@ -13,24 +13,20 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
         async function syncCards(cards) {
             for (const card of cards) {
                 await execute(`INSERT INTO orbitcard_managed_cards
-                    (scope,card_id,provider_status,product_code,card_bin,last4,balance,currency)
-                    VALUES (?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE provider_status=VALUES(provider_status),
+                    (scope,card_id,provider_status,product_code,card_bin,last4,balance,currency,activation_count)
+                    VALUES (?,?,?,?,?,?,?,?,0) ON DUPLICATE KEY UPDATE provider_status=VALUES(provider_status),
                     product_code=IF(VALUES(product_code)='',product_code,VALUES(product_code)),
                     card_bin=IF(VALUES(card_bin)='',card_bin,VALUES(card_bin)),last4=IF(VALUES(last4)='',last4,VALUES(last4)),
                     balance=VALUES(balance),currency=VALUES(currency)`,
                 [scope,card.card_id,card.provider_status,card.product_code,card.bin || '',card.last4,card.balance,card.currency]);
             }
         }
-        async function saveTransactionCount(cardId, count) {
-            if (!Number.isSafeInteger(count) || count < 0) throw new CardPreparationError('平台成交次数无效');
-            await execute('UPDATE orbitcard_managed_cards SET transaction_count=?,transactions_checked_at=UTC_TIMESTAMP() WHERE scope=? AND card_id=?', [count,scope,cardId]);
-        }
         async function retireCard(cardId, key) {
             const result = await execute('UPDATE orbitcard_managed_cards SET retirement_key=COALESCE(retirement_key,?) WHERE scope=? AND card_id=? AND active_job IS NULL', [key,scope,cardId]);
             if (!result.affectedRows) throw new CardPreparationError('卡片仍被任务占用，稍后再删卡');
         }
         async function listCards() {
-            return query('SELECT * FROM orbitcard_managed_cards WHERE scope = ? ORDER BY transaction_count DESC, card_id', [scope]);
+            return query('SELECT * FROM orbitcard_managed_cards WHERE scope = ? ORDER BY activation_count DESC, card_id', [scope]);
         }
         async function issueForJob(jobKey) {
             const rows = await query('SELECT * FROM orbitcard_card_issues WHERE scope=? AND job_key=? ORDER BY created_at DESC LIMIT 1', [scope, jobKey]);
@@ -137,7 +133,7 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
             return query(`SELECT * FROM orbitcard_card_fundings WHERE scope=?${pending ? " AND state IN ('prepared','submitting','pending','unknown')" : ''}
                 ORDER BY updated_at ${pending ? 'ASC' : 'DESC'} LIMIT 100`, [scope]);
         }
-        return { saveTransactionCount, retireCard, syncCards, listCards, reserveCard, pendingIssue, createIssue, updateIssue, completeIssue, listIssues, attachIssue, issueForJob,
+        return { retireCard, syncCards, listCards, reserveCard, pendingIssue, createIssue, updateIssue, completeIssue, listIssues, attachIssue, issueForJob,
             blockBalance, fundingForJob, createFunding, updateFunding, listFundings };
     }
 
@@ -164,6 +160,11 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
         const uses = await runQuery('SELECT * FROM orbitcard_card_uses WHERE job_key=? FOR UPDATE', [jobKey], options);
         const current = uses[0], next = settlementState(current.state, orbitcardState);
         if (next === current.state) return;
+        if (next === 'consumed') {
+            const counted = await runExecute(`UPDATE orbitcard_managed_cards SET activation_count=activation_count+1
+                WHERE scope=? AND card_id=? AND activation_count IS NOT NULL`, [current.scope,current.card_id], options);
+            if (counted.affectedRows !== 1) throw new CardPreparationError('卡片成功开通次数未初始化，不能确认本次开通');
+        }
         await runExecute('UPDATE orbitcard_card_uses SET state=? WHERE job_key=?', [next,jobKey], options);
         await runExecute('UPDATE orbitcard_managed_cards SET active_job=NULL WHERE scope=? AND card_id=? AND active_job=?',
             [current.scope,current.card_id,jobKey], options);

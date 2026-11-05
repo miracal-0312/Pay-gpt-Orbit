@@ -105,8 +105,7 @@ CREATE TABLE IF NOT EXISTS admin_login_logs (
 CREATE TABLE IF NOT EXISTS orbitcard_managed_cards (
     scope CHAR(64) NOT NULL,
     card_id BIGINT UNSIGNED NOT NULL,
-    transaction_count INT UNSIGNED NULL,
-    transactions_checked_at DATETIME NULL,
+    activation_count INT UNSIGNED NOT NULL DEFAULT 0,
     retirement_key VARCHAR(80) NULL,
     active_job VARCHAR(64) NULL,
     provider_status VARCHAR(32) NOT NULL DEFAULT '',

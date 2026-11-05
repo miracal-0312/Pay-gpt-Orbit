@@ -40,7 +40,7 @@ async function initializeBaseData() {
 async function ensureLegacyColumns() {
     // Add only fields needed by this service. Existing historical tables are never dropped.
     const columns = {
-        orbitcard_managed_cards: { transaction_count: 'INT UNSIGNED NULL', transactions_checked_at: 'DATETIME NULL', retirement_key: 'VARCHAR(80) NULL' },
+        orbitcard_managed_cards: { activation_count: 'INT UNSIGNED NULL', retirement_key: 'VARCHAR(80) NULL' },
         app_config: { created_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP', updated_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP' },
         cdk_codes: { is_active: 'TINYINT(1) NOT NULL DEFAULT 1', shipped_at: 'TIMESTAMP NULL', used_at: 'TIMESTAMP NULL',
             manual_redeemed_at: 'TIMESTAMP NULL', manual_redeemed_by: 'VARCHAR(255) NULL', manual_redemption_reason: 'VARCHAR(255) NULL',
@@ -59,6 +59,18 @@ async function ensureLegacyColumns() {
             created_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP', updated_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP' }
     };
     for (const [table, fields] of Object.entries(columns)) for (const [name, definition] of Object.entries(fields)) await ensureColumn(table, name, definition);
+    // NULL marks an upgrade that has not yet imported confirmed subscription successes.
+    // Replays after an interrupted migration leave live counters intact; platform transactions are not activations.
+    await runExecute(`UPDATE orbitcard_managed_cards AS card
+        LEFT JOIN (
+            SELECT scope, card_id, COUNT(*) AS total FROM (
+                SELECT scope, card_id, job_key FROM orbitcard_card_uses WHERE state = 'consumed'
+                UNION
+                SELECT scope, card_id, client_order_no AS job_key FROM orbitcard_admin_orders WHERE state = 'success'
+            ) AS confirmed_orders GROUP BY scope, card_id
+        ) AS activations ON activations.scope = card.scope AND activations.card_id = card.card_id
+        SET card.activation_count = COALESCE(activations.total, 0)
+        WHERE card.activation_count IS NULL`);
     const [cdkPlan] = await runQuery(`SELECT CHARACTER_MAXIMUM_LENGTH AS length FROM information_schema.columns
         WHERE table_schema = DATABASE() AND table_name = 'cdk_codes' AND column_name = 'plan_type'`);
     if (cdkPlan && Number(cdkPlan.length) < 64) {

@@ -188,6 +188,11 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
                 const [card] = await runQuery('SELECT * FROM orbitcard_managed_cards WHERE scope = ? AND card_id = ? FOR UPDATE',
                     [order.scope, order.card_id], options);
                 if (!card || card.active_job !== order.client_order_no) throw new Error('管理员订单的支付卡占用记录不一致');
+                if (state === 'success') {
+                    const counted = await runExecute(`UPDATE orbitcard_managed_cards SET activation_count=activation_count+1
+                        WHERE scope=? AND card_id=? AND activation_count IS NOT NULL`, [order.scope,order.card_id], options);
+                    if (counted.affectedRows !== 1) throw new Error('卡片成功开通次数未初始化，不能确认本次开通');
+                }
                 await runExecute(`UPDATE orbitcard_managed_cards SET active_job = NULL
                     WHERE scope = ? AND card_id = ? AND active_job = ?`,
                 [order.scope, order.card_id, order.client_order_no], options);

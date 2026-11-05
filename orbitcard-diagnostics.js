@@ -73,38 +73,25 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
             const existing = await store.cardMethods(cfg.base_url).listCards();
             const saved = existing.map(row => ({ ...row }));
             for (const card of listed) if (!saved.some(row => Number(row.card_id) === card.card_id)) {
-                saved.push({ card_id: card.card_id, transaction_count: null });
+                saved.push({ card_id: card.card_id, activation_count: 0 });
             }
             const summaries = listed.map(card => ({ card_id: card.card_id, status: card.provider_status,
-                transaction_count: null, transaction_limit: poolPolicy.MAX_USES, transactions_checked_at: null,
+                activation_count: saved.find(row => Number(row.card_id) === card.card_id)?.activation_count ?? null,
+                activation_limit: poolPolicy.MAX_USES,
                 busy: Boolean(saved.find(row => Number(row.card_id) === card.card_id)?.active_job),
                 balance: null, currency: card.currency || null }));
             result.selection = { action: 'wait', card_id: null, candidate_count: 0, skipped: [], waiting: [],
-                cards: summaries, reserved: false, account_check: 'passed', snapshot_only: true,
-                transactions_complete: false };
-            // Refresh only temporary copies. A failed read must never revive a stale
-            // local count or prevent already-confirmed observations from being shown.
+                cards: summaries, reserved: false, account_check: 'passed', snapshot_only: true };
+            // Successful project orders are authoritative. Platform transaction
+            // records are for reconciliation and cannot confirm subscription activation.
             const readable = listed.filter(card => card.provider_status !== 'DELETED');
-            for (const card of readable) {
-                const row = saved.find(row => Number(row.card_id) === card.card_id);
-                row.transaction_count = null;
-                row.transactions_checked_at = null;
+            result.selection.waiting = readable.filter(card => {
+                const count = saved.find(row => Number(row.card_id) === card.card_id)?.activation_count;
+                return count == null || !Number.isSafeInteger(Number(count)) || Number(count) < 0;
+            }).map(card => ({ card_id: card.card_id, reason: 'activations_unconfirmed' }));
+            if (result.selection.waiting.length) {
+                throw new CardPreparationError('成功开通次数尚未确认，实际支付需要等待数据库升级完成');
             }
-            for (const card of readable) {
-                const row = saved.find(row => Number(row.card_id) === card.card_id);
-                const summary = summaries.find(item => item.card_id === card.card_id);
-                try {
-                    const count = await poolPolicy.countTransactions(provider, cfg, card.card_id);
-                    const checkedAt = new Date().toISOString();
-                    Object.assign(row, { transaction_count: count, transactions_checked_at: checkedAt });
-                    Object.assign(summary, { transaction_count: count, transactions_checked_at: checkedAt });
-                } catch (error) {
-                    result.selection.waiting = readable.filter(item => saved.find(row => Number(row.card_id) === item.card_id).transaction_count == null)
-                        .map(item => ({ card_id: item.card_id, reason: 'transactions_unconfirmed' }));
-                    throw error;
-                }
-            }
-            result.selection.transactions_complete = true;
             const relevant = saved.filter(row => readable.some(card => card.card_id === Number(row.card_id))
                 && poolPolicy.eligible(row) && !row.active_job);
             const detailed = await cards.cardDetailsInBatches(cfg, relevant.map(row => Number(row.card_id)), { allowPartial: true });
@@ -123,10 +110,18 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
                 }
                 result.selection.funding_amount = money.cents(selected.deficit);
             } else if (decision.action === 'open') {
+                const canRetire = saved.some(row => !row.active_job
+                    && (row.retirement_key || Number(row.activation_count) >= poolPolicy.MAX_USES)
+                    && readable.some(card => card.card_id === Number(row.card_id)));
+                if (readable.length >= poolPolicy.SIZE && !canRetire) {
+                    result.selection.action = 'wait';
+                    result.selection.waiting.push({ reason: 'pool_full' });
+                    throw new CardPreparationError('卡池已满且没有可淘汰的空闲卡，实际支付需要等待可用卡片');
+                }
                 const opening = cards.chooseProduct(products, plan, cfg);
                 result.selection.opening = cards.createCardBody(opening);
                 if (available < money.units(opening.amount)) throw new CardPreparationError('账户可用余额不足以首充开卡');
-            } else throw new CardPreparationError('卡片被占用或成功清算次数尚未确认，实际支付需要等待处理');
+            } else throw new CardPreparationError('卡片被占用或成功开通次数尚未确认，实际支付需要等待处理');
             return result.selection;
         }
         record('preflight_created', '已建立只读支付预检记录', { stage, read_only: true });
@@ -145,7 +140,7 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
         const actions = stage === 'full' ? ['plans','balance','regions','cards']
             : stage === 'cards' ? ['plans','balance','cards'] : [stage];
         const handlers = { plans, balance, regions, cards: selection };
-        const titles = { plans: '核对卡台已开放套餐', balance: '读取账户可用余额', regions: '核对本套餐默认支付地区', cards: '实时读取卡片和成功清算次数，模拟选卡、补款或开卡决策' };
+        const titles = { plans: '核对卡台已开放套餐', balance: '读取账户可用余额', regions: '核对本套餐默认支付地区', cards: '读取实时卡片和本项目成功开通次数，模拟选卡、补款或开卡决策' };
         for (const name of actions) if (!await step(name, titles[name], handlers[name])) break;
         return finish();
         function finish() {

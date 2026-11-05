@@ -24,7 +24,7 @@ module.exports = function fixture({ enqueueRedemption } = {}) {
         if(q.startsWith('SELECT i.* FROM orbitcard_card_issues')) {
             const task=db.tasks.find(t => t.job_key===p[0]);return structuredClone(db.issues.filter(i => i.issue_key===task?.orbitcard_issue_key));
         }
-        if (q.includes('FROM orbitcard_managed_cards')) return structuredClone(db.cards.filter(c => c.scope === p[0] && (!q.includes('card_id=?') || c.card_id === Number(p[1]))).sort((a,b) => b.transaction_count-a.transaction_count || a.card_id-b.card_id));
+        if (q.includes('FROM orbitcard_managed_cards')) return structuredClone(db.cards.filter(c => c.scope === p[0] && (!q.includes('card_id=?') || c.card_id === Number(p[1]))).sort((a,b) => b.activation_count-a.activation_count || a.card_id-b.card_id));
         if (q.includes('FROM orbitcard_card_uses')) return structuredClone(db.uses.filter(u => q.includes('WHERE scope=')
             ? u.scope === p[0] && u.card_id === p[1] && u.state === 'reserved' : u.job_key === p[0]));
         if (q.includes('FROM orbitcard_card_issues')) return structuredClone(db.issues.filter(i => (q.includes('WHERE issue_key=') ? i.issue_key === p[0] : i.scope === p[0]) && (!q.includes('plan_type=?') || i.plan_type === p[1])
@@ -42,8 +42,10 @@ module.exports = function fixture({ enqueueRedemption } = {}) {
     }
     async function runExecute(sql, p = []) {
         const q = clean(sql);
-        if (q.startsWith('UPDATE orbitcard_managed_cards SET transaction_count=')) {
-            Object.assign(db.cards.find(c => c.scope === p[1] && c.card_id === p[2]), {transaction_count:p[0]});
+        if (q.startsWith('UPDATE orbitcard_managed_cards SET activation_count=activation_count+1')) {
+            const card = db.cards.find(c => c.scope === p[0] && c.card_id === p[1]);
+            if (!card || card.activation_count == null) return {affectedRows:0};
+            card.activation_count++;
             return {affectedRows:1};
         }
         if (q.startsWith('UPDATE orbitcard_managed_cards SET retirement_key=')) {
@@ -61,7 +63,7 @@ module.exports = function fixture({ enqueueRedemption } = {}) {
             Object.assign(task,{orbitcard_state:'balance_blocked',status:'failed',orbitcard_required_balance:p[0],message:p[1]});
         } else if (q.startsWith('INSERT INTO orbitcard_managed_cards')) {
             let card = db.cards.find(c => c.scope === p[0] && c.card_id === p[1]);
-            if (!card) { card = { scope:p[0],card_id:p[1],transaction_count:null,active_job:null,source:'imported' }; db.cards.push(card); }
+            if (!card) { card = { scope:p[0],card_id:p[1],activation_count:0,active_job:null,source:'imported' }; db.cards.push(card); }
             Object.assign(card,{ provider_status:p[2],product_code:p[3] || card.product_code || '',card_bin:p[4] || card.card_bin || '',last4:p[5] || card.last4 || '',balance:p[6],currency:p[7] });
         } else if (q.startsWith('INSERT INTO orbitcard_card_uses')) {
             assert.ok(!db.uses.some(u => u.job_key === p[0])); db.uses.push({ job_key:p[0],scope:p[1],card_id:p[2],plan_type:p[3],state:'reserved' });
@@ -123,7 +125,7 @@ module.exports = function fixture({ enqueueRedemption } = {}) {
     }
     async function addCard(id=42, confirmed=true, used=0) {
         const card={card_id:id,provider_status:'ACTIVE',product_code:'p1',bin:'55565979',last4:'1234',balance:100,currency:'USD'};
-        await cardStore.cardMethods(BASE).syncCards([card]); Object.assign(db.cards.find(c => c.card_id === id),{transaction_count:confirmed?used:null}); return card;
+        await cardStore.cardMethods(BASE).syncCards([card]); Object.assign(db.cards.find(c => c.card_id === id),{activation_count:confirmed?used:null}); return card;
     }
     const settle=(task,state) => cdkStore.settleOrbitcardTask(task.jobKey,{status:state==='success'?'success':['failed','rejected'].includes(state)?'failed':state==='manual'?'manual':'running',orbitcardState:state,progress:90,message:state,
         ...(state==='submitting'?{expectedState:'prepared',expectedClientOrderNo:task.orbitcardClientOrderNo}:{})});
