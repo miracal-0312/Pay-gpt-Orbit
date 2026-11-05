@@ -399,7 +399,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
             }
         });
     }
-    async function apply(cfg, planType) {
+    async function apply(cfg) {
         if (!cfg.enabled) throw new CardPreparationError('请先开启 Orbitcard 接单配置');
         return store.withCardAllocationLock(cfg.base_url, async locked => {
             const cards = await cardsApi.listCards(cfg);
@@ -407,13 +407,16 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
                 throw new CardPreparationError('卡池已有五张卡片，无需继续开卡');
             if ((await locked.listCards()).some(card => card.retirement_key && card.provider_status !== 'DELETED'))
                 throw new CardPreparationError('存在未确认删卡申请，请先同步卡池');
+            const pending = [];
             for (const plan of PLAN_TYPES) {
-                if (plan !== planFor(planType) && await locked.pendingIssue(plan))
-                    throw new CardPreparationError('存在待确认开卡申请，暂停新增开卡');
+                const issue = await locked.pendingIssue(plan);
+                if (issue) pending.push(issue);
             }
+            if (pending.length > 1 || pending.some(issue => issue.job_key))
+                throw new CardPreparationError('存在其他待确认开卡申请，请先恢复原订单，暂停新增开卡');
             // Applying for a card alone needs no membership price; those budgets belong to redemption.
-            await requireFunds(locked,null,await account(cfg),money.units('20'));
-            return (await issueFor(cfg,locked,planType)).card;
+            // A historical pool application keeps its original plan/body/key.
+            return (await issueFor(cfg,locked,pending[0]?.plan_type || 'plus')).card;
         });
     }
     let recovering = false;

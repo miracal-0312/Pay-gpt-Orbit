@@ -2,6 +2,7 @@
 const crypto = require('node:crypto');
 const api = require('./orbitcard-client');
 const { progressFor } = require('./orbitcard-cdk');
+const { PROVIDER_PLANS, paymentPlan } = require('./plan-registry');
 const subscription = require('./orbitcard-subscription-service')(api);
 const inFlight = new Map();
 const recent = new Map();
@@ -32,7 +33,7 @@ async function refresh({ cfg, task, persist, onConfirmedFailure }) {
     pruneRecent();
     const pending = (async () => {
         const result = await subscription.query({ ...cfg, auditJobKey: task.job_key }, { orderId: task.gpt_api_order_id,
-            clientOrderNo: task.orbitcard_client_order_no, planType: api.PLAN_MAP?.[task.orbitcard_plan_type], email: task.orbitcard_email, cardId: task.orbitcard_card_id });
+            clientOrderNo: task.orbitcard_client_order_no, planType: PROVIDER_PLANS[paymentPlan(task.orbitcard_plan_type)], email: task.orbitcard_email, cardId: task.orbitcard_card_id });
         if (!result.success) return result;
         const next = progressFor(result.snapshot, result.state);
         if (next.state === 'failed' && onConfirmedFailure) {

@@ -4,7 +4,7 @@ const cardsApi = require('./orbitcard-cards-client');
 const api = require('./orbitcard-client');
 const { MAX_USES } = require('./orbitcard-pool');
 const { CardPreparationError } = require('./orbitcard-card-policy');
-const { PLAN_TYPES: CANONICAL_PLAN_TYPES } = require('./plan-registry');
+const { PLAN_TYPES: CANONICAL_PLAN_TYPES, PROVIDER_PLANS } = require('./plan-registry');
 
 // Mounted after administrator authentication; manual card issuance requires 2FA.
 module.exports = function registerCardRoutes(app, { store, cardService, requireSecondaryAuth }) {
@@ -51,14 +51,10 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
     }));
     app.get('/api/admin/orbitcard/products', handler(async (req, res) => {
         const cfg = await config(), products = await cardsApi.products(cfg);
-        const catalog = products.map(product => ({ ...product, plans: Object.fromEntries(CANONICAL_PLAN_TYPES.map(plan => {
-            const selected = cardsApi.selection(product, plan, cfg);
-            return [plan, selected ? { amount: selected.amount, available: true } : null];
-        })) }));
         let application=null,applicationError=null;
         try {application=cardsApi.createCardBody(cardsApi.chooseOpeningProduct(products,cfg));}
         catch (error) {if(!(error instanceof CardPreparationError))throw error;applicationError=error.message;}
-        res.json({ success: true, products: catalog, automatic_application:application, application_error:applicationError });
+        res.json({ success: true, products, automatic_application:application, application_error:applicationError });
     }));
     app.get('/api/admin/orbitcard/payment-regions', handler(async (req, res) => {
         const cfg=await config(), regions={};
@@ -66,12 +62,12 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
         if(requested && !CANONICAL_PLAN_TYPES.includes(requested)) throw new CardPreparationError('请选择有效的套餐查询地区');
         for(const plan of requested ? [requested] : CANONICAL_PLAN_TYPES) {
             const started=Date.now();
-            const result=await api.request(cfg,'getSubscriptionPaymentRegions',{plan_type:api.PLAN_MAP[plan]});
+            const result=await api.request(cfg,'getSubscriptionPaymentRegions',{plan_type:PROVIDER_PLANS[plan]});
             const data=result.data;
             const trace={operation:'getSubscriptionPaymentRegions',path:'/api/open/v1/getSubscriptionPaymentRegions',
-                plan_type:api.PLAN_MAP[plan],checked_at:new Date(started).toISOString(),elapsed_ms:Date.now()-started,
+                plan_type:PROVIDER_PLANS[plan],checked_at:new Date(started).toISOString(),elapsed_ms:Date.now()-started,
                 success:result.success===true,http_status:result.status ?? null,platform_code:result.code ?? null};
-            if(!result.success || (data?.plan_type && data.plan_type!==api.PLAN_MAP[plan]) || !Array.isArray(data?.payment_regions)) {
+            if(!result.success || (data?.plan_type && data.plan_type!==PROVIDER_PLANS[plan]) || !Array.isArray(data?.payment_regions)) {
                 regions[plan]={options:[],error:result.error || '该套餐支付地区暂不可用',trace:{...trace,success:false}};
                 continue;
             }
@@ -88,10 +84,12 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
         res.json({success:true,data:await cardService.transactions(await config(),req.params.cardId,req.query?.page || 1)});
     }));
     app.post('/api/admin/orbitcard/cards/apply', requireSecondaryAuth, handler(async (req, res) => {
-        const planType = req.body?.plan_type;
-        if (!CANONICAL_PLAN_TYPES.includes(planType)) throw new CardPreparationError('请选择有效的充值套餐');
-        const card = await cardService.apply(await config(), planType);
-        res.json({ success: true, card, message: '开卡成功，首充 20 USD；成功消费授权满 6 次后停止分配' });
+        if (req.body !== undefined && (!req.body || typeof req.body !== 'object'
+            || Array.isArray(req.body) || Object.keys(req.body).length)) {
+            throw new CardPreparationError('共享卡池开卡不接收套餐或自定义参数，请提交空请求');
+        }
+        const card = await cardService.apply(await config());
+        res.json({ success: true, card, message: `开卡成功，首充 20 USD；成功消费授权满 ${MAX_USES} 次后停止分配` });
     }));
     app.post('/api/admin/orbitcard/issues/refresh', handler(async (req, res) => {
         await cardService.recover(await config());

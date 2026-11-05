@@ -7,7 +7,8 @@ const adminAuth = require('./admin-auth');
 const gptApi = require('./orbitcard-client');
 const runtimeLog = require('./runtime-log');
 const { buildAdminLoginUrl, buildAdminPanelUrl } = require('./admin-paths');
-const { PLAN_TYPES, normalizePlanType } = require('./plan-registry');
+const { PLAN_TYPES, PROVIDER_PLANS, normalizePlanType } = require('./plan-registry');
+const { normalizeBaseUrl } = require('./orbitcard-config');
 const { notifyAdminSecurityEvent, sendTelegramLoginCode, sendTelegramTest } = require('./telegram-notify');
 function handle(action, errorStatus = 500) {
     return async (req, res, next) => {
@@ -91,7 +92,7 @@ function getBearerToken(req) {
     if (scheme === 'Bearer' && token) {
         return token.trim();
     }
-    return (req.query?.token || '').trim() || null;
+    return null;
 }
 
 async function authenticateAdmin(req, res, next) {
@@ -564,7 +565,7 @@ app.post('/api/admin/gpt-api/test', handle(async (req, res) => {
         base_url: String(body.base_url || '').trim() || saved.base_url
     };
     let target;
-    try { target = gptApi.normalizeBaseUrl(merged.base_url); }
+    try { target = normalizeBaseUrl(merged.base_url); }
     catch (error) { return res.status(400).json({ success: false, message: error.message }); }
     const result = await gptApi.testConnection(merged);
     if (!result.success) {
@@ -579,34 +580,18 @@ app.get('/api/admin/gpt-api/status', handle(async (req, res) => {
     if (!cfg.api_key) {
         return res.status(400).json({ success: false, message: '尚未配置第三方代充 API Key' });
     }
-    const [connection, recentOrders] = await Promise.all([
-        gptApi.testConnection(cfg),
-        store.listRecentGptApiOrders(10)
-    ]);
+    const connection = await gptApi.testConnection(cfg);
     if (!connection.success) {
         return res.status(400).json({ success: false, message: connection.error || '套餐查询失败',
-            target: gptApi.normalizeBaseUrl(cfg.base_url), checks: connection.checks || [] });
+            target: normalizeBaseUrl(cfg.base_url), checks: connection.checks || [] });
     }
-    const orders = recentOrders.map((order) => ({
-        job_key: order.job_key,
-        cdk_code: order.cdk_code,
-        status: order.status,
-        message: order.message,
-        updated_at: order.updated_at,
-        order_id: order.gpt_api_order_id,
-        client_order_no: order.orbitcard_client_order_no,
-        orbitcard_order: (() => {
-            try { return require('./orbitcard-client').summary(JSON.parse(order.gpt_api_raw || '{}')); } catch (_) { return {}; }
-        })()
-    }));
     res.json({
         success: true,
         plans: connection.plans,
         balance: connection.balance,
         balance_error: connection.balanceError,
-        target: gptApi.normalizeBaseUrl(cfg.base_url),
-        checks: connection.checks || [],
-        recent_orders: orders
+        target: normalizeBaseUrl(cfg.base_url),
+        checks: connection.checks || []
     });
 }));
 app.post('/api/admin/config', handle(async (req, res) => {
@@ -692,7 +677,7 @@ async function liveCdkPlans() {
     const result = await gptApi.fetchPlans(await store.getGptApiConfig());
     if (!result.success || !Array.isArray(result.plans)) throw new Error(result.error || 'Orbitcard 套餐目录读取失败');
     return PLAN_TYPES.map(type => {
-        const plan = result.plans.find(item => item.type === gptApi.PLAN_MAP[type]);
+        const plan = result.plans.find(item => item.type === PROVIDER_PLANS[type]);
         return plan ? { type, name: String(plan.name || type).slice(0, 128) } : null;
     }).filter(Boolean);
 }

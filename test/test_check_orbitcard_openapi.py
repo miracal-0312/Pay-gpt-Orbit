@@ -146,6 +146,41 @@ class OpenApiProbeTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["summary"]["products"][0]["product_code"], "p1")
 
+    def test_product_catalog_rejects_legacy_wrappers_and_uses_only_data_list(self):
+        product = {"product_code": " p1 ", "min_initial_amount": "20.00"}
+        for data in (None, [], [product], product, {"items": [product]}, {"products": [product]},
+                     {"data": {"list": [product]}}, {"channels": [{"products": [product]}]},
+                     {"providers": {"amzkeys": [product]}}):
+            with self.subTest(data=data):
+                self.assertIsNone(probe.summarize("getProductCode", data))
+        summary = probe.summarize("getProductCode", {"list": [product], "channels": [{"product_code": "retired"}]})
+        self.assertEqual(summary["count"], 1)
+        self.assertEqual(summary["products"][0]["product_code"], "p1")
+        self.assertEqual(probe.summarize("getProductCode", {"list": []}), {"count": 0, "products": []})
+
+    def test_product_catalog_rejects_invalid_or_duplicate_identities(self):
+        for row in (None, [], True, 42, "p1", {}, {"productCode": "p1"}, {"product_code": 42},
+                    {"product_code": " "}, {"product_code": "p" * 129},
+                    {"product_code": "bad\x00code"}, {"product_code": "bad\x7fcode"}):
+            with self.subTest(row=row):
+                self.assertIsNone(probe.summarize("getProductCode", {"list": [row]}))
+        for code in ("p1", " p1 "):
+            with self.subTest(code=code):
+                self.assertIsNone(probe.summarize("getProductCode", {"list": [
+                    {"product_code": "p1", "min_initial_amount": "20.00"},
+                    {"product_code": code, "min_initial_amount": "999.00"}]}))
+
+    def test_products_only_probe_marks_non_current_catalogs_as_failed(self):
+        for data in ({"items": [{"product_code": "p1"}]},
+                     {"list": [{"product_code": "p1"}, {"product_code": "p1"}]}):
+            with self.subTest(data=data):
+                client = mock.Mock()
+                client.request.return_value = {"ok": True, "http_status": 200, "data": data}
+                result = probe.run_product_check(client, {"base_url": "https://orbitcard.cc"})
+                self.assertEqual(result["status"], "failed")
+                self.assertNotIn("summary", result)
+                client.request.assert_called_once_with("getProductCode", {})
+
 
 if __name__ == "__main__":
     unittest.main()

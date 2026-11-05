@@ -82,6 +82,22 @@ test('manual usage editor is removed',()=>{
     assert.doesNotMatch(source,/async function saveCardUsage|data-bind-card|data-update-card-usage|cardHistoryState|data-open-card-history|data-manage-card-history/);
 });
 
+test('shared-pool card application submits no plan and refreshes original records after an uncertain result',async()=>{
+    const source=fs.readFileSync(path.join(__dirname,'../public/admin.js'),'utf8');
+    const html=fs.readFileSync(path.join(__dirname,'../public/admin.html'),'utf8');
+    assert.doesNotMatch(html,/id="applyPlan"|申请关联套餐/);
+    const line=source.split(/\r?\n/).find(line=>line.startsWith("form('applyCardForm',"));
+    let submit;
+    const calls=[];
+    new Function('form','request','notice','loadCards',line)(
+        (name,handler)=>{assert.equal(name,'applyCardForm');submit=handler;},
+        async(url,body)=>{calls.push({url,body});throw Error('original application pending');},
+        ()=>{throw Error('an uncertain application must not display success');},
+        async()=>{calls.push({refresh:true});});
+    await assert.rejects(submit(),/original application pending/);
+    assert.deepEqual(calls,[{url:'/api/admin/orbitcard/cards/apply',body:{}},{refresh:true}]);
+});
+
 test('viewing transactions refreshes authorization counts without maintaining the pool',async()=>{
     const f=setup(()=>{throw Error('must not maintain pool');},card=>{card.authorization_count=3;card.authorizations_checked_at='2026-11-05T12:00:00Z';return {data:{transactions:[
         {id:'authorization',transaction_type:'Authorization',status:'completed'},

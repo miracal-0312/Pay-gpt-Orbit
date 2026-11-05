@@ -85,6 +85,8 @@ docker compose logs --tail=100 app
 
 旧浏览器、验证码、卡池、代理、支付调试和本地账单接口已移除。后台页面应刷新缓存，新前端资源与镜像版本一起发布。
 
+手动开卡已统一为共享卡池申请，管理接口 `POST /api/admin/orbitcard/cards/apply` 只接收 `{}`，旧 `plan_type` 参数会被拒绝；未确认的历史申请继续通过原 key 和 Body 恢复。自定义管理客户端需使用 `Authorization: Bearer`，不再把令牌放在 URL；`gpt-api/status` 不再附带 `recent_orders`，订单查询入口保留。产品预览不再返回每产品的 `plans` 字段。无需删除历史订单、卡片数据或迁移记录。
+
 ## 环境更新与存储
 
 对接 dujiao-next 核销通知时，需要同时发布商城接收端及本程序，并在两端配置相同的独立签名密钥。先启用商城接收端，再设置本程序的 `CDK_REDEMPTION_WEBHOOK_URL`、`CDK_REDEMPTION_SOURCE`、`CDK_REDEMPTION_WEBHOOK_SECRET` 并重建应用。商城 URL 是实际部署域名下的 `/api/v1/card-secrets/redemption-callback`，不是 GitHub 地址。首次启用仅发送之后新确认的核销，不自动回填历史数据。完整部署与排查见 [README 核销回调说明](README.md#主动通知-dujiao-next-商城核销)。

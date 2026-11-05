@@ -228,16 +228,23 @@ def summarize(operation: str, data: Any) -> Any:
             return None
         return {key: data.get(key) for key in BALANCE_FIELDS if key in data}
     if operation == "getProductCode":
-        items = rows(data)
-        if items is None:
+        if not isinstance(data, dict) or not isinstance(data.get("list"), list):
             return None
+        items = data["list"]
         products = []
+        seen = set()
         for item in items:
+            if not isinstance(item, dict) or not isinstance(item.get("product_code"), str):
+                return None
+            code = item["product_code"].strip()
+            if not code or len(code) > 128 or any(ord(char) < 32 or ord(char) == 127 for char in code) or code in seen:
+                return None
+            seen.add(code)
             product = {key: item.get(key) for key in (
-                "product_code", "card_type", "remaining_open_card_num", "open_card_inventory_mode",
+                "card_type", "remaining_open_card_num", "open_card_inventory_mode",
                 "min_initial_amount", "min_retained_balance"
             ) if key in item}
-            products.append(product)
+            products.append({"product_code": code, **product})
         return {"count": len(items), "products": products}
     if operation in ("getSubscriptionPlans", "getSubscriptionCatalog"):
         if not isinstance(data, dict) or not isinstance(data.get("plans"), list):

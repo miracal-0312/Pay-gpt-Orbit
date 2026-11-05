@@ -32,8 +32,8 @@ module.exports = function createPaymentService({ store, cardService, worker, act
                 if ((attempt >= 2 && !task.orbitcardRetryFirstCardId) || (attempt === 3 && !task.orbitcardRetrySecondCardId))
                     throw new Error('支付重试缺少已失败卡片记录');
                 // Each attempt has a new durable order identity; the service configuration stays fixed.
-                const result = await worker.run({ cfg: task.apiConfig, planType, session, cdk,
-                    clientOrderNo: task.orbitcardClientOrderNo, attemptKey: jobKey, setProgress,
+                const result = await worker.run({ cfg: task.apiConfig, planType, session,
+                    clientOrderNo: task.orbitcardClientOrderNo, setProgress,
                     selectCard: async () => {
                         await setProgress('running', 10, `正在准备第 ${attempt}/3 次支付尝试...`, {
                             orbitcardState: 'prepared', expectedState: 'prepared', expectedClientOrderNo: task.orbitcardClientOrderNo

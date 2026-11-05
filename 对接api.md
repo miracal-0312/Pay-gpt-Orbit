@@ -1,6 +1,6 @@
 # Orbitcard 接入说明
 
-本项目仅支持 Orbitcard HMAC V1。平台完整协议保留在 [orbitcard-subscription-api-v1.md](orbitcard-subscription-api-v1.md)，充值状态、异常恢复和审计规则见 [RECHARGE-AUDIT.md](RECHARGE-AUDIT.md)。
+本项目仅支持 Orbitcard HMAC V1。平台协议保留在 [Orbitcard-Open-API-V1.md](Orbitcard-Open-API-V1.md) 及其引用的 [订阅 API](orbitcard-subscription-api-v1.md)，充值状态、异常恢复和审计规则见 [RECHARGE-AUDIT.md](RECHARGE-AUDIT.md)。本项目现有的 13 个出站操作均仍受文档支持；重构移除旧兼容分支和冗余字段，保留现有业务功能。
 
 ## 服务端配置
 
@@ -14,9 +14,11 @@
 
 订阅调用需要 `subscriptions:read`、`subscriptions:create` 权限，余额查询另需 `account:read`。卡池还需 `cards:create`、`cards:read`、`cards:manage`、`products:read`、`cards:fund`；交易对账另需 `transactions:read`，不需要敏感卡资料。连接测试只查询套餐和余额，不创建订阅或开卡。卡片协议见 [Open API](Orbitcard-Open-API-V1.md)。
 
-开卡仅自动提交 `{product_code,amount:"20.00",quantity:1}`；产品码来自开卡前最新 `getProductCode`，不额外提交身份资料或卡号。后台产品查询返回只读 `automatic_application` 预览；卡池补位与单独申请卡不要求会员价格，新的 CDK 代充需后台已配置对应套餐 USD 支付金额。详见 [开卡参数](ORBITCARD-CARDS.md#次数与卡池规则)。
+开卡仅自动提交 `{product_code,amount:"20.00",quantity:1}`；产品码来自开卡前最新 `getProductCode` 的 `data.list`，不额外提交身份资料或卡号。后台产品查询返回 `products` 与只读 `automatic_application` 预览，不再附带 `products[].plans`。卡池补位与单独申请卡不要求会员价格，新的 CDK 代充需后台已配置对应套餐 USD 支付金额。详见 [开卡参数](ORBITCARD-CARDS.md#次数与卡池规则)。
 
 项目向平台发送 `POST /api/open/v1/<operation>`，使用 HMAC-SHA256-V1 对精确请求字节、主机、路径、时间戳、随机数及幂等键签名，不使用旧充值 Bearer 协议。
+
+`orbitcard-api-contract.js` 统一登记本项目使用的操作和允许的顶层字段；未知操作或旧参数在发送前被拒绝。`amount`、`max_service_fee` 必须是十进制定点字符串，写操作必须携带有效的原幂等键。订单归属、原 Body 和结果确认仍由业务服务校验。
 
 ## 用户入口
 
@@ -50,7 +52,9 @@
 
 后台继续使用 `/api/admin/gpt-api` 配置路径；旧预算和地区字段不再读取或接受。后台「接口调试」分别展示 `/test` 连接测试、`/status` 套餐与余额、`GET /api/admin/orbitcard/payment-regions` 四档地区查询结果。单独调试地区不会修改默认配置；真实下单会核验该套餐已保存的地区。新增 `POST /api/admin/orbitcard/diagnostics/preflight`（Session/套餐/余额/地区/卡片/完整链路只读预检）和 `GET /api/admin/orbitcard/diagnostics/logs/:jobKey?cursor=0`（按字节游标读取持久化日志），均需管理员二级验证。真实调试复用 `POST /api/admin/manual/orders` 的 `test` 模式和原订单刷新接口，不增加独立支付通道。CDK 行锁保护新任务创建，卡分配使用 MySQL 命名锁，提交订阅前以任务状态和固定订单号原子认领；未知结果只查原单。
 
-`POST /api/admin/orders/:jobKey/refresh` 查询已有订单；`GET /api/admin/task-logs/:jobKey/audit` 下载任务日志。均需管理员认证。管理员自身的 Bearer 登录令牌与供应商 HMAC 协议用途不同。
+`POST /api/admin/orders/:jobKey/refresh` 查询已有订单；`GET /api/admin/task-logs/:jobKey/audit` 下载任务日志。管理 HTTP 请求使用 `Authorization: Bearer <token>`，不再接受 `?token=` 鉴权；管理员登录令牌与供应商 HMAC 协议用途不同。`/api/admin/gpt-api/status` 仅返回套餐、余额及检查结果，移除无消费者的 `recent_orders` 附带字段；订单页和原单查询接口继续保留。
+
+`POST /api/admin/orbitcard/cards/apply` 使用空 Body `{}`，为共享卡池申请一张卡，不再选择关联套餐。携带旧 `plan_type` 或其他自定义参数会返回 400。已有唯一手动申请时继续确认原请求；多笔申请或其他订单绑定的申请先通过 `POST /api/admin/orbitcard/issues/refresh` 恢复，不会换 key 新开卡。
 
 `GET /api/admin/orbitcard/cards` 同时返回脱敏的 `cards`、`issues`、`fundings`；`POST /api/admin/orbitcard/issues/refresh` 确认原开卡及补款，不创建新身份。提供平台卡片同步、申请卡与原申请确认接口；历史次数绑定和手动修改接口已删除，见 [卡片管理 API](ORBITCARD-CARDS.md#本项目管理-api)。旧本地 Stripe 卡池、代理、账单地址、验证码求解、浏览器池、Session 导出、支付链接生成、本地账单及开卡 Webhook 接口均已移除，不提供充值回退路径。
 

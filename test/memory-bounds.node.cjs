@@ -63,7 +63,7 @@ test('idle query cache expiration frees results without a subsequent request', a
     new Function('require', 'module', 'Date', 'setInterval', fs.readFileSync(filename, 'utf8') + '\nmodule.exports.cacheSize = () => recent.size;')(
         id => id === './orbitcard-subscription-service' ? () => ({ query: async () => ({ success: false, retryAfterMs: 5000 }) }) : real(id),
         module, { now: () => now }, (fn, ms) => { assert.equal(ms, 30000); cleanup = fn; return { unref() { unref = true; } }; });
-    await module.exports.refresh({ cfg: {}, task: { job_key: 'idle', orbitcard_client_order_no: 'order' } });
+    await module.exports.refresh({ cfg: {}, task: { job_key: 'idle', orbitcard_client_order_no: 'order', orbitcard_plan_type: 'plus' } });
     assert.equal(module.exports.cacheSize(), 1); assert.equal(unref, true);
     now += 5001; cleanup(); assert.equal(module.exports.cacheSize(), 0);
 });

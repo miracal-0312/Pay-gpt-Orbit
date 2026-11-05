@@ -57,7 +57,7 @@ test('query cache stays bounded and retains recent order cooldowns', async () =>
         './orbitcard-cdk': {}
     });
     const input = key => ({ cfg: { base_url: 'https://orbitcard.test' }, task: {
-        job_key: key, orbitcard_client_order_no: key, orbitcard_base_url: 'https://orbitcard.test'
+        job_key: key, orbitcard_client_order_no: key, orbitcard_base_url: 'https://orbitcard.test', orbitcard_plan_type: 'plus'
     } });
     for (let index = 0; index <= 1000; index++) await query.refresh(input(`order-${index}`));
     const recent = await query.refresh(input('order-1000'));

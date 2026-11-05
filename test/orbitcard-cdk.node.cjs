@@ -1,6 +1,7 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const { PROVIDER_PLANS } = require('../plan-registry');
 const fs = require('node:fs');
 const path = require('node:path');
 const { createRequire } = require('node:module');
@@ -83,6 +84,19 @@ test('an attempt has a stable identity; a fresh attempt has a distinct identity'
     assert.equal(domain.clientOrderNo('CDK', 'job1'), domain.clientOrderNo('CDK', 'job1'));
     assert.notEqual(domain.clientOrderNo('CDK', 'job1'), domain.clientOrderNo('CDK', 'job2'));
     assert.match(domain.clientOrderNo('CDK', 'job1'), /^cdk-[a-f0-9]{64}$/);
+});
+
+test('worker requires a persisted client order identity before any API call or card preparation', async () => {
+    const {worker,api}=modules(); let calls=0;
+    api.fetchPlans=async()=>{calls++;throw Error('unexpected plans call');};
+    api.request=async()=>{calls++;throw Error('unexpected API call');};
+    const {CardPreparationError}=require('../orbitcard-card-policy');
+    for(const clientOrderNo of [undefined,null,'','   ']) {
+        await assert.rejects(worker.run({cfg:{},planType:'plus',clientOrderNo,cdk:'OLD-CDK',attemptKey:'old-fallback',
+            selectCard:async()=>{calls++;throw Error('unexpected allocation');}}),
+        error=>error instanceof CardPreparationError && /持久化/.test(error.message));
+    }
+    assert.equal(calls,0);
 });
 
 test('concurrent redemptions atomically create one task and reserve one CDK', async () => {
@@ -298,11 +312,11 @@ test('each configured region is checked before card preparation and passed to it
         const configured = { plus: 'PH', pro100: 'US', pro200: 'JP', pro500: 'CL' };
         for (const [plan, region] of Object.entries(configured)) {
             const { api, worker } = modules(), events = [], requests = [];
-            api.fetchPlans = async () => ({ success: true, plans: [{ type: api.PLAN_MAP[plan] }] });
+            api.fetchPlans = async () => ({ success: true, plans: [{ type: PROVIDER_PLANS[plan] }] });
             api.request = async (_, operation, body, key) => {
                 events.push(operation); requests.push({ operation, body, key });
                 if (operation === 'getSubscriptionPaymentRegions') return { success: true,
-                    data: { plan_type: api.PLAN_MAP[plan], payment_regions: [{ code: region }] } };
+                    data: { plan_type: PROVIDER_PLANS[plan], payment_regions: [{ code: region }] } };
                 return { success: false, status: 503 };
             };
             await worker.run({ cfg: { orbitcard_payment_regions: configured }, planType: plan, clientOrderNo: `order-${plan}`,
@@ -311,7 +325,7 @@ test('each configured region is checked before card preparation and passed to it
                 setProgress: async () => {}, onSubmission() {}, broadcast() {}, sleep: async () => {}, maxPolls: 1 });
             assert.deepEqual(events, ['getSubscriptionPaymentRegions', 'allocate', 'createSubscription', 'getSubscription']);
             const created = requests.find(row => row.operation === 'createSubscription');
-            assert.equal(created.body.plan_type, api.PLAN_MAP[plan]); assert.equal(created.body.payment_region, region);
+            assert.equal(created.body.plan_type, PROVIDER_PLANS[plan]); assert.equal(created.body.payment_region, region);
             assert.equal(created.key, `order-${plan}`);
             assert.deepEqual(requests.at(-1).body, { client_order_no: `order-${plan}` });
         }
@@ -468,7 +482,7 @@ test('query ownership mismatch preserves the CDK and does not persist credential
     api.request = async () => ({ success: true, data: { orderId: 'WRONG', status: 'succeeded', session: { accessToken: 'secret' } } });
     let writes = 0;
     const result = await query.refresh({ cfg: { base_url: 'https://orbitcard.test' }, task: {
-        job_key: 'job1', gpt_api_order_id: 'SUB1', orbitcard_client_order_no: 'cdk-fixed', orbitcard_base_url: 'https://orbitcard.test'
+        job_key: 'job1', gpt_api_order_id: 'SUB1', orbitcard_client_order_no: 'cdk-fixed', orbitcard_base_url: 'https://orbitcard.test', orbitcard_plan_type:'plus'
     }, persist: async () => { writes++; } });
     assert.equal(result.success, false);
     assert.equal(writes, 0);
@@ -479,13 +493,21 @@ test('original-order queries reject changed credentials before network or cached
     const { api, query } = modules(); let calls = 0;
     api.request = async () => { calls++; return { success: false, status: 503 }; };
     const input = { cfg: { base_url: 'https://orbitcard.test', api_key: 'original' }, task: {
-        job_key: 'key-bound-order', orbitcard_base_url: 'https://orbitcard.test', orbitcard_client_order_no: 'original-order',
+        job_key: 'key-bound-order', orbitcard_base_url: 'https://orbitcard.test', orbitcard_client_order_no: 'original-order', orbitcard_plan_type:'plus',
         orbitcard_api_key_hash: require('node:crypto').createHash('sha256').update('original').digest('hex') }, persist: async () => {} };
     await assert.rejects(query.refresh({ ...input, cfg: { ...input.cfg, api_key: 'changed' } }), /原订单不同/);
     assert.equal(calls, 0);
     await query.refresh(input);
     await assert.rejects(query.refresh({ ...input, cfg: { ...input.cfg, api_key: 'changed' } }), /原订单不同/);
     assert.equal(calls, 1);
+});
+
+test('query resolves a persisted historical plan alias through the shared registry', async () => {
+    const {api,query}=modules(); let persisted;
+    api.request=async()=>({success:true,data:{task_no:'HISTORICAL-1',client_order_no:'old-pro-order',plan_type:'gpt-pro-5x',status:'succeeded'}});
+    await query.refresh({cfg:{base_url:'https://orbitcard.test'},task:{job_key:'historical-plan',orbitcard_base_url:'https://orbitcard.test',
+        orbitcard_client_order_no:'old-pro-order',orbitcard_plan_type:'pro_5x'},persist:async(key,change)=>{persisted=change;return {applied:true};}});
+    assert.equal(persisted.orbitcardState,'success');
 });
 
 test('activation errors before acquiring a CDK cannot roll back somebody else’s lock', async () => {

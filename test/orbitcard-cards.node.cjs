@@ -274,9 +274,10 @@ test('documented product response automatically supplies the exact createCard fi
     const documented={product_code:'p1',bin:'55565979',card_type:'PREPAID',network:'MASTERCARD',media:'VIRTUAL',issuing_area:'US',
         remaining_open_card_num:9,open_card_inventory_mode:'local',min_initial_amount:'20.00000000',min_retained_balance:'1.00000000'};
     const f=serviceFixture({getProductCode:async body => {assert.deepEqual(body,{});return {success:true,data:{list:[documented]}};}});
-    assert.equal((await f.service.apply(cfg,'pro500')).card_id,100);
+    assert.equal((await f.service.apply(cfg)).card_id,100);
     const create=f.calls.find(c=>c.operation==='createCard');assert.deepEqual(create.body,{product_code:'p1',amount:'20.00',quantity:1});
     assert.equal(f.db.issues[0].request_body,JSON.stringify(create.body));assert.equal(f.db.issues[0].issue_key,create.key);
+    assert.equal(f.db.issues[0].plan_type,'plus'); // Shared pool grouping, not a membership-specific card.
     assert.equal(f.calls[0].operation,'getCardList');assert.equal(f.db.fundings.length,0);
     const event=f.events.find(e=>e.event==='card_issue_prepared');assert.deepEqual(event.data.parameters,create.body);
     const normalized=f.api.normalizeProducts({list:[documented]})[0];assert.equal(normalized.network,'MASTERCARD');
@@ -285,21 +286,86 @@ test('documented product response automatically supplies the exact createCard fi
 test('product limits must be valid decimal amounts and inventory is known before opening',() => {
     const f=serviceFixture();
     for(const bad of [{min_initial_amount:''},{min_retained_balance:true},{remaining_open_card_num:undefined},{remaining_open_card_num:'0.5'},{product_code:'bad\ncode'}]) {
-        const rows=f.api.normalizeProducts({list:[{...product,...bad}]});assert.throws(()=>f.api.chooseOpeningProduct(rows,cfg));
+        assert.throws(()=>f.api.chooseOpeningProduct(f.api.normalizeProducts({list:[{...product,...bad}]}),cfg));
     }
     assert.throws(()=>f.api.createCardBody({product_code:'p1',amount:'25.00'}));
     assert.deepEqual(f.api.createCardBody({product_code:'p1',amount:'20.00',cvv:'ignored',plan_type:'plus'}),{product_code:'p1',amount:'20.00',quantity:1});
+});
+
+test('product catalog accepts only the current data.list shape and never reads retired channel wrappers',() => {
+    const {api}=serviceFixture();
+    for (const data of [null,[],[product],product,{items:[product]},{products:[product]},
+        {data:{list:[product]}},{channels:[{products:[product]}]},{providers:{amzkeys:[product]}}]) {
+        assert.throws(()=>api.normalizeProducts(data),require('../orbitcard-card-policy').CardPreparationError);
+    }
+    assert.deepEqual(api.normalizeProducts({list:[]}),[]);
+    const rows=api.normalizeProducts({list:[{...product,product_code:' p1 '}],channels:[{product_code:'retired'}]});
+    assert.equal(rows.length,1);assert.equal(rows[0].product_code,'p1');
+});
+
+test('product identities are explicit unique strings rather than merged legacy aliases',() => {
+    const {api}=serviceFixture();
+    for (const row of [null,[],true,1,'p1',{}, {...product,product_code:undefined,productCode:'p1'},
+        {...product,product_code:42},{...product,product_code:' '},{...product,product_code:'p'.repeat(129)},
+        {...product,product_code:'bad\u0000code'},{...product,product_code:'bad\u007fcode'}]) {
+        assert.throws(()=>api.normalizeProducts({list:[row]}),require('../orbitcard-card-policy').CardPreparationError);
+    }
+    for (const duplicate of [{...product},{...product,product_code:' p1 ',min_initial_amount:'999.00'}]) {
+        assert.throws(()=>api.normalizeProducts({list:[product,duplicate]}),/重复产品码/);
+    }
+});
+
+test('malformed or duplicate product catalogs stop before a financial operation',async () => {
+    for (const data of [{channels:[{products:[product]}]},{list:[product,{...product,min_initial_amount:'999'}]}]) {
+        const f=serviceFixture({getProductCode:async()=>({success:true,data})});
+        await assert.rejects(f.service.apply(cfg),require('../orbitcard-card-policy').CardPreparationError);
+        assert.equal(f.db.issues.length,0);
+        assert.ok(!f.calls.some(call=>['createCard','rechargeCard','deleteCard'].includes(call.operation)));
+    }
 });
 
 test('a configured product is never silently replaced and pending orders do not acquire new parameters',async () => {
     const f=serviceFixture(),rows=f.api.normalizeProducts({list:[product]});assert.throws(()=>f.api.chooseOpeningProduct(rows,{...cfg,orbitcard_product_code:'missing'}));
     assert.throws(()=>f.api.chooseOpeningProduct(rows,{...cfg,orbitcard_max_initial_amount:'19'}),/首充/);
     const pending=serviceFixture({createCard:async () => ({success:true,data:{order_no:'OPEN-PENDING',status:'pending_confirm',completed:false}})});
-    await assert.rejects(pending.service.apply(cfg,'plus'));const original=pending.calls.find(c=>c.operation==='createCard');
+    await assert.rejects(pending.service.apply(cfg));const original=pending.calls.find(c=>c.operation==='createCard');
     const catalogCount=pending.calls.filter(c=>c.operation==='getProductCode').length;pending.advance();
-    await assert.rejects(pending.service.apply({...cfg,orbitcard_product_code:'different'},'plus'));
+    await assert.rejects(pending.service.apply({...cfg,orbitcard_product_code:'different'}));
     const retry=pending.calls.filter(c=>c.operation==='createCard').at(-1);assert.equal(retry.key,original.key);assert.deepEqual(retry.body,original.body);
     assert.equal(pending.calls.filter(c=>c.operation==='getProductCode').length,catalogCount);
+});
+
+test('plan-free manual opening resumes one historical Pro intent with its original key and body',async () => {
+    const original={product_code:'p1',amount:'20.00',quantity:1};
+    const f=serviceFixture({
+        createCard:async(body,key)=>{
+            assert.deepEqual(body,original);assert.equal(key,'card-historical-manual');
+            return {success:true,data:{card_id:77,order_no:'OPEN-HISTORICAL',status:'success',completed:true}};
+        },
+        cardDetail:async body=>{
+            assert.equal(body.card_id,77);
+            return {success:true,data:{card_id:77,status:'ACTIVE',product_code:'p1',balance:'20.00',currency:'USD'}};
+        }
+    });
+    const methods=f.store.cardMethods(f.base);
+    await methods.createIssue({issue_key:'card-historical-manual',job_key:null,plan_type:'pro200',product_code:'p1',amount:'20.00',
+        credential_hash:require('node:crypto').createHash('sha256').update(cfg.api_key).digest('hex'),request_body:JSON.stringify(original)});
+    await methods.updateIssue('card-historical-manual',{state:'pending',order_no:'OPEN-HISTORICAL',retry_at:0});
+    assert.equal((await f.service.apply(cfg)).card_id,77);
+    assert.equal(f.db.issues.length,1);assert.equal(f.db.issues[0].plan_type,'pro200');assert.equal(f.db.issues[0].state,'ready');
+    assert.equal(f.calls.filter(call=>call.operation==='createCard').length,1);
+    assert.ok(!f.calls.some(call=>call.operation==='getProductCode'));
+});
+
+test('plan-free manual opening never creates a new card around owned or multiple pending intents',async () => {
+    for (const plans of [[['pro200','another-order']],[['plus',null],['pro500',null]]]) {
+        const f=serviceFixture(),methods=f.store.cardMethods(f.base);
+        for (const [plan,job] of plans) await methods.createIssue({issue_key:`pending-${plan}`,job_key:job,plan_type:plan,
+            product_code:'p1',amount:'20.00',credential_hash:'fixture',request_body:JSON.stringify({product_code:'p1',amount:'20.00',quantity:1})});
+        await assert.rejects(f.service.apply(cfg),require('../orbitcard-card-policy').CardPreparationError);
+        assert.equal(f.db.issues.length,plans.length);
+        assert.ok(!f.calls.some(call=>['createCard','rechargeCard','deleteCard'].includes(call.operation)));
+    }
 });
 
 test('admin product query previews generated opening fields without writing an order or exposing credentials',async t => {
@@ -309,7 +375,7 @@ test('admin product query previews generated opening fields without writing an o
     const server=app.listen(0,'127.0.0.1');await once(server,'listening');t.after(async()=>{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));});
     const data=await (await fetch(`http://127.0.0.1:${server.address().port}/api/admin/orbitcard/products`)).json();
     assert.deepEqual(data.automatic_application,{product_code:'p1',amount:'20.00',quantity:1});assert.equal(data.application_error,null);
-    assert.ok(data.products.every(product=>!Object.hasOwn(product,'prices') && Object.values(product.plans).every(plan=>!plan || !Object.hasOwn(plan,'price'))));
+    assert.ok(data.products.every(product=>!Object.hasOwn(product,'prices') && !Object.hasOwn(product,'plans')));
     assert.deepEqual(f.calls.map(c=>c.operation),['getProductCode']);assert.ok(!JSON.stringify(data).includes('api_key'));
 });
 
@@ -317,7 +383,7 @@ test('admin region choices are read separately for each plan and expose only val
     const express=require('express'),{once}=require('node:events'),app=express(),calls=[];
     const plans={plus:'gpt-plus',pro100:'gpt-pro-5x',pro200:'gpt-pro-20x',pro500:'gpt-pro-25x'};
     const register=load('orbitcard-card-http.js',{'./orbitcard-client':{
-        PLAN_MAP:plans,request:async (_,operation,body) => {
+        request:async (_,operation,body) => {
             assert.equal(operation,'getSubscriptionPaymentRegions');calls.push(body.plan_type);
             return {success:true,data:{plan_type:body.plan_type,payment_regions:[{code:'PH',default:true},{code:'US'},
                 {code:'US'},{code:'not-a-region'}]}};
@@ -360,9 +426,9 @@ test('payment retry stays on the requested first card, then excludes it for the 
 test('unknown issuance is durable and a new worker or restart uses the same body/key',async () => {
     let ready=false;
     const f=serviceFixture({createCard:async () => ready?{success:true,data:{card_id:77,order_no:'OPEN-77',status:'success'}}:{success:false,status:502}});
-    await assert.rejects(f.service.apply(cfg,'plus'),/原开卡申请仍待确认/);
+    await assert.rejects(f.service.apply(cfg),/原开卡申请仍待确认/);
     assert.equal(f.db.issues.length,1); assert.equal(f.db.issues[0].state,'unknown');
-    f.advance(); await assert.rejects(f.service.apply(cfg,'plus')); assert.equal(f.db.issues.length,1);
+    f.advance(); await assert.rejects(f.service.apply(cfg)); assert.equal(f.db.issues.length,1);
     const before=f.calls.filter(c => c.operation==='createCard'); assert.equal(before[0].key,before[1].key); assert.deepEqual(before[0].body,before[1].body);
     ready=true; f.advance(); f.setCards([{card_id:77,status:'ACTIVE',product_code:'p1',balance:85,currency:'USD'}]); await f.service.recover({...cfg,enabled:false});
     assert.equal(f.db.issues[0].state,'ready'); assert.equal(f.db.cards[0].authorization_count,0); assert.equal(f.db.uses.length,0);
@@ -372,7 +438,7 @@ test('list failures, malformed pages and a budget cap never result in an applica
     for (const response of [{success:false,status:403},{success:true,data:{}},{success:true,data:{list:[],total:10}}]) {
         const f=serviceFixture({getCardList:async () => response}),task=await f.claim(); await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus')); assert.equal(f.calls.filter(c => c.operation==='createCard').length,0);
     }
-    const f=serviceFixture(),task=await f.claim(); await assert.rejects(f.service.apply({...cfg,orbitcard_max_initial_amount:'19'},'plus'),/首充/); assert.equal(f.db.issues.length,0);
+    const f=serviceFixture(),task=await f.claim(); await assert.rejects(f.service.apply({...cfg,orbitcard_max_initial_amount:'19'}),/首充/); assert.equal(f.db.issues.length,0);
 });
 
 test('cards are read without sensitive permission and secrets never appear in normalized data',async () => {
@@ -463,7 +529,7 @@ test('Open API only fulfills status=success with valid numeric card ID and a com
         {status:'succeeded',card_id:77,order_no:'OPEN-1'}
     ]) {
         const f=serviceFixture({createCard:async () => ({success:true,data})}),task=await f.claim();
-        await assert.rejects(f.service.apply(cfg,'plus'));
+        await assert.rejects(f.service.apply(cfg));
         assert.equal(f.db.issues.length,1);assert.ok(['pending','unknown'].includes(f.db.issues[0].state));
         assert.equal(f.db.cards.length,0);assert.equal(f.db.uses.length,0);
     }
@@ -472,25 +538,25 @@ test('Open API only fulfills status=success with valid numeric card ID and a com
 test('only failed/refunded complete orders release an application as a final failure',async () => {
     for(const status of ['failed','refunded']) {
         const f=serviceFixture({createCard:async () => ({success:true,data:{status,completed:true,order_no:'OPEN-FAIL'}})}),task=await f.claim();
-        await assert.rejects(f.service.apply(cfg,'plus'),/已确认开卡失败/);assert.equal(f.db.issues[0].state,'failed');assert.equal(f.db.uses.length,0);
+        await assert.rejects(f.service.apply(cfg),/已确认开卡失败/);assert.equal(f.db.issues[0].state,'failed');assert.equal(f.db.uses.length,0);
     }
 });
 
 test('order identity changes stop fulfillment and preserve the original order number',async () => {
     let changed=false;
     const f=serviceFixture({createCard:async () => ({success:true,data:changed?{status:'success',card_id:77,order_no:'WRONG'}:{status:'pending_confirm',order_no:'ORIGINAL',completed:false}})});
-    const task=await f.claim(); await assert.rejects(f.service.apply(cfg,'plus'));f.advance();changed=true;
-    await assert.rejects(f.service.apply(cfg,'plus'),/归属/);
+    const task=await f.claim(); await assert.rejects(f.service.apply(cfg));f.advance();changed=true;
+    await assert.rejects(f.service.apply(cfg),/归属/);
     assert.equal(f.db.issues[0].order_no,'ORIGINAL');assert.equal(f.db.issues[0].state,'unknown');assert.equal(f.db.cards.length,0);
 });
 
 test('Retry-After is persisted and changing credentials or original parameters never sends another request',async () => {
     const f=serviceFixture({createCard:async () => ({success:true,data:{status:'pending_confirm',order_no:'ORIGINAL',completed:false,retry_after_seconds:120}})}),task=await f.claim();
-    await assert.rejects(f.service.apply(cfg,'plus'));const count=() => f.calls.filter(c => c.operation==='createCard').length;
-    assert.equal(count(),1);f.advance(60000);await assert.rejects(f.service.apply(cfg,'plus'),/重查间隔/);assert.equal(count(),1);
-    f.advance(60000);await assert.rejects(f.service.apply({...cfg,api_key:'another-account'},'plus'),/API Key/);assert.equal(count(),1);
+    await assert.rejects(f.service.apply(cfg));const count=() => f.calls.filter(c => c.operation==='createCard').length;
+    assert.equal(count(),1);f.advance(60000);await assert.rejects(f.service.apply(cfg),/重查间隔/);assert.equal(count(),1);
+    f.advance(60000);await assert.rejects(f.service.apply({...cfg,api_key:'another-account'}),/API Key/);assert.equal(count(),1);
     f.db.issues[0].request_body='{"product_code":"p1","amount":"90.00","quantity":1}';
-    await assert.rejects(f.service.apply(cfg,'plus'),/原开卡参数/);assert.equal(count(),1);assert.equal(f.db.issues.length,1);
+    await assert.rejects(f.service.apply(cfg),/原开卡参数/);assert.equal(count(),1);assert.equal(f.db.issues.length,1);
 });
 
 test('confirmed order success waits for another provider authorization before all plans can reuse the card',async () => {
@@ -586,7 +652,7 @@ test('fresh account shortage before topup locks both the selected card and CDK w
 });
 
 test('fixed 20 USD issue never silently raises the amount to satisfy a higher product minimum',() => {
-    const f=serviceFixture(),rows=f.api.normalizeProducts([{...product,min_initial_amount:25}]);
+    const f=serviceFixture(),rows=f.api.normalizeProducts({list:[{...product,min_initial_amount:25}]});
     assert.throws(() => f.api.chooseProduct(rows,'plus',cfg),/20 USD/);
 });
 
@@ -644,7 +710,7 @@ test('money calculations are decimal-exact and deficits round upward only to cen
 test('card allocation failure prevents any subscription create request',async () => {
     const calls=[];
     const worker=load('orbitcard-worker.js',{'./orbitcard-client':{
-        PLAN_MAP:{plus:'gpt-plus'},fetchPlans:async () => ({success:true,plans:[{type:'gpt-plus'}]}),
+        fetchPlans:async () => ({success:true,plans:[{type:'gpt-plus'}]}),
         request:async (_,operation) => {calls.push(operation); return {success:true,data:{payment_regions:[{code:'US',default:true}]}};}
     }});
     const previous=process.env.ORBITCARD_API_SECRET; process.env.ORBITCARD_API_SECRET='fixture';
@@ -658,7 +724,7 @@ test('card allocation failure prevents any subscription create request',async ()
 test('full worker success settles the reservation and waits for provider authorization without locally incrementing count',async () => {
     const f=serviceFixture(),card=await f.addCard(100),task=await f.claim(),calls=[];f.setCards([{...card,status:'ACTIVE',balance:50}]);
     const worker=load('orbitcard-worker.js',{'./orbitcard-client':{
-        PLAN_MAP:{plus:'gpt-plus'},fetchPlans:async () => ({success:true,plans:[{type:'gpt-plus'}]}),
+        fetchPlans:async () => ({success:true,plans:[{type:'gpt-plus'}]}),
         summary:require('../orbitcard-client').summary,outcome:require('../orbitcard-client').outcome,captcha:() => null,
         request:async (_,operation,body,key) => {
             calls.push({operation,body,key});
@@ -687,7 +753,7 @@ async function runPaymentCore({ plan = 'plus', balance = 50, empty = false, resu
     if (!empty) for (let n = 0; n < count; n++) cards.push({ ...await f.addCard(42 + n), status: 'ACTIVE', balance });
     f.setCards(cards); f.setAccount(account);
     const task = await f.claim(plan), orders = new Map(), provider = require('../orbitcard-client');
-    const transport = { PLAN_MAP: provider.PLAN_MAP, summary: provider.summary, outcome: provider.outcome, captcha: () => null,
+    const transport = { summary: provider.summary, outcome: provider.outcome, captcha: () => null,
         fetchPlans: async () => ({ success: true, plans: Object.values(require('../plan-registry').PROVIDER_PLANS).map(type => ({ type })) }),
         request: async (config, operation, body, key) => {
             requests.push({ operation, body, key, jobKey: config.auditJobKey });
@@ -819,8 +885,11 @@ test('card application requires secondary auth and retired usage routes are abse
     assert.equal((await post('/api/admin/orbitcard/cards/apply',{})).status,403);
     for(const route of ['bind','usage']) assert.equal((await post('/api/admin/orbitcard/cards/42/'+route,{},true)).status,404);
     assert.equal(applications,0);
-    assert.equal((await post('/api/admin/orbitcard/cards/apply',{plan_type:'arbitrary'},true)).status,400);
-    assert.equal((await post('/api/admin/orbitcard/cards/apply',{plan_type:'plus'},true)).status,200);assert.equal(applications,1);
+    for (const body of [{plan_type:'arbitrary'},{plan_type:'plus'},{amount:'100.00'},{product_code:'other'},[]]) {
+        assert.equal((await post('/api/admin/orbitcard/cards/apply',body,true)).status,400);
+    }
+    assert.equal(applications,0);
+    assert.equal((await post('/api/admin/orbitcard/cards/apply',{},true)).status,200);assert.equal(applications,1);
 });
 
 test('eligible cards are inspected in one batch without per-card rereads',async () => {
@@ -945,7 +1014,7 @@ test('catalog service fee does not block card selection; configured cap is passe
     const calls=[];
     try {
         const worker=load('orbitcard-worker.js',{'./orbitcard-client':{
-            PLAN_MAP:{plus:'gpt-plus'},fetchPlans:async () => ({success:true,plans:[{type:'gpt-plus',service_fee:'0.25000000'}]}),
+            fetchPlans:async () => ({success:true,plans:[{type:'gpt-plus',service_fee:'0.25000000'}]}),
             summary:() => ({}),outcome:data => data.status==='succeeded'?'success':'pending',captcha:() => null,
             request:async (_,operation,body) => {
                 calls.push({operation,body});

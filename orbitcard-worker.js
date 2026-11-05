@@ -1,15 +1,16 @@
 'use strict';
 
 const api = require('./orbitcard-client');
-const { clientOrderNo: makeClientOrderNo } = require('./orbitcard-cdk');
+const { CardPreparationError } = require('./orbitcard-card-policy');
 const subscription = require('./orbitcard-subscription-service')(api, entry => require('./runtime-log').push(entry));
 
-async function run({ cfg, planType, session, cdk, setProgress, onSubmission, broadcast, sleep,
+async function run({ cfg, planType, session, setProgress, onSubmission, broadcast, sleep,
     maxPolls = 180, intervalMs = 5000, onConfirmedFailure, onRejectedSubmission,
-    clientOrderNo, attemptKey = 'legacy', selectCard }) {
-    const plan = api.PLAN_MAP[planType];
-    if (!plan) throw new Error(`Orbitcard 尚不支持当前 CDK 套餐: ${planType}`);
-    const identity = clientOrderNo || makeClientOrderNo(cdk, attemptKey);
+    clientOrderNo, selectCard }) {
+    if (typeof clientOrderNo !== 'string' || !clientOrderNo.trim()) {
+        throw new CardPreparationError('缺少已持久化的订阅订单编号，禁止临时生成身份后付款');
+    }
+    const identity = clientOrderNo;
     subscription.validate({ cfg, identity, planType, session });
     if (!String(process.env.ORBITCARD_API_SECRET || '').trim()) throw new Error('服务端尚未配置 ORBITCARD_API_SECRET');
     await subscription.requirePlan(cfg, planType);

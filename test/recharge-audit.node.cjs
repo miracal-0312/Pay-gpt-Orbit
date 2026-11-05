@@ -37,12 +37,12 @@ test('HMAC signs the exact request bytes, host, path and stable idempotency iden
         const api = load('orbitcard-client.js', { './runtime-log': { push: event => events.push(event) }, axios: { request: async request => {
             calls.push(request); return { status: 200, data: { code: 0, data: { task_no: 'SUB-1' } } };
         } } });
-        await api.request({ api_key: 'test-key', base_url: 'https://orbitcard.test:8443', auditJobKey: 'job' }, 'createSubscription', { session_json: { accessToken: 'private' }, text: '中文' }, 'stable-id');
+        await api.request({ api_key: 'test-key', base_url: 'https://orbitcard.test:8443', auditJobKey: 'job' }, 'createSubscription', { client_order_no:'stable-id',plan_type:'gpt-plus',card_id:42,authorized:true,session_json: { accessToken: 'private', text: '中文' } }, 'stable-id');
         const request = calls[0], h = request.headers;
         const canonical = ['ORBITCARD-HMAC-SHA256-V1','test-key',h['X-Timestamp'],h['X-Nonce'],'POST','orbitcard.test:8443','/api/open/v1/createSubscription','',crypto.createHash('sha256').update(request.data).digest('hex'),'stable-id'].join('\n');
         assert.equal(h['X-Signature'], crypto.createHmac('sha256', 'signature-test-secret').update(canonical).digest('hex'));
         assert.equal(h['Idempotency-Key'], 'stable-id'); assert.equal(request.maxRedirects, 0);
-        assert.equal(JSON.parse(request.data).text, '中文'); assert.ok(!JSON.stringify(events).includes('private'));
+        assert.equal(JSON.parse(request.data).session_json.text, '中文'); assert.ok(!JSON.stringify(events).includes('private'));
     } finally {
         if (old === undefined) delete process.env.ORBITCARD_API_SECRET; else process.env.ORBITCARD_API_SECRET = old;
         if (oldKey === undefined) delete process.env.ORBITCARD_API_KEY; else process.env.ORBITCARD_API_KEY = oldKey;
@@ -59,7 +59,7 @@ test('HTTP and network errors generate safe history; nested fields cannot smuggl
             return { status: 502, headers: { 'retry-after': '12' }, data: { code: 59018, request_error: { code: 'relay_timeout', submission_outcome: 'unknown' }, data: { error_code: { accessToken: 'private' } } } };
         } } });
         const cfg = { api_key: 'test-key', auditJobKey: 'job' };
-        const result = await api.request(cfg, 'createSubscription'); assert.equal(result.retryAfterMs, 12000);
+        const result = await api.request(cfg, 'createSubscription', {client_order_no:'stable-id',plan_type:'gpt-plus',card_id:42,authorized:true,session_json:{accessToken:'private'}}, 'stable-id'); assert.equal(result.retryAfterMs, 12000);
         assert.equal(events[1].data.http_status, 502); assert.equal(events[1].data.request_error.submission_outcome, 'unknown');
         assert.equal(api.summary({ error_code: { accessToken: 'private' } }).error_code, undefined);
         assert.deepEqual(api.summary({ payment: { amount: 20, currency: 'USD', card_number: 'private' } }).payment, { amount: 20, currency: 'USD' });
@@ -73,7 +73,7 @@ test('HTTP and network errors generate safe history; nested fields cannot smuggl
 test('sequential original-order requests honor cooldown and Retry-After', async () => {
     let calls = 0;
     const query = load('orbitcard-query.js', { './orbitcard-client': { request: async () => { calls++; return { success: false, status: 429, retryAfterMs: 20000 }; } }, './orbitcard-cdk': {} });
-    const input = { cfg: { base_url: 'https://orbitcard.test' }, task: { job_key: 'cooldown', orbitcard_base_url: 'https://orbitcard.test', orbitcard_client_order_no: 'original' } };
+    const input = { cfg: { base_url: 'https://orbitcard.test' }, task: { job_key: 'cooldown', orbitcard_base_url: 'https://orbitcard.test', orbitcard_client_order_no: 'original', orbitcard_plan_type: 'plus' } };
     await Promise.all([query.refresh(input), query.refresh(input)]);
     const result = await query.refresh(input); assert.equal(calls, 1); assert.ok(result.retryAfterMs > 15000);
 });

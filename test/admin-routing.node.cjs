@@ -37,6 +37,10 @@ test('shared admin handlers preserve login tokens, 2FA failures and route-specif
     assert.equal(login.data.loginPath, '/admin-login'); assert.equal(auth.verifyAdminToken(login.data.token).email, config.email);
     assert.equal(logs.at(-1).event, 'login_success');
     const headers = { Authorization: `Bearer ${login.data.token}`, 'x-admin-secondary-token': auth.issueSecondaryToken(1, '127.0.0.1').token };
+    const urlToken = await fetch(base + `/api/admin/session?token=${encodeURIComponent(login.data.token)}`);
+    assert.equal(urlToken.status, 401, 'URL tokens cannot authenticate administrator HTTP requests');
+    const bearer = await fetch(base + '/api/admin/session?token=ignored', { headers });
+    assert.equal(bearer.status, 200); assert.equal((await bearer.json()).email, config.email);
     const removedSession = await fetch(base + '/api/admin/secondary/session', { headers });
     assert.equal(removedSession.status, 404);
     assert.deepEqual(await post('/api/admin/gpt-api', {}, headers), { status: 400, data: { success: false, message: 'invalid config' } });
@@ -56,4 +60,30 @@ test('shared admin handlers preserve login tokens, 2FA failures and route-specif
     const verified = await post('/api/admin/login/verify-2fa', { challengeToken, method: 'telegram', code: '123456' });
     assert.equal(verified.status, 200); assert.equal(auth.verifyAdminToken(verified.data.token).email, config.email);
     assert.equal(verified.data.setupRequired, undefined); assert.equal(logs.at(-1).detail, '二次验证成功 (telegram)');
+});
+
+test('platform status returns current plans and balance without the removed recent-order query', async t => {
+    const api = require('../orbitcard-client'), previousCheck = api.testConnection;
+    const previousSecret = process.env.ADMIN_TOKEN_SECRET;
+    process.env.ADMIN_TOKEN_SECRET = 's'.repeat(32);
+    api.testConnection = async () => ({success:true,plans:[{type:'gpt-plus'}],balance:{available_balance:'20.00'},checks:[]});
+    const authConfig = {email:'admin@example.test',passwordVersion:1};
+    const store = {
+        getAdminAuthConfig: async () => authConfig,
+        getGptApiConfig: async () => ({base_url:'https://orbitcard.test',api_key:'configured'})
+    };
+    const app = express(); app.use(express.json());
+    require('../admin-http')(app, {store,ensureStoreReady:async()=>{},getTotalActiveJobs:()=>0});
+    const server = app.listen(0,'127.0.0.1'); await once(server,'listening');
+    t.after(async()=>{
+        server.closeAllConnections(); await new Promise(resolve=>server.close(resolve));
+        api.testConnection = previousCheck;
+        if(previousSecret===undefined)delete process.env.ADMIN_TOKEN_SECRET;else process.env.ADMIN_TOKEN_SECRET=previousSecret;
+    });
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/admin/gpt-api/status`, {
+        headers:{Authorization:`Bearer ${auth.issueAdminToken(1,authConfig.email).token}`}
+    });
+    assert.equal(response.status,200); const data = await response.json();
+    assert.deepEqual(data.plans,[{type:'gpt-plus'}]); assert.equal(data.balance.available_balance,'20.00');
+    assert.equal(Object.hasOwn(data,'recent_orders'),false);
 });

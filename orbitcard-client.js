@@ -2,19 +2,20 @@
 
 const axios = require('axios');
 const crypto = require('node:crypto');
-const { DEFAULT_BASE_URL, normalizeBaseUrl } = require('./orbitcard-config');
+const { normalizeBaseUrl } = require('./orbitcard-config');
+const { validateRequest } = require('./orbitcard-api-contract');
 const audit = require('./runtime-log');
 
-const { PROVIDER_PLANS, LEGACY_PLAN_ALIASES } = require('./plan-registry');
-const PLAN_MAP = Object.freeze({ ...PROVIDER_PLANS, ...Object.fromEntries(
-    Object.entries(LEGACY_PLAN_ALIASES).map(([alias, plan]) => [alias, PROVIDER_PLANS[plan]])) });
 const accountCooldowns = new Map();
 const MAX_ACTIVE_REQUESTS = 32;
 const MAX_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 let activeRequests = 0;
 
 async function request(cfg, operation, body = {}, idempotencyKey = '') {
-    if (['createSubscription','createCard','rechargeCard'].includes(operation)) await cfg.executionGuard?.assertOwned();
+    let spec;
+    try { spec = validateRequest(operation, body, idempotencyKey); }
+    catch (error) { return { success: false, error: error.message }; }
+    if (spec.write) await cfg.executionGuard?.assertOwned();
     const key = String(process.env.ORBITCARD_API_KEY || '').trim();
     const secret = String(process.env.ORBITCARD_API_SECRET || '').trim();
     if (!key || !secret) return { success: false, error: '请在服务器环境变量中配置配对的 ORBITCARD_API_KEY 和 ORBITCARD_API_SECRET' };
@@ -22,7 +23,7 @@ async function request(cfg, operation, body = {}, idempotencyKey = '') {
     try {
         url = new URL(normalizeBaseUrl(cfg.base_url));
     } catch (_) { return { success: false, error: 'Orbitcard Base URL 必须为 HTTPS 域名根地址' }; }
-    const path = `/api/open/v1/${operation}`;
+    const path = spec.path;
     const accountIdentity = crypto.createHash('sha256').update(`${url.origin}\n${key}`).digest('hex');
     const startedAt = Date.now();
     const record = (event, details = {}) => audit.push({
@@ -56,7 +57,7 @@ async function request(cfg, operation, body = {}, idempotencyKey = '') {
     if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey;
     activeRequests++;
     try {
-        const timeout = ['createSubscription','createCard'].includes(operation) ? 45000 : 30000;
+        const timeout = spec.timeout;
         const response = await axios.request({ method: 'POST', url: `${url.origin}${path}`, data: raw,
             headers, timeout, signal: AbortSignal.timeout(timeout), maxRedirects: 0,
             maxContentLength: 2 * 1024 * 1024, maxBodyLength: 256 * 1024,
@@ -174,5 +175,4 @@ async function testConnection(cfg) {
         balanceError: balance.success ? null : balance.error, checks };
 }
 
-module.exports = { DEFAULT_BASE_URL, normalizeBaseUrl, request, fetchPlans,
-    testConnection, outcome, summary, captcha, PLAN_MAP };
+module.exports = { request, fetchPlans, testConnection, outcome, summary, captcha };

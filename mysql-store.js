@@ -224,12 +224,6 @@ function safeOrder(raw) {
     try { return summary(JSON.parse(raw || '{}')); } catch (_) { return {}; }
 }
 
-async function listRecentGptApiOrders(limit = 10) {
-    return runQuery(`SELECT job_key, cdk_code, status, message, updated_at, orbitcard_client_order_no,
-        gpt_api_order_id, gpt_api_raw
-        FROM task_logs WHERE orbitcard_client_order_no IS NOT NULL ORDER BY id DESC LIMIT ?`, [Math.min(50, Math.max(1, Number(limit) || 10))]);
-}
-
 async function listRecoverableOrbitcardTasks(limit = 50) {
     return runQuery(`SELECT t.* FROM task_logs t JOIN cdk_codes c ON c.cdk_code = t.cdk_code AND c.is_active = 1
         WHERE t.orbitcard_client_order_no IS NOT NULL
@@ -290,4 +284,4 @@ module.exports = { ...core, ...cardStore, ...orbitcardCdkStore, ...manualStore, 
     updateCdkStatus, updateOrderStatus,
     deliverRedemptionNotifications: redemptionWebhook.deliverPending,
     getRunningTaskByCdk, verifyCdkDetails, getCdkRedemptionStatus, listCdks, listCdksExportPage, insertCdks, markCdksShipped, deleteCdk,
-    listAdminTaskLogs, listRecentGptApiOrders, listRecoverableOrbitcardTasks, noteQueryAttempt, getMaxConcurrentActivations, saveConfig, getAdminData, safeOrder };
+    listAdminTaskLogs, listRecoverableOrbitcardTasks, noteQueryAttempt, getMaxConcurrentActivations, saveConfig, getAdminData, safeOrder };

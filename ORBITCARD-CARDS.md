@@ -22,6 +22,8 @@ getCardList 完整分页读取卡片；cardDetail 以 card_ids 分批读取，�
 
 任务已有补款或任务绑定的开卡申请时先核对原申请，不能换卡重复支付。卡池补卡使用独立的申请，不绑定某一 CDK。任务转人工后不再自动提交订阅或补款；独立卡池维护仍可运行。已提交的原订阅只查询原单。尚未转人工且明确支付失败时仍按原规则最多尝试三张不同卡，不会因重试突破卡池容量。
 
+后台手动申请同样用于共享卡池，不关联套餐，也不接收自定义产品或金额。已有唯一手动开卡申请时继续确认原申请；存在多笔待确认申请或其他订单绑定的申请时停止新增申请，先通过恢复入口处理。历史按套餐记录的申请继续保留原 key 和 Body，不转换成另一笔申请。
+
 ## 后台与数据库
 
 在「Orbitcard 配置 → 套餐卡支付金额（USD）」分别填写 Plus、Pro 100、Pro 200、Pro 500 金额。配置键 orbitcard_plan_prices 使用套餐到十进制定点字符串的 JSON 对象，最多 8 位小数，禁止非正数、指数格式和未知套餐键；缺失或留空时暂停该套餐代充。没有默认报价，不读取已移除的 gpt_plan_prices，也不使用 USDT service_fee 代替。该金额用于准备卡片余额，实际支付以原订单为准；修改地区或平台价格变化时应同步核对配置。配置保存到现有 app_config，无需新增环境变量，升级不会猜测填充历史报价。
@@ -57,13 +59,15 @@ docker compose exec -T app node scripts/inspect-card-transactions.cjs 19531519
 
 API 约定见 [平台协议](Orbitcard-Open-API-V1.md) 和 [订阅协议](orbitcard-subscription-api-v1.md)。HTTP 429 使用账户级冷却和 Retry-After；权限不足、未知返回值和资金不足会停止相关动作，保留日志供核对。
 
+产品接口按当前 `data.list` 读取产品、库存和最低金额。后台返回 `products`、`automatic_application` 与 `application_error`，不再生成 `products[].plans`；套餐 USD 配置仅用于真实代充的资金准备。
+
 ## 本项目管理 API
 
 | 接口 | 行为 |
 | --- | --- |
 | GET /api/admin/orbitcard/cards | 本地卡片快照、authorization_count / authorization_limit、开卡和补款记录 |
 | POST /api/admin/orbitcard/cards/sync | 刷新平台卡片资料和授权记录，维护五张卡池 |
-| POST /api/admin/orbitcard/cards/apply | 二级验证后申请一张卡；池满拒绝 |
+| POST /api/admin/orbitcard/cards/apply，Body `{}` | 二级验证后为共享卡池申请一张卡，或确认唯一原手动申请；池满或申请冲突时拒绝，不接收旧 `plan_type` |
 | GET /api/admin/orbitcard/cards/:cardId/transactions?page=1 | 完整读取授权记录更新次数，并展示指定页最多 50 条脱敏交易 |
 | POST /api/admin/orbitcard/issues/refresh | 恢复原开卡和补款申请 |
 

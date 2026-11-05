@@ -155,30 +155,28 @@ function productAmount(value) {
     try { return money.decimal(money.units(value)); } catch { return null; }
 }
 function normalizeProducts(data) {
-    const products = new Map();
-    function visit(value, depth = 0) {
-        if (depth > 8 || value == null || typeof value !== 'object') return;
-        if (Array.isArray(value)) return value.forEach(item => visit(item, depth + 1));
-        const code = String(value.product_code || value.productCode || '').trim();
-        if (code) {
-            const previous = products.get(code) || {};
-            products.set(code, { ...previous, ...Object.fromEntries(Object.entries(value).filter(([, field]) => field != null && field !== '' && (!Array.isArray(field) || field.length))),
-                product_code: code });
-            return;
-        }
-        for (const [key, child] of Object.entries(value)) {
-            if (['channels','providers','list','products','items','data','1','2','3','channel1','channel2','channel3','vmcardio','fizzbolt','amzkeys'].includes(key)) visit(child, depth + 1);
-        }
+    if (!data || typeof data !== 'object' || Array.isArray(data) || !Array.isArray(data.list)) {
+        throw new CardPreparationError('产品目录响应缺少 data.list，已停止开卡和支付准备');
     }
-    visit(data);
-    return [...products.values()].map(row => ({ product_code: row.product_code,
-        bin: String(row.bin || '').replace(/\D/g, '').slice(0, 8),
-        ...Object.fromEntries(['card_type','network','media','issuing_area'].map(key => [key,String(row[key] || '').slice(0,64)])),
-        min_initial_amount: productAmount(row.min_initial_amount),
-        min_retained_balance: productAmount(row.min_retained_balance),
-        remaining: nonnegativeInteger(row.remaining_open_card_num),
-        inventory_mode: String(row.open_card_inventory_mode || '')
-    }));
+    const seen = new Set();
+    return data.list.map(row => {
+        if (!row || typeof row !== 'object' || Array.isArray(row) || typeof row.product_code !== 'string') {
+            throw new CardPreparationError('产品目录条目缺少有效 product_code，已停止开卡和支付准备');
+        }
+        const code = row.product_code.trim();
+        if (!code || code.length > 128 || /[\x00-\x1f\x7f]/.test(code)) {
+            throw new CardPreparationError('产品目录包含无效产品码，已停止开卡和支付准备');
+        }
+        if (seen.has(code)) throw new CardPreparationError('产品目录包含重复产品码，无法确认库存和最低金额');
+        seen.add(code);
+        return { product_code: code,
+            bin: String(row.bin || '').replace(/\D/g, '').slice(0, 8),
+            ...Object.fromEntries(['card_type','network','media','issuing_area'].map(key => [key,String(row[key] || '').slice(0,64)])),
+            min_initial_amount: productAmount(row.min_initial_amount),
+            min_retained_balance: productAmount(row.min_retained_balance),
+            remaining: nonnegativeInteger(row.remaining_open_card_num),
+            inventory_mode: String(row.open_card_inventory_mode || '') };
+    });
 }
 
 async function products(cfg) {
@@ -243,5 +241,5 @@ function issueResult(data) {
         retryAfterMs: Number.isFinite(Number(source.retry_after_seconds)) ? Math.max(0, Number(source.retry_after_seconds) * 1000) : 0 };
 }
 
-module.exports = { normalizeCard, positiveId, listCards, cardDetail, cardDetails, cardDetailsInBatches, normalizeProducts, products, selection, chooseProduct,
+module.exports = { normalizeCard, positiveId, listCards, cardDetail, cardDetails, cardDetailsInBatches, normalizeProducts, products, chooseProduct,
     chooseOpeningProduct, createCardBody, issueResult };
