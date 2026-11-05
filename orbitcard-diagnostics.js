@@ -1,5 +1,6 @@
 'use strict';
 const poolPolicy = require('./orbitcard-pool');
+const { readAuthorizations } = require('./orbitcard-authorizations');
 
 const crypto = require('node:crypto');
 const { parseSession } = require('./session-input');
@@ -70,27 +71,45 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
             const threshold = prices.reduce((a,b) => a < b ? a : b);
             if (available < threshold) throw new CardPreparationError('账户可用余额不足，实际支付将停止，请联系管理员充值');
             const listed = await cards.listCards(cfg);
-            const existing = await store.cardMethods(cfg.base_url).listCards();
+            const methods = store.cardMethods(cfg.base_url);
+            const existing = await methods.listCards();
             const saved = existing.map(row => ({ ...row }));
             for (const card of listed) if (!saved.some(row => Number(row.card_id) === card.card_id)) {
-                saved.push({ card_id: card.card_id, activation_count: 0 });
+                saved.push({ card_id: card.card_id, authorization_count: null });
             }
             const summaries = listed.map(card => ({ card_id: card.card_id, status: card.provider_status,
-                activation_count: saved.find(row => Number(row.card_id) === card.card_id)?.activation_count ?? null,
-                activation_limit: poolPolicy.MAX_USES,
+                authorization_count: null, authorization_limit: poolPolicy.MAX_USES,
+                authorizations_checked_at: null, authorization_pending: false,
                 busy: Boolean(saved.find(row => Number(row.card_id) === card.card_id)?.active_job),
                 balance: null, currency: card.currency || null }));
             result.selection = { action: 'wait', card_id: null, candidate_count: 0, skipped: [], waiting: [],
                 cards: summaries, reserved: false, account_check: 'passed', snapshot_only: true };
-            // Successful project orders are authoritative. Platform transaction
-            // records are for reconciliation and cannot confirm subscription activation.
+            // Merge observed authorization identities in temporary copies only.
+            // A later settlement must neither double count nor erase an observed authorization.
             const readable = listed.filter(card => card.provider_status !== 'DELETED');
-            result.selection.waiting = readable.filter(card => {
-                const count = saved.find(row => Number(row.card_id) === card.card_id)?.activation_count;
-                return count == null || !Number.isSafeInteger(Number(count)) || Number(count) < 0;
-            }).map(card => ({ card_id: card.card_id, reason: 'activations_unconfirmed' }));
-            if (result.selection.waiting.length) {
-                throw new CardPreparationError('成功开通次数尚未确认，实际支付需要等待数据库升级完成');
+            for (const card of readable) {
+                const row = saved.find(row => Number(row.card_id) === card.card_id);
+                const summary = summaries.find(item => item.card_id === card.card_id);
+                try {
+                    const persisted = await methods.listAuthorizations(card.card_id);
+                    // A concurrent sync may commit new IDs after listCards returned.
+                    // Older cached counts may lag this ledger; missing persisted IDs still fail closed.
+                    if (!Array.isArray(persisted) || (row.authorization_count != null
+                        && (!Number.isSafeInteger(Number(row.authorization_count)) || Number(row.authorization_count) < 0
+                            || Number(row.authorization_count) > new Set(persisted).size))) {
+                        throw new CardPreparationError('已保存的消费授权次数与交易记录不一致，请检查数据库');
+                    }
+                    const observed = await readAuthorizations(provider, cfg, card.card_id);
+                    row.authorization_count = new Set([...persisted, ...observed]).size;
+                    row.authorizations_checked_at = new Date().toISOString();
+                    Object.assign(summary, { authorization_count: row.authorization_count,
+                        authorizations_checked_at: row.authorizations_checked_at,
+                        authorization_pending: row.authorization_pending_count != null && row.authorization_count < Number(row.authorization_pending_count) });
+                } catch (error) {
+                    result.selection.waiting = summaries.filter(item => item.status !== 'DELETED' && item.authorization_count == null)
+                        .map(item => ({ card_id: item.card_id, reason: 'authorizations_unconfirmed' }));
+                    throw error;
+                }
             }
             const relevant = saved.filter(row => readable.some(card => card.card_id === Number(row.card_id))
                 && poolPolicy.eligible(row) && !row.active_job);
@@ -111,7 +130,7 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
                 result.selection.funding_amount = money.cents(selected.deficit);
             } else if (decision.action === 'open') {
                 const canRetire = saved.some(row => !row.active_job
-                    && (row.retirement_key || Number(row.activation_count) >= poolPolicy.MAX_USES)
+                    && (row.retirement_key || Number(row.authorization_count) >= poolPolicy.MAX_USES)
                     && readable.some(card => card.card_id === Number(row.card_id)));
                 if (readable.length >= poolPolicy.SIZE && !canRetire) {
                     result.selection.action = 'wait';
@@ -121,7 +140,7 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
                 const opening = cards.chooseProduct(products, plan, cfg);
                 result.selection.opening = cards.createCardBody(opening);
                 if (available < money.units(opening.amount)) throw new CardPreparationError('账户可用余额不足以首充开卡');
-            } else throw new CardPreparationError('卡片被占用或成功开通次数尚未确认，实际支付需要等待处理');
+            } else throw new CardPreparationError('卡片被占用或消费授权仍待同步，实际支付需要等待处理');
             return result.selection;
         }
         record('preflight_created', '已建立只读支付预检记录', { stage, read_only: true });
@@ -140,7 +159,7 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
         const actions = stage === 'full' ? ['plans','balance','regions','cards']
             : stage === 'cards' ? ['plans','balance','cards'] : [stage];
         const handlers = { plans, balance, regions, cards: selection };
-        const titles = { plans: '核对卡台已开放套餐', balance: '读取账户可用余额', regions: '核对本套餐默认支付地区', cards: '读取实时卡片和本项目成功开通次数，模拟选卡、补款或开卡决策' };
+        const titles = { plans: '核对卡台已开放套餐', balance: '读取账户可用余额', regions: '核对本套餐默认支付地区', cards: '读取实时卡片和成功消费授权记录，模拟选卡、补款或开卡决策' };
         for (const name of actions) if (!await step(name, titles[name], handlers[name])) break;
         return finish();
         function finish() {

@@ -105,7 +105,9 @@ CREATE TABLE IF NOT EXISTS admin_login_logs (
 CREATE TABLE IF NOT EXISTS orbitcard_managed_cards (
     scope CHAR(64) NOT NULL,
     card_id BIGINT UNSIGNED NOT NULL,
-    activation_count INT UNSIGNED NOT NULL DEFAULT 0,
+    authorization_count INT UNSIGNED NULL,
+    authorizations_checked_at DATETIME(3) NULL,
+    authorization_pending_count INT UNSIGNED NULL,
     retirement_key VARCHAR(80) NULL,
     active_job VARCHAR(64) NULL,
     provider_status VARCHAR(32) NOT NULL DEFAULT '',
@@ -120,12 +122,21 @@ CREATE TABLE IF NOT EXISTS orbitcard_managed_cards (
     PRIMARY KEY (scope, card_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS orbitcard_card_authorizations (
+    scope CHAR(64) NOT NULL,
+    card_id BIGINT UNSIGNED NOT NULL,
+    transaction_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (scope, card_id, transaction_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS orbitcard_card_uses (
     job_key VARCHAR(64) NOT NULL PRIMARY KEY,
     scope CHAR(64) NOT NULL,
     card_id BIGINT UNSIGNED NOT NULL,
     plan_type VARCHAR(16) NOT NULL,
     state VARCHAR(16) NOT NULL DEFAULT 'reserved',
+    authorization_baseline INT UNSIGNED NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     KEY idx_oc_card_uses (scope, card_id, state)
@@ -142,6 +153,7 @@ CREATE TABLE IF NOT EXISTS orbitcard_admin_orders (
     plan_name VARCHAR(128) NOT NULL,
     target_email VARCHAR(255) NOT NULL,
     card_id BIGINT UNSIGNED NOT NULL,
+    authorization_baseline INT UNSIGNED NULL,
     issue_key VARCHAR(80) NULL,
     admin_email VARCHAR(128) NOT NULL,
     state VARCHAR(16) NOT NULL DEFAULT 'prepared',

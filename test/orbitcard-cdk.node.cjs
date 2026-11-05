@@ -191,9 +191,9 @@ test('three confirmed failed payments use three distinct cards and then lock the
     assert.equal(f.db.tasks.at(-1).orbitcard_state,'support_locked');
     assert.match(f.db.tasks.at(-1).message,/人工售后/);
     assert.equal(f.db.uses.filter(use=>use.state==='released').length,3);
-    assert.equal(f.db.cards[0].activation_count,0);
-    assert.equal(f.db.cards[1].activation_count,0);
-    assert.equal(f.db.cards[2].activation_count,0);
+    assert.equal(f.db.cards[0].authorization_count,0);
+    assert.equal(f.db.cards[1].authorization_count,0);
+    assert.equal(f.db.cards[2].authorization_count,0);
     assert.ok(f.db.cdks[0].used_at);
 });
 

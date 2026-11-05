@@ -179,9 +179,11 @@ function apiInput() { return { enabled: $('apiEnabled').checked, base_url: $('ba
     orbitcard_max_fee: $('maxFee').value.trim() }; }
 function renderCardRow(card, sync = null) {
     const id = escapeHtml(card.card_id);
-    const usage = `${escapeHtml(card.activation_count ?? '待确认')} / ${escapeHtml(card.activation_limit)} 次成功开通`;
+    const usage = `${escapeHtml(card.authorization_count ?? '待同步')} / ${escapeHtml(card.authorization_limit)} 次成功消费授权`;
     const history = card.retiring ? '待确认删卡'
-        : card.activation_count != null && Number(card.activation_count) >= Number(card.activation_limit) ? '达到上限，停止分配' : '开通确认成功后自动计数';
+        : card.authorization_count != null && Number(card.authorization_count) >= Number(card.authorization_limit) ? '达到上限，停止分配'
+            : card.authorization_pending ? '等待授权同步，暂不分配' : '平台成功消费授权自动累计';
+    const countedAt = card.authorizations_checked_at ? `授权统计时间：${escapeHtml(card.authorizations_checked_at)}` : '尚未完成授权统计';
     const last4 = card.last4 ? `****${escapeHtml(card.last4)}` : '尾号未提供';
     const confirmed = sync?.synced_ids?.includes(Number(card.card_id));
     const snapshot = confirmed ? `本次同步：${sync.checked_at}` : sync?.failed ? '同步失败 · 以下为旧快照'
@@ -189,7 +191,7 @@ function renderCardRow(card, sync = null) {
             : sync?.listed_ids && !sync.listed_ids.includes(Number(card.card_id)) ? '本次平台列表未返回 · 以下为旧快照' : '本地快照 · 未实时查询';
     const labels = { ACTIVE: '正常（ACTIVE）', CANCELLED: '冻结（CANCELLED）', DELETED: '已删除（DELETED）' };
     const active = confirmed && card.provider_status === 'ACTIVE';
-    return `<tr><td><strong class="card-id">${id}</strong><span class="card-meta">${last4}</span><span class="card-meta">${escapeHtml(card.product_code || '产品未知')}</span></td><td><span class="card-meta">${escapeHtml(snapshot)}</span><span class="card-provider-status${active ? ' active' : ''}">${escapeHtml(labels[card.provider_status] || card.provider_status || '未知状态')}</span><span class="card-balance">${escapeHtml(card.balance ?? '未知')} ${escapeHtml(card.currency || '')}</span></td><td><div class="card-usage-list">${usage}</div><span class="card-meta">按本项目确认成功的开通订单累计</span></td><td>${card.active_job ? `<code>${escapeHtml(card.active_job)}</code>` : '<span class="card-idle">空闲</span>'}</td><td><div class="card-row-actions">${history}<button type="button" data-card-transactions="${id}" class="secondary">查看交易</button></div></td></tr>`;
+    return `<tr><td><strong class="card-id">${id}</strong><span class="card-meta">${last4}</span><span class="card-meta">${escapeHtml(card.product_code || '产品未知')}</span></td><td><span class="card-meta">${escapeHtml(snapshot)}</span><span class="card-provider-status${active ? ' active' : ''}">${escapeHtml(labels[card.provider_status] || card.provider_status || '未知状态')}</span><span class="card-balance">${escapeHtml(card.balance ?? '未知')} ${escapeHtml(card.currency || '')}</span></td><td><div class="card-usage-list">${usage}</div><span class="card-meta">${countedAt}</span></td><td>${card.active_job ? `<code>${escapeHtml(card.active_job)}</code>` : '<span class="card-idle">空闲</span>'}</td><td><div class="card-row-actions">${history}<button type="button" data-card-transactions="${id}" class="secondary">查看交易</button></div></td></tr>`;
 }
 async function loadCards(sync = null) {
     const data = await request('/api/admin/orbitcard/cards');
@@ -201,7 +203,7 @@ async function loadCards(sync = null) {
     $('cardRows').innerHTML = data.cards.map(card => renderCardRow(card, sync)).join('') || '<tr><td colspan="5">尚无卡片，请同步或申请。</td></tr>';
     $('cardSyncState').textContent = sync?.failed ? '平台同步失败，下面显示旧的本地快照，不能用于确认当前状态和余额。'
         : sync?.checked_at ? `查询完成：${sync.checked_at}，同步 ${sync.count} 张，详情读取失败 ${sync.failed_ids.length} 张，已移出列表 ${(sync.removed_ids || []).length} 张。数值为本次查询时的快照。`
-            : '状态和余额为本地快照，点击“同步平台卡片”查询最新状态并维护卡池。“刷新本地记录”不会调用平台；成功开通次数来自本项目已确认成功的订单。';
+            : '状态、余额和授权次数为本地快照，点击“同步平台卡片”读取完整交易记录并维护卡池。“刷新本地记录”不会调用平台；消费授权次数包含接口可见的其他项目历史消费。';
     $('issueRows').innerHTML = data.issues.map(issue => `<tr><td>${escapeHtml(issue.created_at)}<br><code>${escapeHtml(issue.issue_key)}</code></td><td>${escapeHtml(issue.product_code)}<br>${escapeHtml(issue.amount)}</td><td>${escapeHtml(cardPlans[issue.plan_type] || issue.plan_type)} / ${escapeHtml(issue.state)}<br>${escapeHtml(issue.provider_status || '')}<br>${escapeHtml(issue.message)}</td><td>${escapeHtml(issue.order_no || '待返回')}<br>${escapeHtml(issue.card_id || '待返回')}</td></tr>`).join('') || '<tr><td colspan="4">暂无开卡申请</td></tr>';
     $('fundingRows').innerHTML=(data.fundings || []).map(funding => `<tr><td>${escapeHtml(funding.created_at)}<br><code>${escapeHtml(funding.job_key)}</code></td><td>${escapeHtml(funding.card_id)}<br>${escapeHtml(funding.amount)} USD</td><td>${escapeHtml(funding.state)} / ${escapeHtml(funding.provider_status)}<br>${escapeHtml(funding.order_no || funding.funding_key)}<br>${escapeHtml(funding.message)}</td><td>${escapeHtml(funding.fee_snapshot || '待确认')}<br>目标余额：${escapeHtml(funding.target_balance)}</td></tr>`).join('') || '<tr><td colspan="4">暂无卡片补款</td></tr>';
 }
@@ -209,20 +211,21 @@ async function loadCardTransactions() {
     const id = Number($('transactionCardId').value), page = Number($('transactionPage').value);
     if (!Number.isSafeInteger(id) || id < 1 || !Number.isSafeInteger(page) || page < 1) throw new Error('请输入有效卡 ID 和页码');
     $('loadTransactions').disabled = true;
-    $('cardTransactions').textContent = '正在读取交易记录…';
+    $('cardTransactions').textContent = '正在读取交易记录并更新成功消费授权次数…';
     let result;
     try {
         result = await request(`/api/admin/orbitcard/cards/${id}/transactions?page=${page}`);
         $('cardTransactions').textContent = JSON.stringify(result.data, null, 2);
+        await loadCards();
     } catch (error) {
-        if (!result) $('cardTransactions').textContent = `交易查询失败：${error.message}。成功开通次数不受交易查询影响。`;
+        if (!result) $('cardTransactions').textContent = `交易查询失败：${error.message}。授权次数未更新，现有次数为旧快照。`;
         throw error;
     } finally { $('loadTransactions').disabled = false; }
 }
 async function synchronizeCards() {
     $('syncCards').disabled = true;
     $('loadCards').disabled = true;
-    $('cardSyncState').textContent = '正在读取平台卡片状态、余额并维护卡池…';
+    $('cardSyncState').textContent = '正在读取平台卡片状态、余额和成功消费授权记录并维护卡池…';
     try {
         const result = await request('/api/admin/orbitcard/cards/sync', {});
         await loadCards(result);

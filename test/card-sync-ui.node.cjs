@@ -11,7 +11,7 @@ function setup(syncResponse, transactionResponse) {
         if(!nodes.has(id))nodes.set(id,{value:'',innerHTML:'',textContent:'',disabled:false,replaceChildren(){},add(){}});
         return nodes.get(id);
     };
-    const card={card_id:42,provider_status:'ACTIVE',balance:'20.00',currency:'USD',activation_count:null,activation_limit:6,last4:'4139'};
+    const card={card_id:42,provider_status:'ACTIVE',balance:'20.00',currency:'USD',authorization_count:null,authorization_limit:6,last4:'4139'};
     const calls=[];
     const request=async url=>{
         calls.push(url);
@@ -59,16 +59,18 @@ test('successful and partial sync distinguish confirmed rows from stale ones',as
     assert.doesNotMatch(f.$('cardRows').innerHTML,/card-provider-status active/);
 });
 
-test('activation usage shows confirmed order counts, unknown counts and retirement states',async()=>{
-    const f=setup(()=>{}); f.card.activation_limit=6;
+test('authorization usage shows synchronized counts, pending counts and retirement states',async()=>{
+    const f=setup(()=>{}); f.card.authorization_limit=6;
     await f.api.loadCards();
-    assert.match(f.$('cardRows').innerHTML,/待确认/);
+    assert.match(f.$('cardRows').innerHTML,/待同步/);
     assert.doesNotMatch(f.$('cardRows').innerHTML,/data-update-card-usage|data-bind-card/);
-    f.card.activation_count=5; await f.api.loadCards();
-    assert.match(f.$('cardRows').innerHTML,/5 \/ 6 次成功开通/);
-    f.card.activation_count=6; await f.api.loadCards();
-    assert.match(f.$('cardRows').innerHTML,/6 \/ 6 次成功开通/);
+    f.card.authorization_count=5; await f.api.loadCards();
+    assert.match(f.$('cardRows').innerHTML,/5 \/ 6 次成功消费授权/);
+    f.card.authorization_count=6; await f.api.loadCards();
+    assert.match(f.$('cardRows').innerHTML,/6 \/ 6 次成功消费授权/);
     assert.match(f.$('cardRows').innerHTML,/达到上限，停止分配/);
+    f.card.authorization_count=5;f.card.authorization_pending=true;await f.api.loadCards();
+    assert.match(f.$('cardRows').innerHTML,/等待授权同步/);
     f.card.retiring=true; await f.api.loadCards();
     assert.match(f.$('cardRows').innerHTML,/待确认删卡/);
 });
@@ -79,30 +81,30 @@ test('manual usage editor is removed',()=>{
     assert.doesNotMatch(source,/async function saveCardUsage|data-bind-card|data-update-card-usage|cardHistoryState|data-open-card-history|data-manage-card-history/);
 });
 
-test('viewing transactions does not change activation counts or maintain the pool',async()=>{
-    const f=setup(()=>{throw Error('must not maintain pool');},()=>({data:{transactions:[
+test('viewing transactions refreshes authorization counts without maintaining the pool',async()=>{
+    const f=setup(()=>{throw Error('must not maintain pool');},card=>{card.authorization_count=3;card.authorizations_checked_at='2026-11-05T12:00:00Z';return {data:{transactions:[
         {id:'authorization',transaction_type:'Authorization',status:'completed'},
         {id:'settlement',transaction_type:'Settlement',status:'completed'}
-    ]}}));
-    f.card.activation_count=2;await f.api.loadCards();
-    assert.match(f.$('cardRows').innerHTML,/2 \/ 6 次成功开通/);
+    ]}};});
+    f.card.authorization_count=2;await f.api.loadCards();
+    assert.match(f.$('cardRows').innerHTML,/2 \/ 6 次成功消费授权/);
     f.$('transactionCardId').value='42';f.$('transactionPage').value='1';
     await f.api.loadCardTransactions();
-    assert.deepEqual(f.calls,['/api/admin/orbitcard/cards','/api/admin/orbitcard/cards/42/transactions?page=1']);
-    assert.match(f.$('cardRows').innerHTML,/2 \/ 6 次成功开通/);
-    assert.doesNotMatch(f.$('cardRows').innerHTML,/清算统计时间/);
+    assert.deepEqual(f.calls,['/api/admin/orbitcard/cards','/api/admin/orbitcard/cards/42/transactions?page=1','/api/admin/orbitcard/cards']);
+    assert.match(f.$('cardRows').innerHTML,/3 \/ 6 次成功消费授权/);
+    assert.match(f.$('cardRows').innerHTML,/授权统计时间：2026/);
     assert.equal(JSON.parse(f.$('cardTransactions').textContent).transactions.length,2);
     assert.equal(f.$('loadTransactions').disabled,false);
 });
 
 test('transaction query failures replace stale results with an error and preserve the old count',async()=>{
     const f=setup(()=>{},()=>{throw Error('HTTP 403');});
-    f.card.activation_count=3;await f.api.loadCards();
+    f.card.authorization_count=3;await f.api.loadCards();
     f.$('transactionCardId').value='42';f.$('transactionPage').value='1';
     f.$('cardTransactions').textContent='previous response';
     await assert.rejects(f.api.loadCardTransactions(),/HTTP 403/);
-    assert.match(f.$('cardTransactions').textContent,/查询失败.*HTTP 403.*成功开通次数不受交易查询影响/);
-    assert.match(f.$('cardRows').innerHTML,/3 \/ 6 次成功开通/);
+    assert.match(f.$('cardTransactions').textContent,/查询失败.*HTTP 403.*授权次数未更新/);
+    assert.match(f.$('cardRows').innerHTML,/3 \/ 6 次成功消费授权/);
     assert.equal(f.$('loadTransactions').disabled,false);
 });
 

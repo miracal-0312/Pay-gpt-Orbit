@@ -122,7 +122,7 @@ test('late success cannot reopen a released attempt or count a card already rele
     await f.store.cardMethods(f.base).reserveCard(42,task.jobKey,'plus');
     await f.settle(task,'failed');
     assert.equal((await f.settle(task,'success')).applied,false);
-    assert.equal(f.db.cdks[0].used_at,null); assert.equal(f.db.cards[0].activation_count,0);
+    assert.equal(f.db.cdks[0].used_at,null); assert.equal(f.db.cards[0].authorization_count,0);
 });
 
 test('a mismatched platform order cannot overwrite an already-bound order', async () => {

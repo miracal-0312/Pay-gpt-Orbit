@@ -17,8 +17,10 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
         const cfg = await config(), methods = store.cardMethods(cfg.base_url);
         const cards = (await methods.listCards()).map(card => ({
             card_id: Number(card.card_id), active_job: card.active_job,
-            activation_count: card.activation_count == null ? null : Number(card.activation_count),
-            activation_limit: MAX_USES,
+            authorization_count: card.authorization_count == null ? null : Number(card.authorization_count),
+            authorization_limit: MAX_USES, authorizations_checked_at: card.authorizations_checked_at,
+            authorization_pending: card.authorization_pending_count != null
+                && (card.authorization_count == null || Number(card.authorization_count) < Number(card.authorization_pending_count)),
             retiring: Boolean(card.retirement_key),
             provider_status: card.provider_status, product_code: card.product_code, last4: card.last4,
             balance: card.balance, currency: card.currency, source: card.source, updated_at: card.updated_at
@@ -89,7 +91,7 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
         const planType = req.body?.plan_type;
         if (!CANONICAL_PLAN_TYPES.includes(planType)) throw new CardPreparationError('请选择有效的充值套餐');
         const card = await cardService.apply(await config(), planType);
-        res.json({ success: true, card, message: '开卡成功，首充 20 USD；成功开通满 6 次后停止分配' });
+        res.json({ success: true, card, message: '开卡成功，首充 20 USD；成功消费授权满 6 次后停止分配' });
     }));
     app.post('/api/admin/orbitcard/issues/refresh', handler(async (req, res) => {
         await cardService.recover(await config());
