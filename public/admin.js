@@ -203,7 +203,7 @@ async function loadCards(sync = null) {
     for (const card of data.cards) $('transactionCardId').add(new Option(`${card.card_id} / ${card.last4 ? `****${card.last4}` : '尾号未提供'}`, card.card_id));
     if (data.cards.some(card => String(card.card_id) === currentCardId)) $('transactionCardId').value = currentCardId;
     $('cardRows').innerHTML = data.cards.map(card => renderCardRow(card, sync)).join('') || '<tr><td colspan="5">尚无卡片，请同步或申请。</td></tr>';
-    $('cardSyncState').textContent = sync?.failed ? '平台同步失败，下面显示旧的本地快照，不能用于确认当前状态和余额。'
+    $('cardSyncState').textContent = sync?.failed ? `平台同步失败${sync.message ? `：${sync.message}` : ''}。下面显示旧的本地快照，不能用于确认当前状态和余额。`
         : sync?.checked_at ? `查询完成：${sync.checked_at}，同步 ${sync.count} 张，详情读取失败 ${sync.failed_ids.length} 张，已移出列表 ${(sync.removed_ids || []).length} 张。数值为本次查询时的快照。`
             : '状态、余额和授权次数为本地快照，点击“同步平台卡片”读取完整交易记录并维护卡池。“刷新本地记录”不会调用平台；消费授权次数包含接口可见的其他项目历史消费。';
     $('issueRows').innerHTML = data.issues.map(issue => `<tr><td>${escapeHtml(issue.created_at)}<br><code>${escapeHtml(issue.issue_key)}</code></td><td>${escapeHtml(issue.product_code)}<br>${escapeHtml(issue.amount)}</td><td>${issue.job_key ? escapeHtml(cardPlans[issue.plan_type] || issue.plan_type) : '共享卡池'} / ${escapeHtml(issue.state)}<br>${escapeHtml(issue.provider_status || '')}<br>${escapeHtml(issue.message)}</td><td>${escapeHtml(issue.order_no || '待返回')}<br>${escapeHtml(issue.card_id || '待返回')}</td></tr>`).join('') || '<tr><td colspan="4">暂无开卡申请</td></tr>';
@@ -233,9 +233,9 @@ async function synchronizeCards() {
         await loadCards(result);
         notice(result.message, result.failed_ids.length ? 'error' : 'success');
     } catch (error) {
-        await loadCards({failed: true}).catch(() => {
+        await loadCards({failed: true, message: error.message}).catch(() => {
             $('cardRows').innerHTML = '<tr><td colspan="5">同步及本地记录读取失败，请重新查询。</td></tr>';
-            $('cardSyncState').textContent = '平台同步失败，无法确认当前卡片信息。';
+            $('cardSyncState').textContent = `平台同步失败：${error.message}。本地记录也读取失败，无法确认当前卡片信息。`;
         });
         throw error;
     } finally {

@@ -1,15 +1,35 @@
 'use strict';
 
 // Read-only troubleshooting: never print credentials, full card details or Session data.
+function integer(value, minimum = 0) {
+    if (typeof value !== 'number' && !(typeof value === 'string' && /^\d+$/.test(value))) return null;
+    const number = Number(value);
+    return Number.isSafeInteger(number) && number >= minimum ? number : null;
+}
+
+function structure(value, depth = 0) {
+    const type = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+    if (type !== 'object' || depth >= 3) return type;
+    return Object.fromEntries(Object.keys(value)
+        .filter(key => /^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(key)).slice(0, 50)
+        .map(key => [key, structure(value[key], depth + 1)]));
+}
+
 function diagnostic(result, cardId, page) {
     const allowed = ['transaction_id', 'id', 'card_id', 'transaction_type', 'type', 'status',
         'amount', 'authorization_amount', 'settlement_amount', 'currency'];
-    const rows = Array.isArray(result.data?.list) ? result.data.list : [];
+    const listValid = Array.isArray(result.data?.list);
+    const rows = listValid ? result.data.list.slice(0, 20) : [];
     return {
         card_id: cardId, page, success: result.success === true,
-        http_status: result.status ?? null, platform_code: result.code ?? null,
-        total: Number.isSafeInteger(Number(result.data?.total)) ? Number(result.data.total) : null,
-        records: rows.slice(0, 20).map(row => Object.fromEntries(allowed
+        http_status: Number.isSafeInteger(result.status) && result.status >= 100 && result.status <= 599 ? result.status : null,
+        platform_code: Number.isSafeInteger(result.code) ? result.code : null,
+        list_valid: listValid,
+        pagination: { page: integer(result.data?.page, 1), page_size: integer(result.data?.page_size, 1) },
+        total: integer(result.data?.total),
+        data_structure: structure(result.data, 2),
+        record_structures: rows.map(row => structure(row)),
+        records: rows.map(row => Object.fromEntries(allowed
             .filter(key => row && ['string', 'number', 'boolean'].includes(typeof row[key]))
             .map(key => [key, typeof row[key] === 'string' ? row[key].slice(0, 128) : row[key]])))
     };

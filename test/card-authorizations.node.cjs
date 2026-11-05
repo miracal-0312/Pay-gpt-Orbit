@@ -101,6 +101,32 @@ test('supports pagination without totals while requiring total presence to stay 
         await assert.rejects(readAuthorizations(apiFor([]), cfg, cardId), CardPreparationError);
 });
 
+test('failed transaction reads identify the card and failing page without exposing provider errors', async () => {
+    const first = Array.from({length:100}, (_, i) => authorization(i));
+    for (const [status, hint] of [[401,/签名凭据/],[403,/transactions:read/],[404,/未找到/],[429,/请求受限/],[500,/平台连接/]]) {
+        await assert.rejects(readAuthorizations({request:async(_,__,body) => body.page === 1
+            ? {success:true,data:{list:first,total:101}}
+            : {success:false,status,code:11000,error:'private-provider-error',data:{secret:'private-value'}}}, cfg, 42), error => {
+            assert.ok(error instanceof CardPreparationError);
+            assert.match(error.message,/卡片 42，交易第 2 页/);
+            assert.ok(error.message.includes(`HTTP ${status}`)); assert.match(error.message,/平台 code 11000/);
+            assert.match(error.message,hint); assert.ok(!error.message.includes('private'));
+            return true;
+        });
+    }
+    await assert.rejects(readAuthorizations({request:async()=>{throw Error('private-network-error');}},cfg,42), error => {
+        assert.match(error.message,/卡片 42，交易第 1 页.*未收到 HTTP 响应/);
+        assert.ok(!error.message.includes('private'));return true;
+    });
+});
+
+test('unknown statuses remain uncounted but identify the affected card and page', async () => {
+    await assert.rejects(readAuthorizations(apiFor([authorization('unknown',{status:'private-unmapped-status'})]),cfg,42), error => {
+        assert.match(error.message,/卡片 42，交易第 1 页.*未知消费授权状态/);
+        assert.ok(!error.message.includes('private'));return true;
+    });
+});
+
 test('an unbounded transaction feed stops at the page limit instead of returning a partial count', async () => {
     let calls = 0;
     const api = { request: async (_, __, body) => {

@@ -3,7 +3,7 @@ const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
-function setup(syncResponse, transactionResponse) {
+function setup(syncResponse, transactionResponse, localResponse) {
     const source=fs.readFileSync(path.join(__dirname,'../public/admin.js'),'utf8');
     const block=source.slice(source.indexOf('function renderCardRow('),source.indexOf('async function loadCdkPlans('));
     const nodes=new Map();
@@ -17,6 +17,7 @@ function setup(syncResponse, transactionResponse) {
         calls.push(url);
         if(url.endsWith('/sync'))return syncResponse();
         if(url.includes('/transactions?'))return transactionResponse(card);
+        if(localResponse)return localResponse(card);
         return {cards:[card],issues:[],fundings:[]};
     };
     const escapeHtml=value=>String(value ?? '').replaceAll('<','&lt;').replaceAll('>','&gt;');
@@ -42,12 +43,43 @@ test('deleted and unavailable cards are omitted from rows after local refresh',a
     }
 });
 test('failed platform sync retains visible warning with old balances and re-enables retry',async()=>{
-    const f=setup(()=>{throw new Error('detail unavailable');});
-    await assert.rejects(f.api.synchronizeCards(),/detail unavailable/);
+    const reason='卡片 42 第 1 页：HTTP 403，接口权限不足';
+    const f=setup(()=>{throw new Error(reason);});
+    await assert.rejects(f.api.synchronizeCards(),{message:reason});
     assert.match(f.$('cardRows').innerHTML,/同步失败.*旧快照/);
     assert.doesNotMatch(f.$('cardRows').innerHTML,/card-provider-status active/);
     assert.match(f.$('cardSyncState').textContent,/不能用于确认/);
+    assert.ok(f.$('cardSyncState').textContent.includes(reason));
+    assert.match(f.$('cardRows').innerHTML,/待同步 \/ 7 次成功消费授权/);
+    assert.doesNotMatch(f.$('cardRows').innerHTML,/0 \/ 7 次成功消费授权/);
     assert.equal(f.$('syncCards').disabled,false);
+    assert.equal(f.$('loadCards').disabled,false);
+});
+
+test('sync failure details remain plain text and a successful retry clears the old reason',async()=>{
+    const reason='<img src=x onerror="alert(1)">';
+    let attempts=0;
+    const f=setup(()=>{
+        if(!attempts++)throw new Error(reason);
+        return {count:1,synced_ids:[42],failed_ids:[],listed_ids:[42],checked_at:'2026-11-05T12:00:00Z',message:'ok'};
+    });
+    Object.defineProperty(f.$('cardSyncState'),'innerHTML',{set(){throw Error('error details must use textContent');}});
+    await assert.rejects(f.api.synchronizeCards(),{message:reason});
+    assert.ok(f.$('cardSyncState').textContent.includes(reason));
+    assert.ok(!f.$('cardRows').innerHTML.includes(reason));
+    await f.api.synchronizeCards();
+    assert.match(f.$('cardSyncState').textContent,/查询完成/);
+    assert.ok(!f.$('cardSyncState').textContent.includes(reason));
+    assert.doesNotMatch(f.$('cardRows').innerHTML,/同步失败/);
+});
+
+test('sync failure retains the platform reason when the local snapshot also fails to load',async()=>{
+    const f=setup(()=>{throw new Error('HTTP 403');},null,()=>{throw new Error('local unavailable');});
+    await assert.rejects(f.api.synchronizeCards(),/HTTP 403/);
+    assert.match(f.$('cardSyncState').textContent,/HTTP 403.*本地记录也读取失败.*无法确认/);
+    assert.match(f.$('cardRows').innerHTML,/同步及本地记录读取失败/);
+    assert.equal(f.$('syncCards').disabled,false);
+    assert.equal(f.$('loadCards').disabled,false);
 });
 test('successful and partial sync distinguish confirmed rows from stale ones',async()=>{
     const f=setup(()=>({count:1,synced_ids:[42],failed_ids:[],listed_ids:[42],checked_at:'2026-10-21T12:00:00Z',message:'ok'}));
