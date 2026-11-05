@@ -107,7 +107,7 @@ Session 必须是 JSON 对象，包含 `user`、`account`、字符串 `accessTok
 | `data/logs/runtime-YYYY-MM-DD.jsonl` | 按 UTC 日期保存的运行事件 |
 | 后台“下载日志” | 管理员认证后下载对应完整任务文件 |
 
-支付前新增 `card_funds_before_subscription` 与 `card_payment_preflight` 资金快照；订阅明确成功后只读复查卡片余额、账户可用余额及首批消费交易数量，写入 `payment_funds_snapshot`。后台“卡片与开卡”可按卡 ID 分页查看脱敏的 `cardTransaction` 记录。交易查询会读取完整分页，持久去重成功 Authorization 的交易 ID；清算等其他记录不增加次数。累计满 7 次停止分配，由卡池维护删除空闲卡并补位。本地订单确认成功不直接增加次数；尚未观察到新授权时保留待同步限制。不能仅据交易记录核销 CDK 或确认订阅成功；订阅结论继续以归属核验后的 `getSubscription` 为准。对账接口失败不改变已确认的订阅结论。
+支付前新增 `card_funds_before_subscription` 与 `card_payment_preflight` 资金快照；订阅明确成功后只读复查卡片余额、账户可用余额及首批消费交易数量，写入 `payment_funds_snapshot`。后台“卡片与开卡”可按卡 ID 分页查看脱敏的 `cardTransaction` 记录。交易查询会读取完整分页，持久去重成功 Authorization 的交易 ID；授权计数不检查交易金额，金额缺失或为零均计次；清算等其他记录不增加次数。累计满 7 次停止分配，由卡池维护删除空闲卡并补位。本地订单确认成功不直接增加次数；尚未观察到新授权时保留待同步限制。不能仅据交易记录核销 CDK 或确认订阅成功；订阅结论继续以归属核验后的 `getSubscription` 为准。对账接口失败不改变已确认的订阅结论。
 
 实际 HTTP 请求记录开始/结束、耗时、操作、HTTP 状态、平台码、请求结果类型、原订单身份及服务费/支付金额白名单字段。不会写 Session 请求体、API Key、HMAC Secret、签名、验证码凭据或含原始请求的 Axios 错误对象。
 

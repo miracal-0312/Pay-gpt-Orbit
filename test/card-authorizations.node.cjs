@@ -5,7 +5,7 @@ const { readAuthorizations } = require('../orbitcard-authorizations');
 const { CardPreparationError } = require('../orbitcard-card-policy');
 const cfg = { base_url: 'https://orbitcard.test' };
 const authorization = (id, extra = {}) => ({ transaction_id: String(id), card_id: 42,
-    transaction_type: 'Authorization', status: 'approved', authorization_amount: '-15.54', ...extra });
+    transaction_type: 'Authorization', status: 'approved', ...extra });
 function apiFor(rows, calls = []) {
     return { request: async (config, operation, body) => {
         calls.push({ config, operation, body });
@@ -25,21 +25,24 @@ test('reads every page and counts successful authorizations without counting the
     assert.ok(calls.every(call => call.config === cfg && call.operation === 'cardTransaction'));
 });
 
-test('recognizes explicit authorization outcomes and skips zero-value verification', async () => {
-    const statuses = ['authorized', 'APPROVED', 'success', 'successful', 'succeeded', 'completed', '授权成功', '已完成'];
+test('recognizes explicit successful authorization outcomes without requiring amounts', async () => {
+    const statuses = ['authorized', 'APPROVED', 'SUCCESS', 'successful', 'succeeded', 'completed', '授权成功', '已完成'];
     const rows = statuses.map((status, i) => authorization(i, { status, transaction_type: i % 2 ? 'aUtHoRiZaTiOn' : '消费授权' }));
-    rows.push(authorization('zero', { authorization_amount: '0.00' }), authorization('zero-number', { authorization_amount: -0 }));
     assert.deepEqual(await readAuthorizations(apiFor(rows), cfg, 42), statuses.map((_, i) => String(i)));
-    assert.deepEqual(await readAuthorizations(apiFor([authorization('signed', { authorization_amount: '+15.54000000' }),
-        authorization('number', { authorization_amount: -15.54 }), authorization('amount', { authorization_amount: undefined, amount: '-2' })]), cfg, 42),
-    ['signed', 'number', 'amount']);
+});
+
+test('counts the reported platform Authorization SUCCESS record with no amount fields', async () => {
+    const row = { transaction_id: 59304931, card_id: 19468968, type: 'Authorization', status: 'SUCCESS' };
+    const api = { request: async () => ({ success: true, status: 200, code: 0,
+        data: { list: [row], total: 1 } }) };
+    assert.deepEqual(await readAuthorizations(api, cfg, row.card_id), ['59304931']);
 });
 
 test('pending, rejected, expired and canceled authorizations do not count until a later success', async () => {
     const statuses = ['pending', 'processing', 'failed', 'declined', 'rejected', 'cancelled', 'canceled', 'reversed', 'expired', 'voided'];
-    const rows = statuses.map((status, i) => authorization(i, { status, authorization_amount: undefined }));
+    const rows = statuses.map((status, i) => authorization(i, { status }));
     assert.deepEqual(await readAuthorizations(apiFor(rows), cfg, 42), []);
-    rows[0].status = 'approved'; rows[0].authorization_amount = '-15.54';
+    rows[0].status = 'approved';
     assert.deepEqual(await readAuthorizations(apiFor(rows), cfg, 42), ['0']);
 });
 
@@ -66,9 +69,12 @@ test('requires stable bounded IDs and card ownership, rejecting duplicate pages'
     assert.deepEqual(await readAuthorizations(apiFor([authorization('Case'), authorization('case')]), cfg, 42), ['Case', 'case']);
 });
 
-test('successful authorization requires a finite signed decimal amount, not a missing or rounded value', async () => {
-    for (const value of [null, undefined, true, {}, NaN, Infinity, 1e14, 1e-9, '', 'bad', '1e2', '1,000', '0.000000001', ' 2.00 '])
-        await assert.rejects(readAuthorizations(apiFor([authorization('bad', { authorization_amount: value })]), cfg, 42), CardPreparationError);
+test('successful authorization counting ignores missing, zero and differently formatted amounts', async () => {
+    const amounts = [{}, { authorization_amount: null }, { authorization_amount: '0.00' }, { amount: 0 },
+        { authorization_amount: '-15.54' }, { amount: '15.54' }, { authorization_amount: 'unavailable' },
+        { amount: { value: '15.54', currency: 'USD' } }, { authorization_amount: 0, amount: '-15.54' }];
+    const rows = amounts.map((fields, i) => authorization(i, fields));
+    assert.deepEqual(await readAuthorizations(apiFor(rows), cfg, 42), amounts.map((_, i) => String(i)));
 });
 
 test('pagination failures never return a partial successful authorization count', async () => {

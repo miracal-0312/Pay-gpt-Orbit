@@ -36,21 +36,6 @@ function transactionId(value) {
         fail('消费交易记录缺少有效的唯一 ID，已停止选卡');
     return id;
 }
-function nonzeroAmount(value) {
-    if (typeof value !== 'number' && typeof value !== 'string')
-        fail('成功授权金额缺失或格式无效，已停止选卡');
-    if (typeof value === 'number') {
-        if (!Number.isFinite(value) || Math.abs(value) >= 1e14)
-            fail('成功授权金额缺失或格式无效，已停止选卡');
-        // A tiny nonzero amount must not be rounded into a zero verification.
-        if (value !== 0 && Math.abs(value) < 1e-8)
-            fail('成功授权金额精度无法确认，已停止选卡');
-        value = value.toFixed(8);
-    }
-    const match = /^[+-]?(\d{1,14})(?:\.(\d{1,8}))?$/.exec(value);
-    if (!match) fail('成功授权金额缺失或格式无效，已停止选卡');
-    return /[1-9]/.test(match[1] + (match[2] || ''));
-}
 
 async function readAuthorizations(api, cfg, cardId) {
     const id = integer(cardId);
@@ -93,7 +78,8 @@ async function readAuthorizations(api, cfg, cardId) {
                 if (type !== 'authorization') continue;
                 const status = typeof row.status === 'string' ? row.status.trim().toLowerCase() : '';
                 if (SUCCESS.has(status)) {
-                    if (nonzeroAmount(row.authorization_amount ?? row.amount)) successful.add(key);
+                    // Usage follows successful authorization records, independent of amount fields.
+                    successful.add(key);
                 } else if (!NOT_SUCCESS.has(status)) {
                     fail('未知消费授权状态，无法确认使用次数，请核对平台响应');
                 }

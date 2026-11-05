@@ -57,6 +57,32 @@ test('seven successful authorizations delete once and replace to five; six autho
     assert.equal(f.calls.filter(c=>c.operation==='createCard').length,1);
 });
 
+test('seven successful authorizations without amounts retire once and refill the five-card pool',async()=>{
+    const f=await setup();
+    const withoutAmount=id=>({transaction_id:`external-${id}`,card_id:42,transaction_type:'Authorization',status:'SUCCESS'});
+    f.ledger.set(42,Array.from({length:6},(_,i)=>withoutAmount(i)));
+    await f.service.synchronize(cfg);
+    const oldCard=f.db.cards.find(card=>card.card_id===42);
+    assert.equal(oldCard.authorization_count,6);
+    assert.equal(oldCard.provider_status,'ACTIVE');
+    assert.equal(policy.eligible(oldCard),true);
+    assert.equal(f.calls.filter(c=>['deleteCard','createCard'].includes(c.operation)).length,0);
+    f.ledger.get(42).push(withoutAmount(6));
+    await f.service.synchronize(cfg);
+    assert.equal(oldCard.authorization_count,7);
+    assert.equal(oldCard.provider_status,'DELETED');
+    assert.equal(policy.eligible(oldCard),false);
+    assert.deepEqual(f.calls.filter(c=>['deleteCard','createCard'].includes(c.operation)).map(c=>c.operation),['deleteCard','createCard']);
+    assert.deepEqual(f.calls.filter(c=>c.operation==='deleteCard').map(c=>c.body.card_id),[42]);
+    assert.equal(f.remote.filter(card=>card.status!=='DELETED').length,5);
+    assert.equal(f.db.cards.find(card=>card.card_id===100).authorization_count,0);
+    await f.service.synchronize(cfg);
+    assert.equal(oldCard.authorization_count,7);
+    assert.equal(f.calls.filter(c=>c.operation==='deleteCard').length,1);
+    assert.equal(f.calls.filter(c=>c.operation==='createCard').length,1);
+    assert.equal(f.remote.filter(card=>card.status!=='DELETED').length,5);
+});
+
 test('the seventh success waits for its authorization and is replaced only after the provider confirms seven',async()=>{
     const f=await setup([6,0,0,0,0]);
     const task=await f.claim();assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),42);
