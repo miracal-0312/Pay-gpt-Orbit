@@ -3,7 +3,7 @@ const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
-function setup(syncResponse) {
+function setup(syncResponse, transactionResponse) {
     const source=fs.readFileSync(path.join(__dirname,'../public/admin.js'),'utf8');
     const block=source.slice(source.indexOf('function renderCardRow('),source.indexOf('async function loadCdkPlans('));
     const nodes=new Map();
@@ -12,11 +12,17 @@ function setup(syncResponse) {
         return nodes.get(id);
     };
     const card={card_id:42,provider_status:'ACTIVE',balance:'20.00',currency:'USD',transaction_count:null,transaction_limit:6,last4:'4139'};
-    const request=async url=>url.endsWith('/sync')?await syncResponse():{cards:[card],issues:[],fundings:[]};
+    const calls=[];
+    const request=async url=>{
+        calls.push(url);
+        if(url.endsWith('/sync'))return syncResponse();
+        if(url.includes('/transactions?'))return transactionResponse(card);
+        return {cards:[card],issues:[],fundings:[]};
+    };
     const escapeHtml=value=>String(value ?? '').replaceAll('<','&lt;').replaceAll('>','&gt;');
-    const api=new Function('$','request','escapeHtml','cardPlans','Option','notice',block+'\nreturn {loadCards,synchronizeCards};')(
+    const api=new Function('$','request','escapeHtml','cardPlans','Option','notice',block+'\nreturn {loadCards,synchronizeCards,loadCardTransactions};')(
         $,request,escapeHtml,{plus:'Plus'},function(){},()=>{});
-    return {api,$,card};
+    return {api,$,card,calls};
 }
 test('local refresh labels cached balances and does not show green live ACTIVE',async()=>{
     const f=setup(()=>{throw new Error('must not call platform');});
@@ -68,6 +74,33 @@ test('manual usage editor is removed',()=>{
     const source=fs.readFileSync(path.join(__dirname,'../public/admin.js'),'utf8');
     assert.doesNotMatch(fs.readFileSync(path.join(__dirname,'../public/admin.html'),'utf8'),/cardHistoryState/);
     assert.doesNotMatch(source,/async function saveCardUsage|data-bind-card|data-update-card-usage|cardHistoryState|data-open-card-history|data-manage-card-history/);
+});
+
+test('viewing transactions refreshes the visible count and its timestamp without lifecycle maintenance',async()=>{
+    const f=setup(()=>{throw Error('must not maintain pool');},card=>{
+        card.transaction_count=2;card.transactions_checked_at='2026-11-05T12:00:00Z';
+        return {data:{transaction_count:2,transactions:[]}};
+    });
+    f.card.transaction_count=0;await f.api.loadCards();
+    assert.match(f.$('cardRows').innerHTML,/0 \/ 6 次成功清算/);
+    f.$('transactionCardId').value='42';f.$('transactionPage').value='1';
+    await f.api.loadCardTransactions();
+    assert.deepEqual(f.calls.slice(-2),['/api/admin/orbitcard/cards/42/transactions?page=1','/api/admin/orbitcard/cards']);
+    assert.match(f.$('cardRows').innerHTML,/2 \/ 6 次成功清算/);
+    assert.match(f.$('cardRows').innerHTML,/清算统计时间：2026-11-05T12:00:00Z/);
+    assert.equal(JSON.parse(f.$('cardTransactions').textContent).transaction_count,2);
+    assert.equal(f.$('loadTransactions').disabled,false);
+});
+
+test('transaction query failures replace stale results with an error and preserve the old count',async()=>{
+    const f=setup(()=>{},()=>{throw Error('HTTP 403');});
+    f.card.transaction_count=3;await f.api.loadCards();
+    f.$('transactionCardId').value='42';f.$('transactionPage').value='1';
+    f.$('cardTransactions').textContent='previous response';
+    await assert.rejects(f.api.loadCardTransactions(),/HTTP 403/);
+    assert.match(f.$('cardTransactions').textContent,/查询失败.*HTTP 403.*上次统计/);
+    assert.match(f.$('cardRows').innerHTML,/3 \/ 6 次成功清算/);
+    assert.equal(f.$('loadTransactions').disabled,false);
 });
 
 test('task rows distinguish unallocated payments from legacy records without obsolete registration actions',()=>{

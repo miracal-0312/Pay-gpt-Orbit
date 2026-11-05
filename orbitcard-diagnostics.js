@@ -71,21 +71,52 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
             if (available < threshold) throw new CardPreparationError('账户可用余额不足，实际支付将停止，请联系管理员充值');
             const listed = await cards.listCards(cfg);
             const existing = await store.cardMethods(cfg.base_url).listCards();
-            const saved = [...existing];
+            const saved = existing.map(row => ({ ...row }));
             for (const card of listed) if (!saved.some(row => Number(row.card_id) === card.card_id)) {
                 saved.push({ card_id: card.card_id, transaction_count: null });
             }
-            const relevant = saved.filter(row => listed.some(card => card.card_id === Number(row.card_id))
+            const summaries = listed.map(card => ({ card_id: card.card_id, status: card.provider_status,
+                transaction_count: null, transaction_limit: poolPolicy.MAX_USES, transactions_checked_at: null,
+                busy: Boolean(saved.find(row => Number(row.card_id) === card.card_id)?.active_job),
+                balance: null, currency: card.currency || null }));
+            result.selection = { action: 'wait', card_id: null, candidate_count: 0, skipped: [], waiting: [],
+                cards: summaries, reserved: false, account_check: 'passed', snapshot_only: true,
+                transactions_complete: false };
+            // Refresh only temporary copies. A failed read must never revive a stale
+            // local count or prevent already-confirmed observations from being shown.
+            const readable = listed.filter(card => card.provider_status !== 'DELETED');
+            for (const card of readable) {
+                const row = saved.find(row => Number(row.card_id) === card.card_id);
+                row.transaction_count = null;
+                row.transactions_checked_at = null;
+            }
+            for (const card of readable) {
+                const row = saved.find(row => Number(row.card_id) === card.card_id);
+                const summary = summaries.find(item => item.card_id === card.card_id);
+                try {
+                    const count = await poolPolicy.countTransactions(provider, cfg, card.card_id);
+                    const checkedAt = new Date().toISOString();
+                    Object.assign(row, { transaction_count: count, transactions_checked_at: checkedAt });
+                    Object.assign(summary, { transaction_count: count, transactions_checked_at: checkedAt });
+                } catch (error) {
+                    result.selection.waiting = readable.filter(item => saved.find(row => Number(row.card_id) === item.card_id).transaction_count == null)
+                        .map(item => ({ card_id: item.card_id, reason: 'transactions_unconfirmed' }));
+                    throw error;
+                }
+            }
+            result.selection.transactions_complete = true;
+            const relevant = saved.filter(row => readable.some(card => card.card_id === Number(row.card_id))
                 && poolPolicy.eligible(row) && !row.active_job);
             const detailed = await cards.cardDetailsInBatches(cfg, relevant.map(row => Number(row.card_id)), { allowPartial: true });
             if (relevant.length && !detailed.length) throw new CardPreparationError('批量卡片详情全部缺失，停止选卡，请联系售后');
             const decision = decideCards({ saved, listed, detailed, products, jobKey: traceId, planType: plan, priceFor: cards.planPrice });
             const selected = decision.candidates[0];
-            result.selection = { action: decision.action, card_id: selected?.card.card_id || null,
-                candidate_count: decision.candidates.length, skipped: decision.skipped, waiting: decision.waiting,
-                cards: detailed.map(card => ({ card_id: card.card_id, status: card.provider_status,
-                    balance: card.balance_amount, currency: card.currency })),
-                reserved: false, account_check: 'passed', snapshot_only: true };
+            for (const card of detailed) {
+                const summary = summaries.find(item => item.card_id === card.card_id);
+                if (summary) Object.assign(summary, { status: card.provider_status, balance: card.balance_amount, currency: card.currency });
+            }
+            Object.assign(result.selection, { action: decision.action, card_id: selected?.card.card_id || null,
+                candidate_count: decision.candidates.length, skipped: decision.skipped, waiting: decision.waiting });
             if (selected) {
                 if (available < selected.price || available < money.units(money.cents(selected.deficit))) {
                     throw new CardPreparationError('账户可用余额不足以完成所选卡片的支付准备');
@@ -95,7 +126,7 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
                 const opening = cards.chooseProduct(products, plan, cfg);
                 result.selection.opening = cards.createCardBody(opening);
                 if (available < money.units(opening.amount)) throw new CardPreparationError('账户可用余额不足以首充开卡');
-            } else throw new CardPreparationError('卡片被占用或历史次数未登记，实际支付需要等待处理');
+            } else throw new CardPreparationError('卡片被占用或成功清算次数尚未确认，实际支付需要等待处理');
             return result.selection;
         }
         record('preflight_created', '已建立只读支付预检记录', { stage, read_only: true });
@@ -114,7 +145,7 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
         const actions = stage === 'full' ? ['plans','balance','regions','cards']
             : stage === 'cards' ? ['plans','balance','cards'] : [stage];
         const handlers = { plans, balance, regions, cards: selection };
-        const titles = { plans: '核对卡台已开放套餐', balance: '读取账户可用余额', regions: '核对本套餐默认支付地区', cards: '实时读取卡片并模拟选卡、补款或开卡决策' };
+        const titles = { plans: '核对卡台已开放套餐', balance: '读取账户可用余额', regions: '核对本套餐默认支付地区', cards: '实时读取卡片和成功清算次数，模拟选卡、补款或开卡决策' };
         for (const name of actions) if (!await step(name, titles[name], handlers[name])) break;
         return finish();
         function finish() {

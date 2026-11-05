@@ -50,6 +50,14 @@ test('malformed, foreign, unknown and incomplete transaction pages fail closed',
     for(const data of [{list:[settlement(1,99)],total:1},{list:[{...settlement(1),status:'mystery'}],total:1},{list:[settlement(1),settlement(1)],total:2},{list:[],total:1},{list:[settlement(1)],total:'bad'}])
         await assert.rejects(policy.countTransactions({request:async()=>({success:true,data})},cfg,42));
 });
+
+test('a completed authorization is zero settlements until a successful settlement appears',async()=>{
+    const rows=[{...settlement('auth'),transaction_type:'Authorization',status:'completed'}];
+    const api={request:async()=>({success:true,data:{list:rows,total:rows.length}})};
+    assert.equal(await policy.countTransactions(api,cfg,42),0);
+    rows.push({...settlement('settled'),status:'completed'});
+    assert.equal(await policy.countTransactions(api,cfg,42),1);
+});
 test('six successful settlements delete once and replace to five; five settlements remain usable',async()=>{
     const f=await setup([6,5,0,0,0]);await f.service.synchronize(cfg);
     assert.equal(f.calls.filter(c=>c.operation==='deleteCard').length,1);

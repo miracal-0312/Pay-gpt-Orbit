@@ -8,27 +8,38 @@ const { PROVIDER_PLANS } = require('../plan-registry');
 const { CardDataError } = require('../orbitcard-card-policy');
 const cardApi = require('../orbitcard-cards-client');
 const session = { accessToken: 'never-log-access', sessionToken: 'never-log-session', account: {}, user: { email: 'preview@example.test' } };
+const settlements = (count, cardId = 42) => Array.from({ length: count }, (_, index) => ({
+    transaction_id: `transaction-${index}`, card_id: cardId, transaction_type: 'Settlement', status: 'success'
+}));
 function fixture() {
-    const events = [], calls = [], cfg = { base_url: 'https://orbitcard.test', orbitcard_payment_regions: { plus: 'PH' } };
+    const events = [], calls = [], writes = [], cfg = { base_url: 'https://orbitcard.test', orbitcard_payment_regions: { plus: 'PH' } };
     const product = { product_code: 'p1', min_initial_amount: 10, min_retained_balance: 0, remaining: 10,
         prices: Object.keys(PROVIDER_PLANS).map(plan_type => ({ plan_type, price: '16.00' })) };
     const live = [{ card_id: 42, provider_status: 'ACTIVE', product_code: 'p1', currency: 'USD', balance_amount: '20.00' }];
     const rows = [{ card_id: 42, transaction_count: 0 }];
-    const state = { available: '100.00', live, rows, details: live, product };
+    const state = { available: '100.00', live, rows, details: live, product, transactions: new Map([[42, []]]) };
     const provider = { fetchPlans: async config => { calls.push(['getSubscriptionPlans',config.auditJobKey]); return { success:true, plans:Object.values(PROVIDER_PLANS).map(type=>({type,name:type})) }; },
         request: async (config, operation, body) => {
-            calls.push([operation,config.auditJobKey]);
-            assert.ok(['getAccountBalance','getSubscriptionPaymentRegions'].includes(operation), 'Read-only operations only');
+            calls.push([operation,config.auditJobKey,body]);
+            assert.ok(['getAccountBalance','getSubscriptionPaymentRegions','cardTransaction'].includes(operation), 'Read-only operations only');
             if(operation==='getAccountBalance')return {success:true,data:{available_balance:state.available}};
+            if(operation==='cardTransaction') {
+                if(state.transactionFailureCardId===body.card_id) return {success:false,status:403,error:'交易读取权限不足'};
+                const transactions=state.transactions.get(body.card_id) || [];
+                return {success:true,data:{list:transactions.slice((body.page-1)*body.page_size,body.page*body.page_size),total:transactions.length}};
+            }
             return {success:true,data:{plan_type:body.plan_type,payment_regions:[{code:'PH',default:true},{code:'US'}]}};
         } };
     const cards = { ...cardApi,
         products: async config => { calls.push(['getProductCode',config.auditJobKey]); return [product]; },
         listCards: async config => { calls.push(['getCardList',config.auditJobKey]); return state.live; },
         cardDetailsInBatches: async (config, ids) => { calls.push(['cardDetail',config.auditJobKey]); if(state.detailError)throw state.detailError;return state.details.filter(card=>ids.includes(card.card_id)); } };
-    const store = { getGptApiConfig: async()=>cfg, cardMethods:()=>({ listCards:async()=>state.rows }) };
+    const write = name => async () => { writes.push(name); throw Error('Diagnostics must not write'); };
+    const store = { getGptApiConfig: async()=>cfg, withCardAllocationLock:write('allocation_lock'),
+        cardMethods:()=>({ listCards:async()=>state.rows, saveTransactionCount:write('save_count'),
+            syncCards:write('sync_cards'), reserveCard:write('reserve_card'), retireCard:write('retire_card') }) };
     const service = createDiagnostics({store,provider,cards,audit:entry=>events.push(entry)});
-    return {service,events,calls,state,cfg};
+    return {service,events,calls,writes,state,cfg};
 }
 test('full preflight checks all four plans with the production selection rules and only read operations', async()=>{
     for(const plan of Object.keys(PROVIDER_PLANS)) {
@@ -41,20 +52,99 @@ test('full preflight checks all four plans with the production selection rules a
         const output=JSON.stringify([result,f.events]);
         for(const secret of ['never-log-access','never-log-session','preview@example.test','prices','16.00'])assert.ok(!output.includes(secret));
         assert.equal(f.state.rows[0].active_job,undefined);
+        assert.deepEqual(f.writes,[]);
+        assert.ok(f.calls.some(([operation])=>operation==='cardTransaction'));
     }
 });
-test('preflight models funding, exhausted-card opening and unconfirmed platform counts without mutating cards',async()=>{
+test('preflight models funding and exhausted-card opening using live counts without mutating cards',async()=>{
     const fund=fixture();fund.state.details=[{...fund.state.live[0],balance_amount:'2.00'}];
     const funding=await fund.service.preflight({stage:'cards',plan_type:'plus'});
     assert.equal(funding.result.selection.action,'fund');assert.equal(funding.result.selection.funding_amount,'14.00');
-    const open=fixture();open.state.rows[0].transaction_count=6;
+    const open=fixture();open.state.transactions.set(42,settlements(6));
     const opening=await open.service.preflight({stage:'cards',plan_type:'plus'});
     assert.equal(opening.result.selection.action,'open');assert.deepEqual(opening.result.selection.opening,{product_code:'p1',amount:'20.00',quantity:1});
     assert.equal(opening.result.selection.skipped[0].reason,'limit_reached');
-    const wait=fixture();wait.state.rows=[];
-    const waiting=await wait.service.preflight({stage:'cards',plan_type:'plus'});
-    assert.equal(waiting.passed,false);assert.equal(waiting.result.selection.action,'wait');
-    assert.equal(waiting.result.selection.waiting[0].reason,'transactions_unconfirmed');
+    assert.equal(open.state.rows[0].transaction_count,0);
+    assert.deepEqual(open.writes,[]);
+});
+
+test('preflight reads new cards without local counts and exposes only safe settlement summaries',async()=>{
+    const f=fixture();f.state.rows=[];
+    f.state.transactions.set(42,[{...settlements(1)[0],card_number:'5556597912341234',cvv:'private-cvv',
+        merchant:'private-merchant',session_json:{accessToken:'private-transaction-session'}}]);
+    const result=await f.service.preflight({stage:'cards',plan_type:'plus'});
+    assert.equal(result.passed,true);assert.equal(result.result.selection.action,'pay');
+    const card=result.result.selection.cards[0];
+    assert.equal(card.card_id,42);assert.equal(card.transaction_count,1);assert.equal(card.transaction_limit,6);
+    assert.ok(Number.isFinite(Date.parse(card.transactions_checked_at)));
+    assert.equal(result.result.selection.transactions_complete,true);
+    assert.deepEqual(f.state.rows,[]);assert.deepEqual(f.writes,[]);
+    const output=JSON.stringify([result,f.events]);
+    for(const secret of ['5556597912341234','private-cvv','private-merchant','private-transaction-session'])assert.ok(!output.includes(secret));
+});
+
+test('preflight replaces stale low and exhausted counts only in its temporary snapshot',async()=>{
+    for(const [savedCount,liveCount,action] of [[0,6,'open'],[6,5,'pay']]) {
+        const f=fixture();f.state.rows[0].transaction_count=savedCount;f.state.transactions.set(42,settlements(liveCount));
+        const before=structuredClone(f.state.rows);
+        const result=await f.service.preflight({stage:'cards',plan_type:'plus'});
+        assert.equal(result.passed,true);assert.equal(result.result.selection.action,action);
+        assert.equal(result.result.selection.cards[0].transaction_count,liveCount);
+        assert.deepEqual(f.state.rows,before);assert.deepEqual(f.writes,[]);
+    }
+});
+
+test('preflight displays live counts for busy and exhausted cards and skips deleted-card queries',async()=>{
+    const f=fixture();
+    f.state.live.push({...f.state.live[0],card_id:43},{...f.state.live[0],card_id:44,provider_status:'DELETED'});
+    f.state.rows.push({card_id:43,transaction_count:0,active_job:'private-active-job'},{card_id:44,transaction_count:0});
+    f.state.transactions.set(42,settlements(6));f.state.transactions.set(43,settlements(3,43));
+    const result=await f.service.preflight({stage:'cards',plan_type:'plus'});
+    assert.equal(result.passed,false);assert.equal(result.result.selection.action,'wait');
+    assert.deepEqual(result.result.selection.cards.map(card=>[card.card_id,card.transaction_count,card.transaction_limit,card.busy]),
+        [[42,6,6,false],[43,3,6,true],[44,null,6,false]]);
+    assert.ok(result.result.selection.cards.slice(0,2).every(card=>Number.isFinite(Date.parse(card.transactions_checked_at))));
+    assert.deepEqual(f.calls.filter(([operation])=>operation==='cardTransaction').map(([, ,body])=>body.card_id),[42,43]);
+    assert.ok(!JSON.stringify([result,f.events]).includes('private-active-job'));assert.deepEqual(f.writes,[]);
+});
+
+test('preflight counts every settlement page before deciding a card is exhausted',async()=>{
+    const f=fixture();f.state.transactions.set(42,settlements(102));
+    const result=await f.service.preflight({stage:'cards',plan_type:'plus'});
+    assert.equal(result.passed,true);assert.equal(result.result.selection.cards[0].transaction_count,102);
+    assert.equal(result.result.selection.action,'open');
+    assert.deepEqual(f.calls.filter(([operation])=>operation==='cardTransaction').map(([, ,body])=>[body.page,body.page_size]),[[1,100],[2,100]]);
+    assert.deepEqual(f.writes,[]);
+});
+
+test('transaction permission failures retain confirmed observations and stop selection without stale counts or writes',async()=>{
+    const f=fixture();f.state.live.push({...f.state.live[0],card_id:43});
+    f.state.rows.push({card_id:43,transaction_count:0});f.state.transactions.set(42,settlements(5));
+    f.state.transactionFailureCardId=43;
+    const before=structuredClone(f.state.rows);
+    const result=await f.service.preflight({stage:'full',plan_type:'plus',session});
+    assert.equal(result.passed,false);assert.equal(result.ready,false);
+    const selection=result.result.selection;
+    assert.equal(selection.action,'wait');assert.equal(selection.card_id,null);assert.equal(selection.candidate_count,0);
+    assert.equal(selection.transactions_complete,false);
+    assert.deepEqual(selection.cards.map(card=>card.transaction_count),[5,null]);
+    assert.ok(Number.isFinite(Date.parse(selection.cards[0].transactions_checked_at)));
+    assert.equal(selection.cards[1].transactions_checked_at,null);
+    assert.deepEqual(selection.waiting,[{card_id:43,reason:'transactions_unconfirmed'}]);
+    assert.ok(!f.calls.some(([operation])=>operation==='cardDetail'));
+    assert.deepEqual(f.state.rows,before);assert.deepEqual(f.writes,[]);
+});
+
+test('preflight does not turn authorization or unknown settlement status into successful usage',async()=>{
+    const authorization=fixture();authorization.state.rows[0].transaction_count=5;
+    authorization.state.transactions.set(42,[{...settlements(1)[0],transaction_type:'Authorization',status:'completed'}]);
+    const observed=await authorization.service.preflight({stage:'cards',plan_type:'plus'});
+    assert.equal(observed.result.selection.cards[0].transaction_count,0);
+    const unknown=fixture();unknown.state.transactions.set(42,[{...settlements(1)[0],status:'unknown-private-status'}]);
+    const result=await unknown.service.preflight({stage:'cards',plan_type:'plus'});
+    assert.equal(result.passed,false);assert.equal(result.result.selection.card_id,null);
+    assert.equal(result.result.selection.cards[0].transaction_count,null);
+    assert.deepEqual(unknown.writes,[]);
 });
 test('invalid Session, disabled region, insufficient balance and broken batch details stop the read-only chain',async()=>{
     await assert.rejects(fixture().service.preflight({stage:'session',request_id:'../../bad',session}));
