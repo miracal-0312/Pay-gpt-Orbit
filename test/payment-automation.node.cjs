@@ -4,6 +4,20 @@ const assert = require('node:assert/strict');
 const factory = require('../payment-automation');
 const fixture = require('./helpers/card-db.cjs');
 
+test('recovery stops a historical queued retry without querying or submitting payment', async () => {
+    const f = fixture(), task = await f.claim();
+    f.db.tasks[0].orbitcard_state = 'retry_waiting';
+    const recovery = require('../order-recovery')({ store: f.store, activeJobs: new Set(), audit() {},
+        query: { refresh: async () => assert.fail('an unsubmitted retry must not query a subscription') } });
+    await recovery.refreshTask(f.db.tasks[0]);
+    assert.equal(f.db.tasks.length, 1);
+    assert.equal(f.db.tasks[0].orbitcard_state, 'support_locked');
+    assert.equal(f.db.tasks[0].status, 'failed');
+    assert.match(f.db.tasks[0].message, /2244527967/);
+    assert.ok(f.db.cdks[0].used_at);
+    await assert.rejects(f.store.assertPaymentAllowed(task.jobKey), factory.PaymentStoppedError);
+});
+
 test('payment guards reject manual, terminal, missing and manually redeemed owners across process restarts', async () => {
     let task = { job_key: 'job-1', cdk_code: 'CODE-TEST', status: 'running', orbitcard_state: 'prepared' };
     let code = { cdk_code: 'CODE-TEST', is_active: 1 };
@@ -42,7 +56,7 @@ test('a pending original-order query cannot undo manual handoff or enable anothe
     await assert.rejects(f.store.assertPaymentAllowed(task.jobKey), factory.PaymentStoppedError);
     const failure = await f.store.recordOrbitcardPaymentFailure(task.jobKey, { clientOrderNo: task.orbitcardClientOrderNo,
         cardId: 42, orderId: 'SUB-1', raw: JSON.stringify({ task_no: 'SUB-1', status: 'failed', subscription_succeeded: false }) });
-    assert.equal(failure.exhausted, true); assert.equal(failure.supportStopped, true);
+    assert.equal(failure.applied, true);
     assert.equal(failure.nextTask, undefined); assert.equal(f.db.tasks.length, 1);
     assert.equal(f.db.tasks[0].orbitcard_state, 'support_locked');
     assert.equal(f.db.cards[0].active_job, null); assert.ok(f.db.cdks[0].used_at);

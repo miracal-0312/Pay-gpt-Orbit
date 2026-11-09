@@ -227,7 +227,7 @@ function safeOrder(raw) {
 async function listRecoverableOrbitcardTasks(limit = 50) {
     return runQuery(`SELECT t.* FROM task_logs t JOIN cdk_codes c ON c.cdk_code = t.cdk_code AND c.is_active = 1
         WHERE t.orbitcard_client_order_no IS NOT NULL
-          AND t.orbitcard_state IN ('prepared','balance_blocked','submitting','pending','manual','success')
+          AND t.orbitcard_state IN ('prepared','balance_blocked','submitting','pending','manual','success','retry_waiting')
           AND (t.status <> 'manual' OR t.orbitcard_state IN ('submitting','pending','manual','success'))
           AND t.id = (SELECT MAX(id) FROM task_logs WHERE cdk_code = t.cdk_code)
           AND (t.orbitcard_state <> 'success' OR JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(t.gpt_api_raw), t.gpt_api_raw, '{}'), '$.fee_status')) = 'charge_pending')

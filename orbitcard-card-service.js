@@ -1,6 +1,6 @@
 'use strict';
 const poolPolicy = require('./orbitcard-pool');
-const { CardPreparationError, AccountBalanceError, CardDataError, CardSwitchExhaustedError } = require('./orbitcard-card-policy');
+const { CardPreparationError, AccountBalanceError, CardDataError, CardSelectionError } = require('./orbitcard-card-policy');
 
 const crypto = require('node:crypto');
 const api = require('./orbitcard-client');
@@ -204,16 +204,15 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
         return {card:await confirmIssue(cfg, locked, issue),products};
     }
 
-    async function reusable(cfg, locked, jobKey, planType, liveCards, products, selection = {}) {
+    async function reusable(cfg, locked, jobKey, planType, liveCards, products) {
         const plan = planFor(planType), live = new Map(liveCards.map(card => [Number(card.card_id),card]));
         const saved = await locked.listCards();
-        const excluded = new Set((selection.excludedCardIds || []).map(Number));
         const owned=saved.filter(row=>row.active_job===jobKey);
-        if(owned.length>1 || owned.some(row=>excluded.has(Number(row.card_id)) || !live.has(Number(row.card_id))
+        if(owned.length>1 || owned.some(row=>!live.has(Number(row.card_id))
             || !poolPolicy.eligible(row))) {
             throw new CardPreparationError('原订单已预占卡片但平台列表或次数不一致，禁止换卡或重复开卡');
         }
-        const relevant=saved.filter(row => live.has(Number(row.card_id)) && live.get(Number(row.card_id)).provider_status !== 'DELETED' && !excluded.has(Number(row.card_id))
+        const relevant=saved.filter(row => live.has(Number(row.card_id)) && live.get(Number(row.card_id)).provider_status !== 'DELETED'
             && poolPolicy.eligible(row)
             && (!row.active_job || row.active_job===jobKey));
         const details=new Map();
@@ -222,13 +221,13 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
                 details.set(card.card_id,card);
         } catch(error) {
             if(!(error instanceof CardDataError)) throw error;
-            throw new CardSwitchExhaustedError('平台批量卡片详情不完整，无法确认可用支付卡；CDK 已锁定，请联系人工售后');
+            throw new CardSelectionError('平台批量卡片详情不完整，无法确认可用支付卡；CDK 已锁定，请联系人工售后');
         }
         if(relevant.length && details.size===0) {
-            throw new CardSwitchExhaustedError('平台卡片列表非空但批量详情全部缺失，无法确认可用支付卡；请联系人工售后');
+            throw new CardSelectionError('平台卡片列表非空但批量详情全部缺失，无法确认可用支付卡；请联系人工售后');
         }
         const decision = decideCards({ saved, listed: liveCards, detailed: [...details.values()], products,
-            jobKey, planType, excludedCardIds: selection.excludedCardIds, priceFor: (_product, plan) => planPrice(cfg, plan) });
+            jobKey, planType, priceFor: (_product, plan) => planPrice(cfg, plan) });
         for (const skipped of decision.skipped) record(jobKey, 'card_unavailable', '卡片已从本次支付选择中排除', skipped);
         for (const card of details.values()) await locked.syncCards([card]);
         record(jobKey, 'card_payment_decision', '支付卡准备决策', {
@@ -272,7 +271,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
                 attachIssue: (key, issueKey) => store.attachManualIssue(selection.manualRequestId, key, issueKey),
                 blockBalance: (key, required, message) => store.blockManualBalance(selection.manualRequestId, key, required, message)
             } : cardMethods;
-            // Every selection (including retries and manual requests) starts with
+            // Every selection (including manual requests) starts with
             // a complete provider snapshot. Never fall back to cached card state.
             async function refreshCards(manage = true) {
                 const listed = await cardsApi.listCards(cfg);
@@ -342,7 +341,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
                     ? await cardsApi.cardDetail(cfg, originalIssue.card_id) : await confirmIssue(cfg, locked, originalIssue);
                 await refreshUsage(cfg, locked, [opened]);
                 const products = await cardsApi.products(cfg);
-                const selected = await reusable(cfg, locked, jobKey, planType, [opened], products, selection);
+                const selected = await reusable(cfg, locked, jobKey, planType, [opened], products);
                 if (!selected || selected.card_id !== Number(opened.card_id)) {
                     throw new CardPreparationError('原开卡申请的卡片暂不可支付，请核对原卡；禁止重新开卡');
                 }
@@ -350,12 +349,12 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
             }
             const products = await cardsApi.products(cfg);
             const listed = await refreshCards();
-            const selected = await reusable(cfg, locked, jobKey, planType, listed, products,selection);
+            const selected = await reusable(cfg, locked, jobKey, planType, listed, products);
             if (selected) return selected.card_id;
             if (listed.length >= poolPolicy.SIZE) throw new CardPreparationError('卡池已满，当前没有可用卡片，请等待或核对卡片状态');
             const {card:opened,products:latestProducts} = await issueFor(cfg, locked, planType, jobKey, products);
-            const newSelection = await reusable(cfg,locked,jobKey,planType,[opened],latestProducts,selection);
-            if (!newSelection) throw new CardSwitchExhaustedError('新卡已开立但当前套餐仍无可用支付卡；CDK 已锁定，请联系人工售后');
+            const newSelection = await reusable(cfg,locked,jobKey,planType,[opened],latestProducts);
+            if (!newSelection) throw new CardSelectionError('新卡已开立但当前套餐仍无可用支付卡；CDK 已锁定，请联系人工售后');
             return newSelection.card_id;
         });
     }

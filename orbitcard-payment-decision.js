@@ -5,13 +5,12 @@ const money = require('./orbitcard-money');
 const { planFor, CardPreparationError } = require('./orbitcard-card-policy');
 
 // Pure decisions over one platform snapshot. No network requests or persistence.
-function decideCards({ saved, listed, detailed, products, jobKey, planType, excludedCardIds = [], priceFor }) {
+function decideCards({ saved, listed, detailed, products, jobKey, planType, priceFor }) {
     const plan = planFor(planType), live = new Map(listed.map(card => [Number(card.card_id), card]));
     const details = new Map(detailed.map(card => [Number(card.card_id), card]));
-    const excluded = new Set(excludedCardIds.map(Number)), candidates = [], skipped = [], waiting = [];
+    const candidates = [], skipped = [], waiting = [];
     for (const row of saved) {
         const id = Number(row.card_id), owned = row.active_job === jobKey;
-        if (excluded.has(id)) { skipped.push({ card_id: id, reason: 'previous_payment_failed' }); continue; }
         if (!live.has(id)) { skipped.push({ card_id: id, reason: 'missing_from_platform_list' }); continue; }
         if (live.get(id).provider_status === 'DELETED') {
             if (owned) throw new CardPreparationError('已预占卡片已注销，请核对原订单');

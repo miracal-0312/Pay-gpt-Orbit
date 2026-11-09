@@ -46,7 +46,7 @@
 
 查单返回 `data.status`、`order_id`、`client_order_no`、`cdk_state` 和安全订单摘要。未知结果保留 CDK。`balance_blocked` 为失败但 CDK 锁定，`funding_pending` 为补款待确认；两者均不可重新兑换绕过。首笔准备任务在账户补足或后台确认卡准备后释放 CDK 并要求重新提交 Session；后续支付重试若准备中断则保留 CDK 转人工售后。存在验证任务时，`captcha` 只包含短时 HTTPS 链接及到期时间；不要持久化。
 
-平台确认订阅终态失败后，同一 CDK 最多发起三笔独立订单，每笔使用不同卡；仅平台明确确认订阅失败后才换卡。查询结果中的 `attempt` 为当前尝试序号，`jobKey` 始终指向首笔任务以方便前台追踪，`attemptJobKey` 为本笔任务。已确认失败的每笔订单均保留日志；第三张卡失败转 `support_locked` 并保留 CDK，提示人工售后。`retry_waiting` 表示服务重启后需对原目标账号重新提交最新 Session；请求异常或结果不明不会启动下一笔。
+平台确认首次订阅终态失败后，任务转 `support_locked`，保留 CDK 并提示售后 QQ 2244527967，不再自动换卡或发起下一笔订阅。错误说明通过脱敏后的 `order.failureCode`、`order.failureMessage` 返回。`attempt`、`jobKey` 和 `attemptJobKey` 保留历史订单兼容语义；旧 `retry_waiting` 记录停止付款并转售后。请求异常或结果不明仍只查询原单。
 
 ## 管理入口
 

@@ -65,8 +65,8 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
             if (task.orbitcard_state === 'success' && orbitcardState !== 'success') return { applied: false, status: 'success' };
             if (task.orbitcard_state === 'support_locked') return { applied: false, status: 'failed' };
             if (['failed', 'rejected'].includes(task.orbitcard_state)) return { applied: false, status: task.status };
-            const manual = requiresManualHandling(task);
             const paymentState = orbitcardState;
+            const manual = requiresManualHandling(task);
             if (manual) {
                 // Handoff is durable: a pending query cannot put the task back in the payment loop.
                 if (!['submitting', 'pending', 'manual'].includes(task.orbitcard_state)
@@ -113,18 +113,11 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
             const [code] = await runQuery('SELECT * FROM cdk_codes WHERE cdk_code = ? FOR UPDATE', [cdk], options);
             const task = (await runQuery('SELECT * FROM task_logs WHERE job_key = ? FOR UPDATE', [jobKey], options))[0];
             const latest = await runQuery('SELECT job_key FROM task_logs WHERE cdk_code = ? ORDER BY id DESC LIMIT 1', [cdk], options);
-            const card = Number(cardId), attempt = Number(task?.orbitcard_retry_attempt_no || 1);
+            const card = Number(cardId);
             if (!task || latest[0]?.job_key !== jobKey || task.orbitcard_client_order_no !== clientOrderNo
                 || Number(task.orbitcard_card_id) !== card || !Number.isSafeInteger(card) || card < 1
-                || !['submitting','pending','manual'].includes(task.orbitcard_state) || !Number.isInteger(attempt) || attempt < 1 || attempt > 3) {
+                || !['submitting','pending','manual'].includes(task.orbitcard_state)) {
                 return { applied: false };
-            }
-            const firstCardId = Number(task.orbitcard_retry_first_card_id || 0);
-            const secondCardId = Number(task.orbitcard_retry_second_card_id || 0);
-            if ((attempt === 2 && (!firstCardId || firstCardId === card))
-                || (attempt === 3 && (!firstCardId || !secondCardId || firstCardId === secondCardId
-                    || firstCardId === card || secondCardId === card))) {
-                throw new Error('支付重试卡片与固定选卡规则不一致');
             }
             const failure = JSON.parse(raw || '{}');
             if (failure.query_source && failure.query_source !== 'upstream') {
@@ -148,53 +141,18 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
                 || (failure.card_id != null && Number(failure.card_id) !== card)) {
                 throw new Error('失败订单归属不一致，不能自动重试');
             }
-            const manual = requiresManualHandling(task);
-            const exhausted = attempt === 3 || manual || Boolean(code?.manual_redeemed_at);
             await runExecute(`UPDATE task_logs SET status = ?, progress = 99, message = ?, orbitcard_state = ?,
                 gpt_api_order_id = ?, gpt_api_raw = ?, session_payload = NULL WHERE job_key = ?`,
             ['failed', code?.manual_redeemed_at ? '原平台订单支付失败；卡密已由人工售后核销，不再重试'
-                : manual ? '原订单已确认失败，任务已转人工处理，不再换卡或充值' : exhausted
-                ? '三张卡支付均已明确失败，CDK 已锁定；请联系人工售后'
-                : `第 ${attempt} 次支付已明确失败，正在准备下一次尝试`,
-            exhausted ? 'support_locked' : 'failed', orderId, raw, jobKey], options);
+                : require('./log-safety').sanitize(failure.failureMessage || '订阅失败，已停止充值，请联系售后QQ 2244527967处理'),
+            'support_locked', orderId, raw, jobKey], options);
             const uses = await runQuery('SELECT card_id, state FROM orbitcard_card_uses WHERE job_key = ?', [jobKey], options);
             if (Number(uses[0]?.card_id) !== card || uses[0]?.state !== 'reserved') {
                 throw new Error('卡片预占记录不一致，不能自动重试');
             }
             await settleCardUse(jobKey, 'failed', options);
             await runExecute('UPDATE cdk_codes SET used_at = COALESCE(used_at, CURRENT_TIMESTAMP) WHERE cdk_code = ?', [cdk], options);
-            if (exhausted) return { applied: true, exhausted: true, supportStopped: manual || Boolean(code?.manual_redeemed_at) };
-            const next = await createTaskLog({ tokenPreview: task.orbitcard_email || 'Orbitcard', cdkCode: cdk, status: 'running', progress: 3 }, options);
-            const identity = require('./orbitcard-cdk').clientOrderNo(cdk, next.jobKey);
-            const first = Number(task.orbitcard_retry_first_card_id || (attempt === 1 ? card : 0)) || null;
-            const second = Number(task.orbitcard_retry_second_card_id || (attempt === 2 ? card : 0)) || null;
-            await runExecute(`UPDATE task_logs SET orbitcard_client_order_no = ?, orbitcard_state = 'retry_waiting',
-                orbitcard_plan_type = ?, orbitcard_email = ?, orbitcard_base_url = ?,
-                orbitcard_retry_root_job_key = ?, orbitcard_retry_attempt_no = ?,
-                orbitcard_retry_first_card_id = ?, orbitcard_retry_second_card_id = ?,
-                orbitcard_api_key_hash = ?, message = ? WHERE job_key = ?`, [identity, task.orbitcard_plan_type, task.orbitcard_email,
-                task.orbitcard_base_url, task.orbitcard_retry_root_job_key || jobKey, attempt + 1,
-                first, second, task.orbitcard_api_key_hash || null,
-                `第 ${attempt} 次支付已明确失败；下一次尝试待开始，CDK 保持占用`, next.jobKey], options);
-            return { applied: true, exhausted: false, nextTask: { ...next, orbitcardClientOrderNo: identity,
-                orbitcardRetryRootJobKey: task.orbitcard_retry_root_job_key || jobKey,
-                orbitcardRetryAttemptNo: attempt + 1, orbitcardRetryFirstCardId: first, orbitcardRetrySecondCardId: second } };
-        });
-    }
-
-    async function claimOrbitcardRetryTask(jobKey, clientOrderNo) {
-        const initial = await runQuery('SELECT cdk_code FROM task_logs WHERE job_key = ?', [jobKey]);
-        if (!initial[0]) return false;
-        return withTransaction(async connection => {
-            const options = { connection }, cdk = initial[0].cdk_code;
-            const [code] = await runQuery('SELECT * FROM cdk_codes WHERE cdk_code = ? FOR UPDATE', [cdk], options);
-            if (code?.manual_redeemed_at) return false;
-            const task = (await runQuery('SELECT * FROM task_logs WHERE job_key = ? FOR UPDATE', [jobKey], options))[0];
-            const latest = await runQuery('SELECT job_key FROM task_logs WHERE cdk_code = ? ORDER BY id DESC LIMIT 1', [cdk], options);
-            if (!task || requiresManualHandling(task) || latest[0]?.job_key !== jobKey || task.orbitcard_state !== 'retry_waiting'
-                || task.orbitcard_client_order_no !== clientOrderNo) return false;
-            await runExecute("UPDATE task_logs SET orbitcard_state = 'prepared', message = '正在准备下一次支付尝试' WHERE job_key = ?", [jobKey], options);
-            return true;
+            return { applied: true };
         });
     }
 
@@ -207,8 +165,9 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
             const task = (await runQuery('SELECT * FROM task_logs WHERE job_key = ? FOR UPDATE', [jobKey], options))[0];
             const latest = await runQuery('SELECT job_key FROM task_logs WHERE cdk_code = ? ORDER BY id DESC LIMIT 1', [cdk], options);
             const selectionExhausted = details.cardSelectionExhausted === true && expectedState === 'prepared';
+            const legacyRetry = details.legacyRetry === true && expectedState === 'retry_waiting';
             if (!task || latest[0]?.job_key !== jobKey || task.orbitcard_state !== expectedState
-                || (Number(task.orbitcard_retry_attempt_no || 1) < 2 && !selectionExhausted)) return { applied: false };
+                || (Number(task.orbitcard_retry_attempt_no || 1) < 2 && !selectionExhausted && !legacyRetry)) return { applied: false };
             // Support escalation releases the card too, so it needs the same
             // transactional funding check as ordinary preparation failure.
             if (await hasPendingPreparation(task, options)) return { applied: false };
@@ -222,5 +181,5 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
     }
 
     return { createOrbitcardTask, getOrbitcardTaskByCdk, settleOrbitcardTask,
-        recordOrbitcardPaymentFailure, claimOrbitcardRetryTask, lockOrbitcardSupport };
+        recordOrbitcardPaymentFailure, lockOrbitcardSupport };
 };

@@ -53,6 +53,33 @@ function challenge(value) {
     link.textContent = '打开人机验证'; $('captchaBox').append(link);
     expiryTimer = setTimeout(clearChallenge, remaining);
 }
+const shownResults = new Set();
+let resultReturnFocus;
+function closeResult() {
+    $('resultModal').hidden = true;
+    resultReturnFocus?.focus();
+}
+$('resultClose').addEventListener('click', closeResult);
+$('resultModal').addEventListener('keydown', event => {
+    if (event.key === 'Escape') { event.preventDefault(); closeResult(); }
+    if (event.key === 'Tab') { event.preventDefault(); $('resultClose').focus(); }
+});
+function showResult(data) {
+    if (!['success', 'failed', 'manual', 'retry'].includes(data.status)) return;
+    const key = `${activeCdk}:${data.attemptJobKey || activeJob}:${data.status}`;
+    if (shownResults.has(key)) return;
+    shownResults.add(key);
+    const success = data.status === 'success';
+    const uncertain = data.status === 'manual';
+    $('resultTitle').textContent = success ? '订阅成功' : uncertain ? '充值结果待确认' : '充值未成功';
+    const reason = data.order?.failureMessage || data.message || '暂未取得具体错误原因';
+    $('resultDescription').textContent = success ? '订阅成功，请等待一会刷新账户状态。'
+        : publicText(`${uncertain ? '充值结果尚未确认，请勿重复充值。\n' : ''}${reason}`);
+    $('resultSupport').textContent = success ? '' : '请联系售后QQ 2244527967处理';
+    if ($('resultModal').hidden) resultReturnFocus = document.activeElement;
+    $('resultModal').hidden = false;
+    $('resultClose').focus();
+}
 function display(data) {
     if (data.jobKey && activeJob && data.jobKey !== activeJob) return false;
     activeJob = data.jobKey || activeJob;
@@ -71,6 +98,7 @@ function display(data) {
     $('progressText').textContent = statusNames[data.status] || data.status;
     message(data.message || statusNames[data.status] || '等待查询', data.status === 'success' ? 'success' : data.status === 'failed' ? 'error' : '');
     $('orderInfo').textContent = `订单：${data.order_id || data.client_order_no || activeJob || '待分配'}`;
+    showResult(data);
     if (['success', 'failed', 'retry'].includes(data.status)) {
         clearTimeout(timer); clearChallenge();
         $('trackingHint').textContent = retry ? '请提交原目标账号的最新 Session 继续。'
@@ -113,6 +141,7 @@ async function refresh(auto = false, expected = generation) {
 function startTracking() { clearTimeout(timer); trackingStarted = Date.now(); pollFailures = 0; $('refreshBtn').hidden = false; return refresh(true); }
 $('cdkInput').addEventListener('input', () => {
     showRedeemStep(1);
+    closeResult();
     generation++; clearTimeout(timer); clearChallenge(); activeCdk = ''; activeJob = ''; activePlanLabel = '';
     $('redeemForm').hidden = true; $('refreshBtn').hidden = true; $('retryBtn').hidden = true; $('progressBox').hidden = true;
     $('sessionInput').value = '';

@@ -176,42 +176,7 @@ test('only one process can claim submission for the same durable order identity'
         expectedState:'prepared',expectedClientOrderNo:task.orbitcardClientOrderNo})).applied,false);
 });
 
-test('three confirmed failed payments use three distinct cards and then lock the CDK', async () => {
-    const f=require('./helpers/card-db.cjs')(),cards=f.store.cardMethods(f.base);
-    await f.addCard(42);await f.addCard(43);await f.addCard(44);
-    let task=await f.claim(),root=task.jobKey;
-    const identities=[];
-    for(let attempt=1;attempt<=3;attempt++) {
-        const cardId=41+attempt;
-        if(attempt>1) assert.equal(await f.store.claimOrbitcardRetryTask(task.jobKey,task.orbitcardClientOrderNo),true);
-        assert.ok(await cards.reserveCard(cardId,task.jobKey,'plus'));
-        const claimed=await f.store.settleOrbitcardTask(task.jobKey,{status:'running',orbitcardState:'submitting',
-            expectedState:'prepared',expectedClientOrderNo:task.orbitcardClientOrderNo});
-        assert.equal(claimed.applied,true);
-        identities.push(task.orbitcardClientOrderNo);
-        const result=await f.store.recordOrbitcardPaymentFailure(task.jobKey,{clientOrderNo:task.orbitcardClientOrderNo,
-            cardId,orderId:`SUB-${attempt}`,raw:JSON.stringify({task_no:`SUB-${attempt}`,client_order_no:task.orbitcardClientOrderNo,
-                card_id:cardId,status:'failed',subscription_succeeded:false})});
-        assert.equal(result.applied,true);
-        if(attempt<3) {
-            assert.equal(result.exhausted,false);
-            task=result.nextTask;
-            assert.equal(task.orbitcardRetryAttemptNo,attempt+1);
-            assert.equal(task.orbitcardRetryRootJobKey,root);
-            assert.equal(f.db.cdks[0].used_at!==null,true);
-        } else assert.equal(result.exhausted,true);
-    }
-    assert.equal(new Set(identities).size,3);
-    assert.equal(f.db.tasks.at(-1).orbitcard_state,'support_locked');
-    assert.match(f.db.tasks.at(-1).message,/人工售后/);
-    assert.equal(f.db.uses.filter(use=>use.state==='released').length,3);
-    assert.equal(f.db.cards[0].authorization_count,0);
-    assert.equal(f.db.cards[1].authorization_count,0);
-    assert.equal(f.db.cards[2].authorization_count,0);
-    assert.ok(f.db.cdks[0].used_at);
-});
-
-test('a confirmed failure rotates the order once; unknown results never rotate it',async () => {
+test('first confirmed failure stops payment; unknown results never create another order',async () => {
     const f=require('./helpers/card-db.cjs')(),task=await f.claim();await f.addCard(42);
     await f.store.cardMethods(f.base).reserveCard(42,task.jobKey,'plus');
     await f.store.settleOrbitcardTask(task.jobKey,{status:'running',orbitcardState:'submitting',
@@ -224,29 +189,11 @@ test('a confirmed failure rotates the order once; unknown results never rotate i
     const failed={...base,raw:JSON.stringify({task_no:'SUB-1',status:'failed',subscription_succeeded:false})};
     const results=await Promise.all([f.store.recordOrbitcardPaymentFailure(task.jobKey,failed),f.store.recordOrbitcardPaymentFailure(task.jobKey,failed)]);
     assert.equal(results.filter(item=>item.applied).length,1);
-    assert.equal(f.db.tasks.length,2);
-    assert.equal(f.db.tasks[1].orbitcard_state,'retry_waiting');
-    assert.equal((await f.store.claimOrbitcardRetryTask(f.db.tasks[1].job_key,f.db.tasks[1].orbitcard_client_order_no)),true);
-    assert.equal((await f.store.claimOrbitcardRetryTask(f.db.tasks[1].job_key,f.db.tasks[1].orbitcard_client_order_no)),false);
-});
-
-test('a rejected second attempt keeps its CDK locked for human support',async () => {
-    const f=require('./helpers/card-db.cjs')();await f.addCard(42);
-    const first=await f.claim();await f.store.cardMethods(f.base).reserveCard(42,first.jobKey,'plus');
-    await f.store.settleOrbitcardTask(first.jobKey,{status:'running',orbitcardState:'submitting',
-        expectedState:'prepared',expectedClientOrderNo:first.orbitcardClientOrderNo});
-    const rotated=await f.store.recordOrbitcardPaymentFailure(first.jobKey,{clientOrderNo:first.orbitcardClientOrderNo,
-        cardId:42,orderId:'SUB-1',raw:JSON.stringify({task_no:'SUB-1',status:'failed',subscription_succeeded:false})});
-    const second=rotated.nextTask;await f.store.claimOrbitcardRetryTask(second.jobKey,second.orbitcardClientOrderNo);
-    await f.store.cardMethods(f.base).reserveCard(42,second.jobKey,'plus');
-    await f.store.settleOrbitcardTask(second.jobKey,{status:'running',orbitcardState:'submitting',
-        expectedState:'prepared',expectedClientOrderNo:second.orbitcardClientOrderNo});
-    assert.equal((await f.store.lockOrbitcardSupport(second.jobKey,'submitting','请联系人工售后',
-        {orderId:'REJECTED-2',raw:'{"status":"rejected"}'})).applied,true);
-    assert.equal(f.db.tasks.at(-1).orbitcard_state,'support_locked');
-    assert.equal(f.db.tasks.at(-1).gpt_api_order_id,'REJECTED-2');
-    assert.equal(f.db.uses.at(-1).state,'released');
+    assert.equal(f.db.tasks.length,1);
+    assert.equal(f.db.tasks[0].orbitcard_state,'support_locked');
+    assert.equal(f.db.uses[0].state,'released');
     assert.ok(f.db.cdks[0].used_at);
+    assert.equal(results.filter(item=>item.applied).length,1);
 });
 
 test('abnormal card exhaustion locks the CDK before the first subscription submission',async () => {
@@ -362,7 +309,7 @@ test('platform default and legacy aliases preserve region behavior without an un
     assert.equal(pinned.payment_region, 'US');
 });
 
-test('worker retries only after a verified terminal upstream failure',async () => {
+test('worker records a verified terminal failure without submitting again',async () => {
     const {worker,api}=modules(),operations=[],confirmed=[];
     api.fetchPlans=async()=>({success:true,plans:[{type:'gpt-plus'}]});
     api.request=async (_,operation) => {
@@ -376,15 +323,15 @@ test('worker retries only after a verified terminal upstream failure',async () =
         const result=await worker.run({cfg:{},planType:'plus',cdk:'CDK-TEST',clientOrderNo:'ORDER-1',
             session:{accessToken:'private',user:{email:'target@example.test'},account:{}},selectCard:async()=>42,
             setProgress:async()=>{},onSubmission:async()=>{},broadcast:()=>{},sleep:async()=>{},maxPolls:1,
-            onConfirmedFailure:failure=>{confirmed.push(failure);return {exhausted:true};}});
-        assert.deepEqual(result,{exhausted:true});
+            onConfirmedFailure:failure=>{confirmed.push(failure);return {applied:true};}});
+        assert.deepEqual(result,{applied:true});
         assert.deepEqual(operations,['createSubscription','getSubscription']);
         assert.equal(confirmed.length,1);assert.equal(confirmed[0].clientOrderNo,'ORDER-1');
         assert.equal(confirmed[0].cardId,42);
     } finally {if(previous===undefined)delete process.env.ORBITCARD_API_SECRET;else process.env.ORBITCARD_API_SECRET=previous;}
 });
 
-test('rejected submission during a retry locks support instead of releasing the CDK',async () => {
+test('explicitly rejected submission ends without another payment',async () => {
     const {worker,api}=modules(),states=[];
     api.fetchPlans=async()=>({success:true,plans:[{type:'gpt-plus'}]});
     api.request=async()=>({success:false,data:{task_no:'REJECTED-2'},requestError:{submission_outcome:'rejected'}});
@@ -392,14 +339,13 @@ test('rejected submission during a retry locks support instead of releasing the 
     try {
         const result=await worker.run({cfg:{},planType:'plus',cdk:'CDK-TEST',clientOrderNo:'ORDER-2',
             session:{accessToken:'private',user:{email:'target@example.test'},account:{}},selectCard:async()=>42,
-            setProgress:async (_,__,___,extra)=>states.push(extra.orbitcardState),onSubmission:async()=>{},
-            onRejectedSubmission:rejection=>({supportLocked:true,orderId:rejection.orderId})});
-        assert.deepEqual(result,{supportLocked:true,orderId:undefined});
-        assert.deepEqual(states,['submitting']);
+            setProgress:async (_,__,___,extra)=>states.push(extra.orbitcardState),onSubmission:async()=>{}});
+        assert.equal(result,true);
+        assert.deepEqual(states,['submitting','rejected']);
     } finally {if(previous===undefined)delete process.env.ORBITCARD_API_SECRET;else process.env.ORBITCARD_API_SECRET=previous;}
 });
 
-test('restart query records confirmed failure for retry but never resubmits an unknown order',async () => {
+test('restart query records confirmed failure without resubmitting',async () => {
     const {query,api}=modules(),task={job_key:'restart-retry-1',orbitcard_client_order_no:'ORDER-1',
         orbitcard_base_url:'https://orbitcard.test',orbitcard_plan_type:'plus',orbitcard_email:'target@example.test',orbitcard_card_id:42};
     const calls=[];
@@ -408,8 +354,8 @@ test('restart query records confirmed failure for retry but never resubmits an u
         status:'failed',subscription_succeeded:false}};};
     const result=await query.refresh({cfg:{base_url:'https://orbitcard.test'},task,
         persist:async()=>{throw Error('must keep CDK locked')},
-        onConfirmedFailure:async (_,failure)=>{assert.equal(failure.cardId,42);return {applied:true,exhausted:false};}});
-    assert.equal(result.retrying,true);assert.deepEqual(calls,['getSubscription']);
+        onConfirmedFailure:async (_,failure)=>{assert.equal(failure.cardId,42);return {applied:true};}});
+    assert.equal(result.applied,true);assert.deepEqual(calls,['getSubscription']);
 });
 
 async function runWorker(responses) {

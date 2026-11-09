@@ -7,7 +7,7 @@ class CardPreparationError extends Error {}
 class AccountBalanceError extends CardPreparationError {}
 class FundingPendingError extends CardPreparationError {}
 class CardDataError extends CardPreparationError {}
-class CardSwitchExhaustedError extends CardPreparationError {}
+class CardSelectionError extends CardPreparationError {}
 
 function planFor(planType) {
     return paymentPlan(planType);
@@ -29,4 +29,4 @@ function settlementState(current, orbitcardState) {
 }
 
 module.exports = { planFor, cardScope, settlementState, CardPreparationError, AccountBalanceError, FundingPendingError,
-    CardDataError, CardSwitchExhaustedError };
+    CardDataError, CardSelectionError };

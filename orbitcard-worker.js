@@ -5,7 +5,7 @@ const { CardPreparationError } = require('./orbitcard-card-policy');
 const subscription = require('./orbitcard-subscription-service')(api, entry => require('./runtime-log').push(entry));
 
 async function run({ cfg, planType, session, setProgress, onSubmission, broadcast, sleep,
-    maxPolls = 180, intervalMs = 5000, onConfirmedFailure, onRejectedSubmission,
+    maxPolls = 180, intervalMs = 5000, onConfirmedFailure,
     clientOrderNo, selectCard }) {
     if (typeof clientOrderNo !== 'string' || !clientOrderNo.trim()) {
         throw new CardPreparationError('缺少已持久化的订阅订单编号，禁止临时生成身份后付款');
@@ -18,7 +18,7 @@ async function run({ cfg, planType, session, setProgress, onSubmission, broadcas
     if (typeof selectCard !== 'function') throw new Error('自动选卡服务尚未初始化');
     const cardId = Number(await selectCard());
     if (!Number.isSafeInteger(cardId) || cardId <= 0) throw new Error('自动选卡未返回有效平台卡 ID');
-    // Fixed within an attempt; a confirmed failed attempt can use a new identity.
+    // The durable order identity is fixed for the entire payment.
     const prepared = subscription.prepare({ cfg, identity, planType, cardId, session });
     // Persist the binding before any remote write, so a crash can only trigger a query.
     await setProgress('running', 20, '正在提交 Orbitcard 订阅订单...', {
@@ -32,8 +32,6 @@ async function run({ cfg, planType, session, setProgress, onSubmission, broadcas
     let last = created.snapshot;
     // Nonzero create codes may still carry an accepted order. Never infer failure from HTTP/code.
     if (created.rejected) {
-        if (onRejectedSubmission) return onRejectedSubmission({ clientOrderNo: identity, cardId, orderId,
-            raw: JSON.stringify(last) });
         await setProgress('failed', 0, 'Orbitcard 已确认拒绝提交，CDK 已释放，请检查配置和 Session 后重试', {
             orbitcardState: 'rejected', gptApiOrderId: orderId, gptApiRaw: JSON.stringify(last)
         });

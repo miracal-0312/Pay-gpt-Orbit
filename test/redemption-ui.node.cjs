@@ -41,6 +41,41 @@ function setup() {
 const flush = () => new Promise(setImmediate);
 const reply = data => ({ ok: true, status: 200, json: async () => data });
 
+test('terminal result shows a success notice only once across repeated polling', async () => {
+    const f = setup();
+    f.respond({ success: true, data: { jobKey: 'job-1', status: 'success' } });
+    await f.refresh();
+    assert.equal(f.node('resultModal').hidden, false);
+    assert.match(f.node('resultDescription').textContent, /订阅成功.*刷新账户状态/);
+    assert.equal(f.node('resultSupport').textContent, '');
+    f.node('resultClose').handlers.click();
+    await f.refresh();
+    assert.equal(f.node('resultModal').hidden, true);
+});
+
+test('failed result displays provider reason as text and includes support contact', async () => {
+    const f = setup();
+    const reason = '该账号已有订阅 <script>alert(1)</script>';
+    f.respond({ success: true, data: { jobKey: 'job-1', status: 'failed',
+        message: '充值失败', order: { failureMessage: reason } } });
+    await f.refresh();
+    assert.equal(f.node('resultDescription').textContent, reason);
+    assert.match(f.node('resultSupport').textContent, /2244527967/);
+});
+
+test('manual result remains uncertain and a later success gets a new notice', async () => {
+    const f = setup();
+    f.respond({ success: true, data: { jobKey: 'job-1', status: 'manual' } });
+    await f.refresh();
+    assert.equal(f.node('resultTitle').textContent, '充值结果待确认');
+    assert.match(f.node('resultDescription').textContent, /请勿重复充值/);
+    f.node('resultClose').handlers.click();
+    f.respond({ success: true, data: { jobKey: 'job-1', status: 'success' } });
+    await f.refresh();
+    assert.equal(f.node('resultModal').hidden, false);
+    assert.equal(f.node('resultTitle').textContent, '订阅成功');
+});
+
 test('querying a waiting retry keeps the Session form usable for the same order', async () => {
     const f = setup();
     f.respond({ success: true, data: { provider: 'orbitcard', jobKey: 'job-1', status: 'retry' } });

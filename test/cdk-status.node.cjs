@@ -201,8 +201,8 @@ test('late preparation release and previously queued payment retry cannot reopen
     await f.settle(task, 'rejected');
     assert.ok(f.db.cdks[0].used_at);
     f.db.tasks[0].orbitcard_state = 'retry_waiting';
-    assert.equal(await f.store.claimOrbitcardRetryTask(task.jobKey, task.orbitcardClientOrderNo), false);
-    assert.equal(f.db.tasks[0].orbitcard_state, 'retry_waiting');
+    assert.equal((await f.store.lockOrbitcardSupport(task.jobKey, 'retry_waiting', 'Automatic retry disabled', { legacyRetry: true })).applied, true);
+    assert.equal(f.db.tasks[0].orbitcard_state, 'support_locked');
     assert.equal(await f.store.createOrbitcardTask({ cdk: f.db.cdks[0].cdk_code, planType: 'plus' }), null);
 });
 

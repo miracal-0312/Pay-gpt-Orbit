@@ -68,7 +68,7 @@ test('existing Orbitcard or historical reservations resume even when new orders 
         const res = await f.request(); assert.equal(res.data.provider,provider); assert.equal(res.data.jobKey,'original-job'); assert.deepEqual(f.events,[]);
     }
 });
-test('a waiting payment retry resumes only with the same account and API Key',async () => {
+test('a historical waiting retry returns its original order without dispatching payment',async () => {
     const old=process.env.ORBITCARD_API_SECRET;process.env.ORBITCARD_API_SECRET='test-secret';
     try {
         const keyHash=require('node:crypto').createHash('sha256').update('key').digest('hex');
@@ -77,13 +77,12 @@ test('a waiting payment retry resumes only with the same account and API Key',as
                 orbitcard_client_order_no:'ORDER-2',orbitcard_retry_root_job_key:'attempt-1',orbitcard_retry_attempt_no:2,
                 orbitcard_retry_first_card_id:42,orbitcard_api_key_hash:keyHash,orbitcard_email:session.user.email,
                 orbitcard_base_url:'https://orbitcard.test'}),
-            claimOrbitcardRetryTask:async (...args)=>{f.events.push(['retry-claim',...args]);return true;},
             createOrbitcardTask:async()=>{throw Error('must keep existing CDK chain');}});
-        assert.equal((await f.request({cdk:'CDK-TEST',session:JSON.stringify({...session,user:{email:'other@example.test'}})})).code,409);
+        assert.equal((await f.request({cdk:'CDK-TEST',session:JSON.stringify({...session,user:{email:'other@example.test'}})})).code,200);
         const accepted=await f.request();assert.equal(accepted.code,200);
         assert.equal(accepted.data.jobKey,'attempt-1');
-        assert.equal(f.events.filter(event=>event[0]==='retry-claim').length,1);
-        assert.equal(f.events.filter(event=>event[0]==='worker').length,1);
+        assert.equal(f.events.filter(event=>event[0]==='retry-claim').length,0);
+        assert.equal(f.events.filter(event=>event[0]==='worker').length,0);
     } finally {if(old===undefined)delete process.env.ORBITCARD_API_SECRET;else process.env.ORBITCARD_API_SECRET=old;}
 });
 test('admission capacity is reserved before an asynchronous task insert', async () => {
@@ -289,7 +288,7 @@ test('production dependency graph and Dockerfile contain no browser or Python ru
     assert.ok(Object.keys(lock.packages).every(key => !/playwright|puppeteer|torch|opencv|transformers/.test(key)));
     const dockerfile = fs.readFileSync(path.join(root,'Dockerfile'),'utf8');
     assert.ok(!/python|pip install|playwright|chromium|xvfb|vnc|apt-get/i.test(dockerfile));
-    assert.ok(fs.readFileSync(path.join(root,'.dockerignore'),'utf8').split('\n').includes('data'));
+    assert.ok(fs.readFileSync(path.join(root,'.dockerignore'),'utf8').split(/\r?\n/).includes('data'));
     for (const file of ['index.js','stripe-payment.js','payment-retry.js','local-worker.js','session-auth.js','hcaptcha/solver.py','requirements-hcaptcha.txt']) assert.equal(fs.existsSync(path.join(root,file)),false,file);
 });
 

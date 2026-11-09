@@ -25,7 +25,12 @@ module.exports = function createRecovery({ store, query, activeJobs, audit, noti
         if (requiresManualHandling(task) && !['submitting', 'pending', 'manual'].includes(task.orbitcard_state)) {
             return { success: true, querySkipped: true };
         }
-        if (['retry_waiting','support_locked'].includes(task.orbitcard_state)) return { success: true, querySkipped: true };
+        if (task.orbitcard_state === 'retry_waiting') {
+            await lockSupport(task.job_key, 'retry_waiting',
+                '自动重试已停用，请联系售后QQ 2244527967处理', { legacyRetry: true });
+            return { success: true, querySkipped: true };
+        }
+        if (task.orbitcard_state === 'support_locked') return { success: true, querySkipped: true };
         if(task.orbitcard_state==='balance_blocked') {
             if(!await checkBalance(task)) return {success:true,querySkipped:true,waitMs:60000};
             if (Number(task.orbitcard_retry_attempt_no || 1) > 1) {
@@ -73,7 +78,7 @@ module.exports = function createRecovery({ store, query, activeJobs, audit, noti
                 ? (original, failure) => recordFailure(original.job_key, failure) : undefined });
         if (result.success && result.applied) {
             const latest = await store.getTaskStatus(task.job_key);
-            if (!result.retrying && latest && latest.status !== task.status && ['success','failed'].includes(latest.status)) {
+            if (latest && latest.status !== task.status && ['success','failed'].includes(latest.status)) {
                 try { await notify(latest); } catch (_) { /* the order is already settled; notifications must never reverse it */ }
             }
         }

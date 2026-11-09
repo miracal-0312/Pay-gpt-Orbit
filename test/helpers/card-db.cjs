@@ -113,14 +113,9 @@ module.exports = function fixture({ enqueueRedemption } = {}) {
             const task=db.tasks.find(t => t.job_key===p[1]); if(task?.orbitcard_state!=='prepared' || (task.orbitcard_issue_key && task.orbitcard_issue_key!==p[0])) return {affectedRows:0};task.orbitcard_issue_key=p[0];
         } else if (q.startsWith('UPDATE task_logs SET orbitcard_card_id')) {
             db.tasks.find(t => t.job_key === p[1]).orbitcard_card_id=p[0];
-        } else if (q.startsWith("UPDATE task_logs SET orbitcard_client_order_no = ?, orbitcard_state = 'retry_waiting'")) {
-            Object.assign(db.tasks.find(t => t.job_key === p[10]), {orbitcard_client_order_no:p[0],orbitcard_state:'retry_waiting',orbitcard_plan_type:p[1],orbitcard_email:p[2],orbitcard_base_url:p[3],
-                orbitcard_retry_root_job_key:p[4],orbitcard_retry_attempt_no:p[5],orbitcard_retry_first_card_id:p[6],orbitcard_retry_second_card_id:p[7],orbitcard_api_key_hash:p[8],message:p[9]});
         } else if (q.startsWith('UPDATE task_logs SET orbitcard_client_order_no')) {
             Object.assign(db.tasks.find(t => t.job_key === p[6]), {orbitcard_client_order_no:p[0],orbitcard_state:'prepared',orbitcard_plan_type:p[1],orbitcard_email:p[2],orbitcard_base_url:p[3],
                 orbitcard_retry_root_job_key:p[4],orbitcard_retry_attempt_no:1,orbitcard_api_key_hash:p[5]});
-        } else if (q.startsWith("UPDATE task_logs SET orbitcard_state = 'prepared'")) {
-            Object.assign(db.tasks.find(t => t.job_key === p[0]),{orbitcard_state:'prepared',message:'正在准备下一次支付尝试'});
         } else if (q.startsWith("UPDATE task_logs SET status = 'failed', orbitcard_state = 'support_locked'")) {
             const task=db.tasks.find(t => t.job_key === p[3]);
             Object.assign(task,{status:'failed',orbitcard_state:'support_locked',message:p[0],

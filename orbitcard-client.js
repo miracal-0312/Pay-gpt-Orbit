@@ -137,11 +137,14 @@ function summary(data) {
     const keys = ['task_no', 'orderId', 'client_order_no', 'plan_type', 'payment_region', 'paymentRegion',
         'status', 'upstream_status', 'subscription_succeeded', 'subscriptionCancelled', 'service_fee', 'currency',
         'fee_status', 'billing_policy', 'stage', 'query_source', 'result_source', 'error_code', 'card_id',
-        'order_no','amount','fee_amount','total_debit_amount'];
+        'order_no','amount','fee_amount','total_debit_amount', 'failureCode', 'failureMessage'];
     const result = Object.fromEntries(keys.filter(k => data?.[k] === null || ['string', 'number', 'boolean'].includes(typeof data?.[k]))
         .map(k => [k, typeof data[k] === 'string' ? data[k].slice(0, 256) : data[k]]));
     if (Number.isFinite(data?.payment?.amount) && typeof data.payment.currency === 'string') {
         result.payment = { amount: data.payment.amount, currency: data.payment.currency.slice(0, 8) };
+    }
+    for (const key of ['failureCode', 'failureMessage']) {
+        if (typeof result[key] === 'string') result[key] = require('./log-safety').sanitize(result[key]);
     }
     return result;
 }

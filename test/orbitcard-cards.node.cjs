@@ -412,17 +412,6 @@ test('eligible existing card is chosen without issuing; the subscription worker 
     assert.equal(f.db.tasks[0].orbitcard_card_id,42);
 });
 
-test('payment retry stays on the requested first card, then excludes it for the second card',async () => {
-    const f=serviceFixture(),first=await f.addCard(42),second=await f.addCard(43);
-    f.setCards([{...first,status:'ACTIVE',balance:40},{...second,status:'ACTIVE',balance:100}]);
-    const same=await f.claim();
-    assert.equal(await f.service.allocate(cfg,same.jobKey,'plus',{preferredCardId:42}),42);
-    await f.settle(same,'failed');
-    const switched=await f.claim();
-    assert.equal(await f.service.allocate(cfg,switched.jobKey,'plus',{excludedCardIds:[42]}),43);
-    assert.equal(f.calls.filter(call=>call.operation==='createCard').length,0);
-});
-
 test('unknown issuance is durable and a new worker or restart uses the same body/key',async () => {
     let ready=false;
     const f=serviceFixture({createCard:async () => ready?{success:true,data:{card_id:77,order_no:'OPEN-77',status:'success'}}:{success:false,status:502}});
@@ -820,13 +809,13 @@ test('payment core keeps unknown payments on the original identity and retains C
     assert.equal(f.requests[1].body.client_order_no, f.requests[0].key);
 });
 
-test('payment core rotates only confirmed failures and locks after three distinct cards', async () => {
+test('payment core stops after the first confirmed failure without another payment', async () => {
     const f = await runPaymentCore({ result: 'failed', count: 3 });
-    assert.equal(f.db.tasks.length, 3); assert.equal(f.db.tasks.at(-1).orbitcard_state, 'support_locked');
+    assert.equal(f.db.tasks.length, 1); assert.equal(f.db.tasks.at(-1).orbitcard_state, 'support_locked');
     assert.ok(f.db.cdks[0].used_at);
     const writes = f.requests.filter(row => row.operation === 'createSubscription');
-    assert.equal(new Set(writes.map(row => row.key)).size, 3);
-    assert.equal(new Set(writes.map(row => row.body.card_id)).size, 3);
+    assert.equal(new Set(writes.map(row => row.key)).size, 1);
+    assert.equal(new Set(writes.map(row => row.body.card_id)).size, 1);
     assert.deepEqual(writes.map(row => row.jobKey), f.db.tasks.map(row => row.job_key));
     assert.ok(f.db.cards.every(row => row.authorization_count === 0 && !row.active_job));
 });
@@ -1212,21 +1201,4 @@ test('busy and frozen cards keep their pool slots without additional spending',a
         await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/卡池已满/);
         assert.equal(f.calls.filter(call=>call.operation==='createCard').length,0);
     }
-});
-
-test('a confirmed failed card is excluded on the next platform selection',async () => {
-    const f=serviceFixture(),a=await f.addCard(42),b=await f.addCard(43),c=await f.addCard(44);
-    f.setCards([a,b,c].map(card=>({...card,status:'ACTIVE',balance:50})));
-    const first=await f.claim();assert.equal(await f.service.allocate(cfg,first.jobKey,'plus'),42);await f.settle(first,'failed');
-    const second=await f.claim();assert.equal(await f.service.allocate(cfg,second.jobKey,'plus',{excludedCardIds:[42]}),43);await f.settle(second,'failed');
-    const third=await f.claim();assert.equal(await f.service.allocate(cfg,third.jobKey,'plus',{excludedCardIds:[42,43]}),44);
-    assert.equal(f.calls.filter(call=>call.operation==='createCard').length,0);
-});
-
-test('excluded failed cards cannot cause the pool target to be exceeded',async () => {
-    const f=serviceFixture(),card=await f.addCard(42);
-    f.setCards([{...card,status:'ACTIVE',balance:50}]);
-    const task=await f.claim();
-    await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus',{excludedCardIds:[42]}),/卡池已满/);
-    assert.equal(f.calls.filter(call=>call.operation==='createCard').length,0);
 });
