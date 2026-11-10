@@ -108,6 +108,7 @@ CREATE TABLE IF NOT EXISTS orbitcard_managed_cards (
     authorization_count INT UNSIGNED NULL,
     authorizations_checked_at DATETIME(3) NULL,
     authorization_pending_count INT UNSIGNED NULL,
+    reuse_after_ms BIGINT UNSIGNED NOT NULL DEFAULT 0,
     retirement_key VARCHAR(80) NULL,
     retirement_state VARCHAR(16) NULL,
     active_job VARCHAR(64) NULL,

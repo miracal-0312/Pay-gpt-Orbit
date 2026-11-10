@@ -144,41 +144,28 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
             if (selected) {
                 result.selection.funding_amount = money.cents(selected.deficit);
             } else if (decision.action === 'open') {
-                const canRetire = saved.some(row => !row.active_job
-                    && (row.retirement_key || Number(row.authorization_count) >= poolPolicy.MAX_USES)
-                    && readable.some(card => card.card_id === Number(row.card_id)));
-                if (readable.length >= poolPolicy.SIZE && !canRetire) {
-                    result.selection.action = 'wait';
-                    result.selection.waiting.push({ reason: 'pool_full' });
-                    throw new CardPreparationError('卡池已满且没有可淘汰的空闲卡，实际支付需要等待可用卡片');
-                }
                 opening = cards.chooseProduct(products, plan, cfg);
                 result.selection.opening = cards.createCardBody(opening);
                 const target = money.units(planPrice(cfg, plan)) + money.units(opening.min_retained_balance);
                 const deficit = target - money.units(opening.amount);
                 funding = deficit > 0n ? money.units(money.cents(deficit)) : 0n;
-            } else throw new CardPreparationError('卡片被占用或消费授权仍待同步，实际支付需要等待处理');
-            let required = selected ? funding : money.units(opening.amount) + funding;
+            } else throw new CardPreparationError(decision.waiting.some(card => card.reason === 'cooldown')
+                ? '卡片处于支付后 5 分钟冷却期，实际支付需要等待或使用其他可用卡'
+                : '卡片被占用或消费授权仍待同步，实际支付需要等待处理');
+            const required = selected ? funding : money.units(opening.amount) + funding;
             if (cfg.enabled) {
                 const retiring = saved.filter(row => !row.active_job && Number(row.authorization_count) >= poolPolicy.MAX_USES
                     && readable.some(card => card.card_id === Number(row.card_id)));
-                const openCount = Math.max(0, poolPolicy.SIZE - (readable.length - retiring.length));
-                const openingAmount = money.units('20.00') * BigInt(openCount);
-                required = openingAmount + funding;
-                result.selection.maintenance = { target_size:poolPolicy.SIZE, current_size:readable.length,
+                const openCount = selected ? 0 : 1;
+                const openingAmount = selected ? 0n : money.units(opening.amount);
+                result.selection.maintenance = { capacity_limit:null, auto_refill:false, current_size:readable.length,
                     retire_card_ids:retiring.map(row => Number(row.card_id)), open_count:openCount,
                     opening_amount:money.cents(openingAmount), funding_amount:money.cents(funding),
                     required_balance:money.cents(required), fees_included:false, snapshot_only:true };
-                if (openCount) cards.chooseOpeningProduct(products, cfg);
-                if (readable.length > poolPolicy.SIZE) {
-                    result.selection.action = 'wait';
-                    result.selection.waiting.push({reason:'pool_maintenance_required'});
-                    throw new CardPreparationError('卡池超过五张，实际支付会先整理卡池，请同步后重新预检');
-                }
             }
             if (available < required) {
                 result.selection.account_check = 'failed';
-                throw new CardPreparationError('账户可用余额不足以完成卡池补位和支付补款；基础预算不含平台额外费用');
+                throw new CardPreparationError('账户可用余额不足以完成本单按需开卡和支付补款；基础预算不含平台额外费用');
             }
             return result.selection;
         }

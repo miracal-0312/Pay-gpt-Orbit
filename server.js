@@ -45,7 +45,9 @@ const cardService = require('./orbitcard-card-service')({ store, audit: entry =>
 const manualService = require('./orbitcard-manual-service')({ store, activeJobs, cardService, audit: entry => runtimeLog.push(entry) });
 const recovery = require('./order-recovery')({ store, query: require('./orbitcard-query'), activeJobs,
     audit: entry => runtimeLog.push(entry), notify,
-    checkBalance: task => store.getGptApiConfig().then(cfg => cardService.canResumeBalance(cfg,task)) });
+    checkBalance: task => store.getGptApiConfig().then(cfg => cardService.canResumeBalance(cfg,task)),
+    confirmFunding: (task, guard) => store.getGptApiConfig().then(cfg => cardService.confirmFunding(
+        { ...cfg, auditJobKey: task.job_key, executionGuard: guard }, task.job_key, task.orbitcard_plan_type)) });
 let cardRecoveryAt = 0;
 
 const { run: runWorker } = require('./payment-service')({ store, cardService, worker: require('./orbitcard-worker'),

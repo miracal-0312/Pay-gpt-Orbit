@@ -10,7 +10,7 @@
 
 选卡读取实时 ACTIVE 状态、成功消费授权次数和余额，目标余额为后台 USD 支付金额加产品最低留存余额。余额足够的卡直接使用；余额不足则按真实差额补款，并向上取整到美分，账户余额只按此次所需补款金额检查。新卡按 20.00 USD 首充检查账户资金，平台另行校验实际费用；不会因为账户余额低于整档套餐金额而拒绝一张余额已足够的卡。卡 ID 从 `getCardList` 自动读取，不填写固定卡 ID。
 
-所有套餐统一采用每卡 7 次成功消费授权上限，次数来自 `cardTransaction` 的成功消费授权，按唯一交易 ID 持久去重；同笔清算不重复计数，本地开通结果不直接加次数。达到上限的卡停止分配，空闲后删除并补位，启用接单时维持 5 张卡，每张新卡首充 20 USD。ACTIVE 和 CANCELLED 卡直接申请删除，无需预先解冻；删除结果未知时保留原幂等键，仅通过 `cardDetail` 查询恢复，确认 `DELETED` 后才补卡，不重复提交删卡或按余额估算退款。完整读取接口可见的历史消费，包含其他项目记录；未识别状态或分页不完整时暂停选卡，详见 [ORBITCARD-CARDS.md](ORBITCARD-CARDS.md)。
+所有套餐统一采用每卡 7 次成功消费授权上限，次数来自 `cardTransaction` 的成功消费授权，按唯一交易 ID 持久去重；同笔清算不重复计数，本地开通结果不直接加次数。达到上限的卡停止分配，空闲后删除且不自动补位，本地卡池不设数量上限；后台和同步卡片不自动开卡，订单缺卡时按需开一张或由管理员手动申请，每张新卡首充 20 USD。ACTIVE 和 CANCELLED 卡直接申请删除，无需预先解冻；删除结果未知时保留原幂等键，仅通过 `cardDetail` 查询恢复，确认 `DELETED` 后才完成退役，不重复提交删卡或按余额估算退款。完整读取接口可见的历史消费，包含其他项目记录；未识别状态或分页不完整时暂停选卡，详见 [ORBITCARD-CARDS.md](ORBITCARD-CARDS.md)。
 
 订阅调用需要 `subscriptions:read`、`subscriptions:create` 权限，余额查询另需 `account:read`。卡池还需 `cards:create`、`cards:read`、`cards:manage`、`products:read`、`cards:fund`；交易对账另需 `transactions:read`，不需要敏感卡资料。连接测试只查询套餐和余额，不创建订阅或开卡。卡片协议见 [Open API](Orbitcard-Open-API-V1.md)。
 
@@ -58,4 +58,4 @@
 
 `GET /api/admin/orbitcard/cards` 同时返回脱敏的 `cards`、`issues`、`fundings`；`POST /api/admin/orbitcard/issues/refresh` 确认原开卡及补款，不创建新身份。提供平台卡片同步、申请卡与原申请确认接口；历史次数绑定和手动修改接口已删除，见 [卡片管理 API](ORBITCARD-CARDS.md#本项目管理-api)。旧本地 Stripe 卡池、代理、账单地址、验证码求解、浏览器池、Session 导出、支付链接生成、本地账单及开卡 Webhook 接口均已移除，不提供充值回退路径。
 
-选卡和同步使用 `cardDetail({card_ids:[...],reveal_sensitive:false})`，每批最多 20 张；缺项跳过对应卡，不在选中后逐张复核。成功消费授权按交易 ID 去重累计，达到 7 次后停止分配并在空闲时删卡；确认删除后补足 5 张卡池。本地开通成功不直接加次数，新授权尚未同步时暂不复用该卡。满池但无可用卡时停止，不额外开卡。已存在的删卡意图先恢复，已确认删除的卡不再读取交易；原开卡、补款和订阅订单均沿用原身份与请求参数，未确认前不更换身份。补款提交前及确认后仍核对卡片资金。`getSubscriptionPlans` 只确认套餐开放，目录服务费不参与本地支付预检或后台展示。后台若设置最高服务费，下单时仍传 `max_service_fee` 交由平台校验；订单结果中的实际服务费保留用于对账。同一 API Key 收到 HTTP 429 后所有 Open API 操作共同遵守 `Retry-After`。管理员可用 `GET /api/admin/orbitcard/cards/:cardId/transactions?page=1` 读取完整授权记录更新次数，并查看指定页脱敏交易，不据此自动核销或退款。计次、选卡和交易对账均需要 `transactions:read`。
+选卡和同步使用 `cardDetail({card_ids:[...],reveal_sensitive:false})`，每批最多 20 张；缺项跳过对应卡，不在选中后逐张复核。成功消费授权按交易 ID 去重累计，达到 7 次后停止分配并在空闲时删卡；确认删除后完成退役，不自动补满卡池。本地开通成功不直接加次数，新授权尚未同步时暂不复用该卡。无可用卡时按需开一张；占用、冷却及未决资金操作仍按原规则等待。已存在的删卡意图先恢复，已确认删除的卡不再读取交易；原开卡、补款和订阅订单均沿用原身份与请求参数，未确认前不更换身份。补款提交前及确认后仍核对卡片资金。`getSubscriptionPlans` 只确认套餐开放，目录服务费不参与本地支付预检或后台展示。后台若设置最高服务费，下单时仍传 `max_service_fee` 交由平台校验；订单结果中的实际服务费保留用于对账。同一 API Key 收到 HTTP 429 后所有 Open API 操作共同遵守 `Retry-After`。管理员可用 `GET /api/admin/orbitcard/cards/:cardId/transactions?page=1` 读取完整授权记录更新次数，并查看指定页脱敏交易，不据此自动核销或退款。计次、选卡和交易对账均需要 `transactions:read`。

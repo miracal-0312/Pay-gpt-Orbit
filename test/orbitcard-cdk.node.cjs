@@ -382,7 +382,8 @@ test('unknown creation queries its persisted identity, never creates a replaceme
     assert.equal(out.rollback, false);
     assert.deepEqual(out.calls.map(c => c[1]), ['createSubscription','getSubscription']);
     assert.deepEqual(out.calls[1][2], { client_order_no: 'cdk-fixed-attempt' });
-    assert.equal(out.states.at(-1)[3].orbitcardState, 'manual');
+    assert.equal(out.states.at(-1)[3].orbitcardState, 'pending');
+    assert.equal(out.states.at(-1)[0], 'running');
     assert.ok(!JSON.stringify(out.states).includes('private-token'));
 });
 

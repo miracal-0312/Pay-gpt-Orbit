@@ -15,9 +15,11 @@ function nonnegativeInteger(value) {
 }
 function positiveId(value) { const n = nonnegativeInteger(value); return n > 0 ? n : null; }
 function requestFailure(result, fallback) {
-    if (result.status === 429) return new CardPreparationError(`Orbitcard 请求频率受限，请稍后重试（约 ${Math.ceil((result.retryAfterMs || 5000) / 1000)} 秒）`);
-    if ([401, 403].includes(result.status)) return new CardPreparationError('Orbitcard 密钥、出口 IP 或接口权限不足，请联系管理员检查配置');
-    return new CardPreparationError(fallback);
+    const message = result.status === 429
+        ? `Orbitcard 请求频率受限，请稍后重试（约 ${Math.ceil((result.retryAfterMs || 5000) / 1000)} 秒）`
+        : [401, 403].includes(result.status) ? 'Orbitcard 密钥、出口 IP 或接口权限不足，请联系管理员检查配置' : fallback;
+    return Object.assign(new CardPreparationError(message), { status: result.status, retryAfterMs: result.retryAfterMs,
+        transient: result.status == null || result.status === 429 || result.status >= 500 });
 }
 function normalizeCard(row = {}) {
     if (!row || typeof row !== 'object' || Array.isArray(row)) row = {};

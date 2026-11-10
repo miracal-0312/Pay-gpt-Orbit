@@ -41,7 +41,8 @@ async function ensureLegacyColumns() {
     // Add only fields needed by this service. Existing historical tables are never dropped.
     const columns = {
         orbitcard_managed_cards: { authorization_count: 'INT UNSIGNED NULL', authorizations_checked_at: 'DATETIME(3) NULL',
-            authorization_pending_count: 'INT UNSIGNED NULL', retirement_key: 'VARCHAR(80) NULL', retirement_state: 'VARCHAR(16) NULL' },
+            authorization_pending_count: 'INT UNSIGNED NULL', reuse_after_ms: 'BIGINT UNSIGNED NOT NULL DEFAULT 0',
+            retirement_key: 'VARCHAR(80) NULL', retirement_state: 'VARCHAR(16) NULL' },
         orbitcard_card_uses: { authorization_baseline: 'INT UNSIGNED NULL' },
         app_config: { created_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP', updated_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP' },
         cdk_codes: { is_active: 'TINYINT(1) NOT NULL DEFAULT 1', shipped_at: 'TIMESTAMP NULL', used_at: 'TIMESTAMP NULL',
@@ -118,7 +119,7 @@ async function getRunningTaskByCdk(cdk) {
     const rows = await runQuery(`SELECT job_key, status, message, progress, orbitcard_client_order_no, orbitcard_state,
         orbitcard_retry_root_job_key, orbitcard_retry_attempt_no, orbitcard_retry_first_card_id, orbitcard_retry_second_card_id, orbitcard_api_key_hash, orbitcard_email, orbitcard_base_url
         FROM task_logs WHERE cdk_code = ? AND (status IN ('running','manual')
-        OR orbitcard_state IN ('prepared','retry_waiting','support_locked','balance_blocked','funding_pending','submitting','pending','manual','success')) ORDER BY id DESC LIMIT 1`, [String(cdk)]);
+        OR orbitcard_state IN ('preparing','prepared','funding_waiting','funding_review','retry_waiting','support_locked','balance_blocked','funding_pending','submitting','pending','manual','success')) ORDER BY id DESC LIMIT 1`, [String(cdk)]);
     return rows[0] || null;
 }
 
@@ -130,7 +131,7 @@ async function verifyCdkDetails(cdk) {
 function mapCdkRow(row) {
     const redeemed = Boolean(row.manual_redeemed_at) || row.manual_state === 'success' || (row.task_status === 'success' && (row.orbitcard_state === 'success' || !row.orbitcard_state));
     const occupied = Boolean(row.used_at) || ['running', 'manual'].includes(row.task_status)
-        || ['balance_blocked', 'support_locked'].includes(row.orbitcard_state);
+        || ['preparing', 'prepared', 'funding_waiting', 'funding_review', 'balance_blocked', 'support_locked'].includes(row.orbitcard_state);
     return { code: row.cdk_code, plan_type: row.plan_type, plan_label: PLAN_LABELS[row.plan_type] || row.plan_type,
         type: row.type, shipped: Boolean(row.shipped_at), created_at: row.created_at, jobKey: row.job_key,
         manual_redeemed_at: row.manual_redeemed_at || null, manual_redeemed_by: row.manual_redeemed_by || '',
@@ -227,8 +228,8 @@ function safeOrder(raw) {
 async function listRecoverableOrbitcardTasks(limit = 50) {
     return runQuery(`SELECT t.* FROM task_logs t JOIN cdk_codes c ON c.cdk_code = t.cdk_code AND c.is_active = 1
         WHERE t.orbitcard_client_order_no IS NOT NULL
-          AND t.orbitcard_state IN ('prepared','balance_blocked','submitting','pending','manual','success','retry_waiting')
-          AND (t.status <> 'manual' OR t.orbitcard_state IN ('submitting','pending','manual','success'))
+          AND t.orbitcard_state IN ('preparing','prepared','funding_waiting','funding_review','balance_blocked','submitting','pending','manual','success','retry_waiting')
+          AND (t.status <> 'manual' OR t.orbitcard_state IN ('funding_review','submitting','pending','manual','success'))
           AND t.id = (SELECT MAX(id) FROM task_logs WHERE cdk_code = t.cdk_code)
           AND (t.orbitcard_state <> 'success' OR JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(t.gpt_api_raw), t.gpt_api_raw, '{}'), '$.fee_status')) = 'charge_pending')
         ORDER BY t.updated_at ASC LIMIT ?`, [Math.min(200, Math.max(1, Number(limit) || 50))]);
@@ -258,7 +259,7 @@ async function getAdminData() {
     const [[stats], [cdks], logs, maintenance, max, telegram] = await Promise.all([
         runQuery(`SELECT COUNT(*) AS total, COALESCE(SUM(orbitcard_state = 'success'),0) AS success,
             COALESCE(SUM(orbitcard_state IN ('failed','rejected','balance_blocked','support_locked')),0) AS failed,
-            COALESCE(SUM(orbitcard_state IN ('prepared','retry_waiting','funding_pending','card_pending','submitting','pending','manual')),0) AS pending
+            COALESCE(SUM(orbitcard_state IN ('preparing','prepared','funding_waiting','funding_review','retry_waiting','funding_pending','card_pending','submitting','pending','manual')),0) AS pending
             FROM task_logs WHERE orbitcard_client_order_no IS NOT NULL`),
         runQuery('SELECT COUNT(*) AS total, COALESCE(SUM(used_at IS NOT NULL),0) AS used FROM cdk_codes WHERE is_active = 1'),
         listAdminTaskLogs(), core.getMaintenanceModeState(), getMaxConcurrentActivations(), core.getTelegramConfig()

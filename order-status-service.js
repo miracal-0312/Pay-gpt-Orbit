@@ -20,6 +20,17 @@ module.exports = function createOrderStatusService(store) {
                 if (!code || task?.job_key !== jobKey) fail(409, '只能修改该卡密的最新订单，请刷新列表');
                 if (task.status !== expectedStatus) fail(409, '订单状态已变化，请刷新后重试');
                 if (status === 'failed' && task.status === 'success') fail(409, '已确认成功的订单不能改为失败');
+                if (['preparing','prepared','funding_waiting','funding_review','card_pending','funding_pending','balance_blocked'].includes(task.orbitcard_state)) {
+                    fail(409, '会员订阅尚未提交，不能直接修改为订阅成功或失败；请先核对原支付准备记录');
+                }
+                const fundings = await store.runQuery('SELECT * FROM orbitcard_card_fundings WHERE job_key = ? FOR UPDATE', [jobKey], options);
+                const issues = await store.runQuery('SELECT * FROM orbitcard_card_issues WHERE job_key = ? OR issue_key = ? FOR UPDATE',
+                    [jobKey, task.orbitcard_issue_key || null], options);
+                if (fundings.some(funding => !['ready','failed'].includes(funding.state))
+                    || issues.some(issue => !['ready','failed'].includes(issue.state))
+                    || (task.orbitcard_issue_key && !issues.some(issue => issue.issue_key === task.orbitcard_issue_key))) {
+                    fail(409, '原开卡或补款尚未完成核对，不能终结订阅或释放支付卡');
+                }
                 await guard.assertOwned();
                 const message = `人工确认${status === 'success' ? '成功' : '失败'}：${reason.trim()}`;
                 await store.runExecute(`UPDATE task_logs SET status = ?, progress = ?, message = ?, orbitcard_state = ?, session_payload = NULL WHERE job_key = ?`,

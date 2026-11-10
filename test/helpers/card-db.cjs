@@ -5,7 +5,9 @@ const cdkFactory = require('../../orbitcard-cdk-store');
 const { cardScope } = require('../../orbitcard-card-policy');
 const BASE = 'https://orbitcard.test';
 
-module.exports = function fixture({ enqueueRedemption } = {}) {
+module.exports = function fixture({ enqueueRedemption, now: externalNow } = {}) {
+    let clock = Date.now();
+    const now = externalNow || (() => clock);
     const db = { cards: [], authorizations: [], uses: [], issues: [], fundings:[], tasks: [], cdks: [], failRelease: false };
     let tail = Promise.resolve(), allocationTail = Promise.resolve(), sequence = 0;
     async function withTransaction(fn) {
@@ -38,7 +40,7 @@ module.exports = function fixture({ enqueueRedemption } = {}) {
         if (q.includes('FROM task_logs')) {
             if (q.includes('WHERE job_key')) return structuredClone(db.tasks.filter(t => t.job_key === p[0]));
             let tasks = db.tasks.filter(t => t.cdk_code === p[0]);
-            if (q.includes('orbitcard_state IN')) tasks = tasks.filter(t => ['running','manual'].includes(t.status) || ['prepared','retry_waiting','support_locked','balance_blocked','funding_pending','submitting','pending','manual','success'].includes(t.orbitcard_state));
+            if (q.includes('orbitcard_state IN')) tasks = tasks.filter(t => ['running','manual'].includes(t.status) || ['preparing','prepared','funding_waiting','funding_review','retry_waiting','support_locked','balance_blocked','funding_pending','submitting','pending','manual','success'].includes(t.orbitcard_state));
             if (q.includes('ORDER BY id DESC')) tasks = tasks.sort((a,b) => b.id-a.id).slice(0,1);
             return structuredClone(tasks);
         }
@@ -63,6 +65,12 @@ module.exports = function fixture({ enqueueRedemption } = {}) {
             card.authorization_pending_count = Math.max(card.authorization_pending_count || 0, p[0]);
             return {affectedRows:1};
         }
+        if (q.startsWith('UPDATE orbitcard_managed_cards SET reuse_after_ms=')) {
+            const card = db.cards.find(c => c.scope === p[1] && c.card_id === Number(p[2]));
+            if (!card) return {affectedRows:0};
+            card.reuse_after_ms = Math.max(card.reuse_after_ms || 0, p[0]);
+            return {affectedRows:1};
+        }
         if (q.startsWith('UPDATE orbitcard_managed_cards SET retirement_key=')) {
             const card = db.cards.find(c => c.scope === p[1] && c.card_id === p[2]);
             if (!card || card.active_job || card.retirement_key) return {affectedRows:0};
@@ -80,9 +88,12 @@ module.exports = function fixture({ enqueueRedemption } = {}) {
         }
         if(q.startsWith('INSERT INTO orbitcard_card_fundings')) {
             assert.ok(!db.fundings.some(f => f.job_key===p[2]));db.fundings.push({funding_key:p[0],scope:p[1],job_key:p[2],plan_type:p[3],card_id:p[4],credential_hash:p[5],request_body:p[6],amount:p[7],target_balance:p[8],state:'prepared',retry_at:0});
+        } else if(q.startsWith('UPDATE orbitcard_card_fundings SET retry_at=')) {
+            const funding=db.fundings.find(f=>f.funding_key===p[1] && f.scope===p[2]);
+            if(funding && funding.state!=='failed') funding.retry_at=Math.max(Number(funding.retry_at || 0),p[0]);
         } else if(q.startsWith('UPDATE orbitcard_card_fundings SET state=')) {
             const funding=db.fundings.find(f => f.funding_key===p[6] && f.scope===p[7]);
-            if(!['ready','failed'].includes(funding.state)) Object.assign(funding,{state:p[0],order_no:p[1] || funding.order_no,provider_status:p[2] ?? funding.provider_status,fee_snapshot:p[3] ?? funding.fee_snapshot,retry_at:p[4] ?? funding.retry_at,message:p[5]});
+            if(!['ready','failed'].includes(funding.state)) Object.assign(funding,{state:p[0],order_no:p[1] || funding.order_no,provider_status:p[2] ?? funding.provider_status,fee_snapshot:p[3] ?? funding.fee_snapshot,retry_at:Math.max(Number(funding.retry_at || 0),p[4] || 0),message:p[5]});
         } else if(q.startsWith("UPDATE task_logs SET orbitcard_state='balance_blocked'")) {
             const task=db.tasks.find(t => t.job_key===p[2]);if(task?.orbitcard_state!=='prepared') return {affectedRows:0};
             Object.assign(task,{orbitcard_state:'balance_blocked',status:'failed',orbitcard_required_balance:p[0],message:p[1]});
@@ -110,11 +121,11 @@ module.exports = function fixture({ enqueueRedemption } = {}) {
             const issue=db.issues.find(i => i.issue_key === p[8] && i.scope === p[9]);
             if (!['ready','failed'].includes(issue.state)) Object.assign(issue,{state:p[0],order_no:p[1] || issue.order_no,card_id:p[2] || issue.card_id,message:p[3],provider_status:p[4] ?? issue.provider_status,completed:p[5] ?? issue.completed,fee_snapshot:p[6] ?? issue.fee_snapshot,retry_at:p[7] ?? issue.retry_at});
         } else if (q.startsWith('UPDATE task_logs SET orbitcard_issue_key')) {
-            const task=db.tasks.find(t => t.job_key===p[1]); if(task?.orbitcard_state!=='prepared' || (task.orbitcard_issue_key && task.orbitcard_issue_key!==p[0])) return {affectedRows:0};task.orbitcard_issue_key=p[0];
+            const task=db.tasks.find(t => t.job_key===p[1]); if(!['preparing','prepared'].includes(task?.orbitcard_state) || (task.orbitcard_issue_key && task.orbitcard_issue_key!==p[0])) return {affectedRows:0};task.orbitcard_issue_key=p[0];
         } else if (q.startsWith('UPDATE task_logs SET orbitcard_card_id')) {
             db.tasks.find(t => t.job_key === p[1]).orbitcard_card_id=p[0];
         } else if (q.startsWith('UPDATE task_logs SET orbitcard_client_order_no')) {
-            Object.assign(db.tasks.find(t => t.job_key === p[6]), {orbitcard_client_order_no:p[0],orbitcard_state:'prepared',orbitcard_plan_type:p[1],orbitcard_email:p[2],orbitcard_base_url:p[3],
+            Object.assign(db.tasks.find(t => t.job_key === p[6]), {orbitcard_client_order_no:p[0],orbitcard_state:/orbitcard_state = '([^']+)'/.exec(q)[1],orbitcard_plan_type:p[1],orbitcard_email:p[2],orbitcard_base_url:p[3],
                 orbitcard_retry_root_job_key:p[4],orbitcard_retry_attempt_no:1,orbitcard_api_key_hash:p[5]});
         } else if (q.startsWith("UPDATE task_logs SET status = 'failed', orbitcard_state = 'support_locked'")) {
             const task=db.tasks.find(t => t.job_key === p[3]);
@@ -132,7 +143,7 @@ module.exports = function fixture({ enqueueRedemption } = {}) {
         else throw new Error(`Unexpected test execute: ${q}`);
         return { affectedRows:1 };
     }
-    const cardStore=cardFactory({runQuery,runExecute,withTransaction,getPool() { throw new Error('Unexpected real connection'); }});
+    const cardStore=cardFactory({runQuery,runExecute,withTransaction,now,getPool() { throw new Error('Unexpected real connection'); }});
     const cdkStore=cdkFactory({runQuery,runExecute,withTransaction,settleCardUse:cardStore.settleCardUse,enqueueRedemption,
         createTaskLog: async input => { const task={ id:++sequence,job_key:`job-${sequence}`,cdk_code:input.cdkCode,status:'running',progress:3 }; db.tasks.push(task); return {jobKey:task.job_key}; } });
     const automation=require('../../payment-automation')({runQuery});
@@ -141,7 +152,11 @@ module.exports = function fixture({ enqueueRedemption } = {}) {
     }};
     async function claim(plan='plus') {
         const cdk=`CODE-${db.cdks.length+1}`; db.cdks.push({cdk_code:cdk,type:'自助',is_active:1,plan_type:plan,used_at:null});
-        return cdkStore.createOrbitcardTask({cdk,planType:plan,email:'customer@example.test',baseUrl:BASE});
+        const task=await cdkStore.createOrbitcardTask({cdk,planType:plan,email:'customer@example.test',baseUrl:BASE});
+        // Most existing fixtures exercise historical prepared tasks. Dedicated
+        // preparing tests call createOrbitcardTask directly to verify new tasks.
+        db.tasks.find(row=>row.job_key===task.jobKey).orbitcard_state='prepared';
+        return {...task,orbitcardState:'prepared'};
     }
     async function addCard(id=42, confirmed=true, used=0) {
         const card={card_id:id,provider_status:'ACTIVE',product_code:'p1',bin:'55565979',last4:'1234',balance:100,currency:'USD'};
@@ -152,5 +167,5 @@ module.exports = function fixture({ enqueueRedemption } = {}) {
     }
     const settle=(task,state) => cdkStore.settleOrbitcardTask(task.jobKey,{status:state==='success'?'success':['failed','rejected'].includes(state)?'failed':state==='manual'?'manual':'running',orbitcardState:state,progress:90,message:state,
         ...(state==='submitting'?{expectedState:'prepared',expectedClientOrderNo:task.orbitcardClientOrderNo}:{})});
-    return {db,store,claim,addCard,settle,base:BASE,scope:cardScope(BASE)};
+    return {db,store,claim,addCard,settle,now,advance:(ms=300000)=>{clock+=ms;},base:BASE,scope:cardScope(BASE)};
 };

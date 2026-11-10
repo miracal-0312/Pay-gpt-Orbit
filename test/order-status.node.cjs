@@ -6,18 +6,24 @@ const createService = require('../order-status-service');
 
 function fixture() {
     const task = { job_key: 'job-1', cdk_code: 'CODE-1', orbitcard_client_order_no: 'order-1', status: 'manual', orbitcard_state: 'manual' };
-    const code = {}, writes = [], events = [];
+    const code = {}, writes = [], events = [], fundings = [], issues = [], reads = [];
     let locked = false;
     const update = createService({
         getTaskStatus: async () => task,
         acquirePaymentLock: async () => locked ? null : ({ assertOwned: async () => {}, release: async () => events.push('released') }),
-        withTransaction: async fn => fn({}),
-        runQuery: async sql => [sql.includes('cdk_codes') ? code : task],
+        withTransaction: async fn => fn({transaction:true}),
+        runQuery: async (sql,args,options) => {
+            assert.equal(options?.connection?.transaction,true);
+            reads.push({sql,args});
+            if(sql.includes('FROM orbitcard_card_fundings'))return fundings.filter(f=>f.job_key===args[0]);
+            if(sql.includes('FROM orbitcard_card_issues'))return issues.filter(issue=>issue.job_key===args[0]||issue.issue_key===args[1]);
+            return [sql.includes('cdk_codes') ? code : task];
+        },
         runExecute: async (sql, args) => writes.push({ sql, args }),
         settleCardUse: async (...args) => events.push(['card', ...args]),
         enqueueRedemption: async (...args) => events.push(['redemption', ...args])
     });
-    return { task, code, writes, events, lock() { locked = true; },
+    return { task, code, writes, events, fundings, issues, reads, lock() { locked = true; },
         save: (input = {}) => update({ jobKey: 'job-1', status: 'success', expectedStatus: 'manual', reason: '已核对订阅', adminEmail: 'admin@example.com', ...input }) };
 }
 test('manual success updates task, reserves CDK, settles card, enqueues redemption and audits', async () => {
@@ -33,6 +39,54 @@ test('manual failure stops payment and retains CDK without redemption notificati
     const f = fixture(); await f.save({ status: 'failed' });
     assert.equal(f.writes[0].args[3], 'support_locked');
     assert.equal(f.events.some(e => e[0] === 'redemption'), false);
+});
+
+test('unsubmitted preparations and funding reviews cannot be marked subscription success or failure',async()=>{
+    for(const state of ['preparing','prepared','funding_waiting','funding_review','card_pending','funding_pending','balance_blocked']) {
+        for(const status of ['success','failed']) {
+            const f=fixture();f.task.orbitcard_state=state;f.fundings.push({job_key:'job-1',state:'pending'});
+            await assert.rejects(f.save({status}),error=>error.status===409&&/订阅尚未提交/.test(error.message));
+            assert.deepEqual(f.writes,[]);assert.deepEqual(f.events,['released']);
+            assert.equal(f.task.orbitcard_state,state);assert.equal(f.fundings[0].state,'pending');
+        }
+    }
+});
+
+test('manual subscription settlement cannot release cards or notify while original money operations are unresolved',async()=>{
+    for(const kind of ['funding','issue'])for(const state of ['prepared','submitting','pending','unknown','unexpected']) {
+        for(const status of ['success','failed']) {
+            const f=fixture();
+            if(kind==='funding')f.fundings.push({job_key:'job-1',state});
+            else {
+                f.task.orbitcard_issue_key='issue-1';
+                f.issues.push({job_key:'job-1',issue_key:'issue-1',state});
+            }
+            await assert.rejects(f.save({status}),error=>error.status===409&&/尚未完成核对/.test(error.message));
+            assert.deepEqual(f.writes,[]);assert.deepEqual(f.events,['released']);
+            assert.ok(f.reads.filter(read=>/orbitcard_card_(fundings|issues)/.test(read.sql)).every(read=>read.sql.endsWith('FOR UPDATE')));
+        }
+    }
+});
+
+test('missing linked issue and unlinked pending issue both preserve the card on manual settlement',async()=>{
+    for(const linked of [true,false]) {
+        const f=fixture();
+        if(linked)f.task.orbitcard_issue_key='missing-issue';
+        else f.issues.push({job_key:'job-1',issue_key:'unlinked-issue',state:'pending'});
+        await assert.rejects(f.save(),error=>error.status===409);
+        assert.deepEqual(f.writes,[]);assert.deepEqual(f.events,['released']);
+    }
+});
+
+test('verified manual subscription settlement remains available after original funding and issue reach final states',async()=>{
+    for(const status of ['success','failed'])for(const state of ['ready','failed']) {
+        const f=fixture();f.task.orbitcard_issue_key='issue-1';
+        f.fundings.push({job_key:'job-1',state});f.issues.push({job_key:'job-1',issue_key:'issue-1',state});
+        await f.save({status});
+        assert.equal(f.writes[0].args[3],status==='success'?'success':'support_locked');
+        assert.ok(f.events.some(event=>event[0]==='card'&&event[2]===status));
+        assert.equal(f.events.some(event=>event[0]==='redemption'),status==='success');
+    }
 });
 test('manually redeemed CDK allows original order failure without undoing redemption or resuming payment', async () => {
     const f = fixture();

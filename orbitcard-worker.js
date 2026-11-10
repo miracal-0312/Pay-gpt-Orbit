@@ -76,8 +76,8 @@ async function run({ cfg, planType, session, setProgress, onSubmission, broadcas
         delay = Math.max(5000, intervalMs, result.retryAfterMs || 0);
     }
     broadcast(null);
-    await setProgress('manual', 99, 'Orbitcard 结果待确认，已转人工处理并退出自动支付；保留订单和 CDK，请联系管理员核对原单',
-        { orbitcardState: 'manual', gptApiOrderId: orderId, gptApiRaw: JSON.stringify(last) });
+    await setProgress('running', 99, 'Orbitcard 结果待确认，后台将按原订单号持续查询；保留 CDK 和支付卡，请勿重复充值',
+        { orbitcardState: 'pending', gptApiOrderId: orderId, gptApiRaw: JSON.stringify(last) });
     return false;
 }
 

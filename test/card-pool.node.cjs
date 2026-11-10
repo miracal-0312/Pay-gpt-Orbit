@@ -4,6 +4,7 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path');
 const {createRequire}=require('node:module');
 const policy=require('../orbitcard-pool');
+const {AccountBalanceError}=require('../orbitcard-card-policy');
 const fixture=require('./helpers/card-db.cjs');
 function load(name,mocks) {
     const filename=path.resolve(__dirname,'..',name), real=createRequire(filename), module={exports:{}};
@@ -15,7 +16,8 @@ const cfg={enabled:true,base_url:'https://orbitcard.test',api_key:'test',
 const authorization=(id,card_id=42)=>({transaction_id:String(id),card_id,transaction_type:'Authorization',status:'approved',authorization_amount:'-15.54'});
 const settlement=(id,card_id=42)=>({...authorization(id,card_id),transaction_type:'Settlement'});
 async function setup(counts=[0,0,0,0,0],overrides={}) {
-    const f=fixture(), calls=[], remote=[], ledger=new Map(); let clock=Date.now(), next=100;
+    let clock=Date.now(), next=100;
+    const f=fixture({now:()=>clock}), calls=[], remote=[], ledger=new Map();
     for(let i=0;i<counts.length;i++) {
         const card=await f.addCard(42+i,true,counts[i]); remote.push({...card,status:'ACTIVE'});
         ledger.set(card.card_id,Array.from({length:counts[i]},(_,j)=>authorization(j,card.card_id)));
@@ -35,11 +37,10 @@ async function setup(counts=[0,0,0,0,0],overrides={}) {
     }};
     const cards=load('orbitcard-cards-client.js',{'./orbitcard-client':transport});
     const service=load('orbitcard-card-service.js',{'./orbitcard-client':transport,'./orbitcard-cards-client':cards})({store:f.store,audit(){},maxIssuePolls:1,now:()=>clock,sleep:async()=>{}});
-    return {...f,service,calls,remote,ledger,advance(){clock+=120000;}};
+    return {...f,service,calls,remote,ledger,advance(ms=120000){clock+=ms;}};
 }
 test('only confirmed authorization counts below seven are eligible',()=>{
     assert.equal(policy.MAX_USES,7);
-    assert.equal(policy.SIZE,5);
     assert.equal(policy.eligible({authorization_count:6}),true);
     for(const authorization_count of [7,8,null,undefined,-1,1.5,NaN,Infinity])
         assert.equal(policy.eligible({authorization_count}),false);
@@ -47,17 +48,105 @@ test('only confirmed authorization counts below seven are eligible',()=>{
     assert.equal(policy.eligible({authorization_count:6,authorization_pending_count:7}),false);
     assert.equal(policy.eligible({authorization_count:4,authorization_pending_count:4}),true);
 });
-test('seven successful authorizations delete once and replace to five; six authorizations remain usable',async()=>{
-    const f=await setup([7,6,0,0,0]);await f.service.synchronize(cfg);
-    assert.equal(f.calls.filter(c=>c.operation==='deleteCard').length,1);
-    assert.equal(f.calls.filter(c=>c.operation==='createCard').length,1);
-    assert.equal(f.remote.filter(c=>c.status!=='DELETED').length,5);
-    assert.equal(f.db.cards.find(c=>c.card_id===43).authorization_count,6);
-    await f.service.synchronize(cfg);
-    assert.equal(f.calls.filter(c=>c.operation==='createCard').length,1);
+
+test('a synchronized authorization and a stale high balance cannot bypass payment cooldown',async()=>{
+    const f=await setup();
+    const first=await f.claim();assert.equal(await f.service.allocate(cfg,first.jobKey,'plus'),42);
+    await f.settle(first,'success');
+    f.ledger.get(42).push(authorization('new'));
+    // The platform still reports the pre-payment card balance.
+    const second=await f.claim();assert.equal(await f.service.allocate(cfg,second.jobKey,'plus'),43);
+    assert.equal(f.db.cards[0].authorization_count,1);
+    assert.equal(f.remote[0].balance,100);
+    assert.equal(f.calls.filter(c=>['rechargeCard','createCard'].includes(c.operation)).length,0);
 });
 
-test('seven successful authorizations without amounts retire once and refill the five-card pool',async()=>{
+test('a full cooling pool waits without opening cards and rechecks balance after cooldown',async()=>{
+    const f=await setup();
+    for(let i=0;i<5;i++) {
+        const task=await f.claim();assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),42+i);
+        await f.settle(task,'success');f.ledger.get(42+i).push(authorization('new',42+i));
+    }
+    const next=await f.claim(),before=f.calls.length;
+    await assert.rejects(f.service.allocate(cfg,next.jobKey,'plus'),/冷却/);
+    assert.equal(f.calls.slice(before).filter(c=>['rechargeCard','createCard'].includes(c.operation)).length,0);
+    f.advance(300000);
+    f.remote[0].balance=1; // Fresh balance now makes another card preferable.
+    assert.equal(await f.service.allocate(cfg,next.jobKey,'plus'),43);
+});
+
+test('allocation uses an existing funded card without requiring money to fill the pool',async()=>{
+    const f=await setup([0],{getAccountBalance:async()=>({success:true,data:{available_balance:'0.00'}})});
+    const task=await f.claim();
+    assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),42);
+    assert.equal(f.remote.length,1);
+    assert.equal(f.calls.filter(c=>['getAccountBalance','createCard','rechargeCard','deleteCard'].includes(c.operation)).length,0);
+});
+
+test('insufficient account money rejects the exact card deficit before creating a funding intent',async()=>{
+    const f=await setup([0],{getAccountBalance:async()=>({success:true,data:{available_balance:'0.50'}})});
+    f.remote[0].balance='20.00';
+    const task=await f.claim();
+    await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),error=>{
+        assert.ok(error instanceof AccountBalanceError);
+        assert.match(error.message,/可用 0\.50000000 USD/);
+        assert.match(error.message,/所需 1\.00000000 USD/);
+        assert.doesNotMatch(error.message,/锁定/);
+        return true;
+    });
+    assert.equal(f.db.tasks.find(row=>row.job_key===task.jobKey).orbitcard_state,'prepared');
+    assert.equal(f.db.fundings.length,0);
+    assert.equal(f.calls.filter(c=>['createCard','rechargeCard','deleteCard'].includes(c.operation)).length,0);
+});
+
+test('allocation opens only one needed card without filling an empty pool',async()=>{
+    const f=await setup([]),task=await f.claim();
+    assert.equal(await f.service.allocate({...cfg,orbitcard_plan_prices:{...cfg.orbitcard_plan_prices,plus:'19.00'}},task.jobKey,'plus'),100);
+    assert.equal(f.calls.filter(c=>c.operation==='createCard').length,1);
+    assert.equal(f.remote.length,1);
+});
+
+test('allocation cannot open around an unresolved card issue belonging to another plan',async()=>{
+    for(const [pendingPlan,currentPlan] of [['pro100','plus'],['plus','pro100']]) {
+        for(const state of ['prepared','submitting','pending','unknown']) {
+            const f=await setup([]),task=await f.claim(currentPlan);
+            f.db.issues.push({issue_key:'other-plan-issue',scope:f.scope,job_key:'other-job',plan_type:pendingPlan,state});
+            await assert.rejects(f.service.allocate(cfg,task.jobKey,currentPlan),/待确认开卡申请/);
+            assert.equal(f.calls.filter(c=>['getAccountBalance','createCard','rechargeCard'].includes(c.operation)).length,0);
+            assert.equal(f.db.issues.length,1);
+        }
+    }
+});
+
+test('allocation retires an exhausted full pool and opens only one replacement',async()=>{
+    const f=await setup([7,7,7,7,7]),task=await f.claim();
+    assert.equal(await f.service.allocate({...cfg,orbitcard_plan_prices:{...cfg.orbitcard_plan_prices,plus:'19.00'}},task.jobKey,'plus'),100);
+    assert.equal(f.calls.filter(c=>c.operation==='deleteCard').length,5);
+    assert.equal(f.calls.filter(c=>c.operation==='createCard').length,1);
+    assert.equal(f.remote.filter(card=>card.status!=='DELETED').length,1);
+});
+
+test('a sparse busy or cooling pool does not cause allocation to open an extra card',async()=>{
+    for(const state of ['busy','cooldown']) {
+        const f=await setup([0]);
+        if(state==='busy') f.db.cards[0].active_job='another-job';
+        else f.db.cards[0].reuse_after_ms=Date.now()+600000;
+        const task=await f.claim();
+        await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),state==='busy'?/正在使用/:/冷却/);
+        assert.equal(f.calls.filter(c=>['createCard','deleteCard','rechargeCard'].includes(c.operation)).length,0);
+    }
+});
+test('seven successful authorizations retire without replenishment; six authorizations remain usable',async()=>{
+    const f=await setup([7,6,0,0,0]);await f.service.synchronize(cfg);
+    assert.equal(f.calls.filter(c=>c.operation==='deleteCard').length,1);
+    assert.equal(f.calls.filter(c=>c.operation==='createCard').length,0);
+    assert.equal(f.remote.filter(c=>c.status!=='DELETED').length,4);
+    assert.equal(f.db.cards.find(c=>c.card_id===43).authorization_count,6);
+    await f.service.synchronize(cfg);
+    assert.equal(f.calls.filter(c=>c.operation==='createCard').length,0);
+});
+
+test('seven successful authorizations without amounts retire once without opening a replacement',async()=>{
     const f=await setup();
     const withoutAmount=id=>({transaction_id:`external-${id}`,card_id:42,transaction_type:'Authorization',status:'SUCCESS'});
     f.ledger.set(42,Array.from({length:6},(_,i)=>withoutAmount(i)));
@@ -72,18 +161,18 @@ test('seven successful authorizations without amounts retire once and refill the
     assert.equal(oldCard.authorization_count,7);
     assert.equal(oldCard.provider_status,'DELETED');
     assert.equal(policy.eligible(oldCard),false);
-    assert.deepEqual(f.calls.filter(c=>['deleteCard','createCard'].includes(c.operation)).map(c=>c.operation),['deleteCard','createCard']);
+    assert.deepEqual(f.calls.filter(c=>['deleteCard','createCard'].includes(c.operation)).map(c=>c.operation),['deleteCard']);
     assert.deepEqual(f.calls.filter(c=>c.operation==='deleteCard').map(c=>c.body.card_id),[42]);
-    assert.equal(f.remote.filter(card=>card.status!=='DELETED').length,5);
-    assert.equal(f.db.cards.find(card=>card.card_id===100).authorization_count,0);
+    assert.equal(f.remote.filter(card=>card.status!=='DELETED').length,4);
+    assert.equal(f.db.cards.find(card=>card.card_id===100),undefined);
     await f.service.synchronize(cfg);
     assert.equal(oldCard.authorization_count,7);
     assert.equal(f.calls.filter(c=>c.operation==='deleteCard').length,1);
-    assert.equal(f.calls.filter(c=>c.operation==='createCard').length,1);
-    assert.equal(f.remote.filter(card=>card.status!=='DELETED').length,5);
+    assert.equal(f.calls.filter(c=>c.operation==='createCard').length,0);
+    assert.equal(f.remote.filter(card=>card.status!=='DELETED').length,4);
 });
 
-test('the seventh success waits for its authorization and is replaced only after the provider confirms seven',async()=>{
+test('the seventh success waits for its authorization and retires only after the provider confirms seven',async()=>{
     const f=await setup([6,0,0,0,0]);
     const task=await f.claim();assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),42);
     await Promise.all([f.settle(task,'success'),f.settle(task,'success')]);
@@ -97,26 +186,32 @@ test('the seventh success waits for its authorization and is replaced only after
     f.ledger.get(42).push(authorization(6));
     await f.service.synchronize(cfg);
     assert.equal(f.db.cards[0].provider_status,'DELETED');
-    assert.equal(f.db.cards.find(card=>card.card_id===100).authorization_count,0);
-    assert.equal(f.remote.filter(card=>card.status!=='DELETED').length,5);
+    assert.equal(f.db.cards.find(card=>card.card_id===100),undefined);
+    assert.equal(f.remote.filter(card=>card.status!=='DELETED').length,4);
     await f.service.synchronize(cfg);
     assert.equal(f.calls.filter(call=>call.operation==='deleteCard').length,1);
-    assert.equal(f.calls.filter(call=>call.operation==='createCard').length,1);
+    assert.equal(f.calls.filter(call=>call.operation==='createCard').length,0);
     assert.ok(f.calls.some(call=>call.operation==='cardTransaction'));
 });
-test('empty pool opens exactly five cards across concurrent synchronizations',async()=>{
-    const f=await setup([]);await Promise.all([f.service.synchronize(cfg),f.service.synchronize(cfg)]);
-    assert.equal(f.calls.filter(c=>c.operation==='createCard').length,5);
-    assert.equal(f.remote.length,5);
+test('empty and sparse pools never open or fund cards across concurrent background synchronizations',async()=>{
+    for(const count of [0,1,4]) {
+        const f=await setup(Array(count).fill(0));
+        await Promise.all([f.service.synchronize(cfg),f.service.synchronize(cfg)]);
+        await f.service.recover(cfg);
+        await f.service.synchronize(cfg);
+        assert.equal(f.calls.filter(c=>['createCard','rechargeCard','getAccountBalance','getProductCode'].includes(c.operation)).length,0);
+        assert.equal(f.remote.length,count);
+        assert.equal(f.db.issues.length,0);
+    }
 });
-test('busy seventh-use card cannot be deleted or cause overfilling; released card is replaced',async()=>{
+test('busy seventh-use card cannot be deleted or cause overfilling; released card retires without replacement',async()=>{
     const f=await setup([7,0,0,0,0]);f.db.cards[0].active_job='unresolved';
     await f.service.synchronize(cfg);assert.equal(f.calls.filter(c=>['deleteCard','createCard'].includes(c.operation)).length,0);
     f.db.cards[0].active_job=null;await f.service.synchronize(cfg);
     assert.equal(f.calls.filter(c=>c.operation==='deleteCard').length,1);
-    assert.equal(f.remote.filter(c=>c.status!=='DELETED').length,5);
+    assert.equal(f.remote.filter(c=>c.status!=='DELETED').length,4);
 });
-test('delete timeout uses readonly recovery and permits replacement only after confirmed deletion',async()=>{
+test('delete timeout uses readonly recovery and confirms deletion without opening a replacement',async()=>{
     const f=await setup([7,0,0,0,0],{deleteCard:async()=>({success:false})});
     await assert.rejects(f.service.synchronize(cfg));const key=f.db.cards[0].retirement_key;
     assert.ok(key);assert.equal(policy.eligible(f.db.cards[0]),false);
@@ -130,18 +225,19 @@ test('delete timeout uses readonly recovery and permits replacement only after c
     f.remote[0].status='DELETED';await f.service.synchronize(cfg);
     assert.equal(f.db.cards[0].retirement_state,'confirmed');
     assert.deepEqual(f.calls.filter(c=>c.operation==='deleteCard').map(c=>c.key),[key]);
-    assert.equal(f.calls.filter(c=>c.operation==='createCard').length,1);
-    assert.equal(f.remote.filter(c=>c.status!=='DELETED').length,5);
+    assert.equal(f.calls.filter(c=>c.operation==='createCard').length,0);
+    assert.equal(f.remote.filter(c=>c.status!=='DELETED').length,4);
 });
-test('unknown opening resumes same body and key without opening extra cards',async()=>{
-    let fail=true;const f=await setup([0,0,0,0],{createCard:async()=>fail?{success:false,status:502}:null});
-    await assert.rejects(f.service.synchronize(cfg));assert.equal(f.db.issues.length,1);
-    fail=false;f.advance();await f.service.synchronize(cfg);
+test('background recovery confirms an existing opening with the original identity without replenishing',async()=>{
+    let fail=true;const f=await setup([],{createCard:async()=>fail?{success:false,status:502}:null});
+    await assert.rejects(f.service.apply(cfg));assert.equal(f.db.issues.length,1);
+    fail=false;f.advance();await f.service.recover(cfg);await f.service.synchronize(cfg);
     const calls=f.calls.filter(c=>c.operation==='createCard');assert.equal(calls.length,2);
-    assert.equal(calls[0].key,calls[1].key);assert.deepEqual(calls[0].body,calls[1].body);assert.equal(f.remote.length,5);
+    assert.equal(calls[0].key,calls[1].key);assert.deepEqual(calls[0].body,calls[1].body);assert.equal(f.remote.length,1);
+    assert.equal(f.db.issues.length,1);
 });
 
-test('confirmed deletion recovers before an expired transaction endpoint can block replacement',async()=>{
+test('confirmed deletion recovers before an expired transaction endpoint can block synchronization',async()=>{
     let deleted=false;
     const f=await setup([7,0,0,0,0],{
         deleteCard:async()=>{deleted=true;return {success:false};},
@@ -157,8 +253,38 @@ test('confirmed deletion recovers before an expired transaction endpoint can blo
     assert.equal(f.db.cards[0].retirement_state,'confirmed');
     assert.ok(!f.calls.slice(before).some(c=>c.operation==='cardTransaction'&&c.body.card_id===42));
     assert.equal(f.calls.filter(c=>c.operation==='deleteCard').length,1);
+    assert.equal(f.calls.filter(c=>c.operation==='createCard').length,0);
+    assert.equal(f.db.cards.filter(c=>c.provider_status!=='DELETED').length,4);
+});
+
+test('allocation reconciles a pending deletion before its expired transaction API can block one replacement',async()=>{
+    let deleted=false;
+    const f=await setup([7],{
+        deleteCard:async()=>{deleted=true;return {success:false};},
+        cardDetail:async body=>deleted&&body.card_id===42
+            ?{success:true,data:{card_id:42,status:'DELETED',product_code:'p1',currency:'USD'}}:null,
+        cardTransaction:async body=>deleted&&body.card_id===42?{success:false,status:404}:null
+    });
+    await assert.rejects(f.service.synchronize(cfg));
+    const before=f.calls.length,task=await f.claim();
+    assert.equal(await f.service.allocate({...cfg,orbitcard_plan_prices:{...cfg.orbitcard_plan_prices,plus:'19.00'}},task.jobKey,'plus'),100);
+    assert.equal(f.db.cards.find(card=>card.card_id===42).retirement_state,'confirmed');
+    assert.equal(f.calls.slice(before).filter(c=>c.operation==='cardTransaction'&&c.body.card_id===42).length,0);
+    assert.equal(f.calls.filter(c=>c.operation==='deleteCard').length,1);
     assert.equal(f.calls.filter(c=>c.operation==='createCard').length,1);
-    assert.equal(f.db.cards.filter(c=>c.provider_status!=='DELETED').length,5);
+});
+
+test('a pending deletion with an expired transaction API does not block another funded card',async()=>{
+    let deleted=false;
+    const f=await setup([7,0],{
+        deleteCard:async()=>{deleted=true;return {success:false};},
+        cardTransaction:async body=>deleted&&body.card_id===42?{success:false,status:404}:null
+    });
+    await assert.rejects(f.service.synchronize(cfg));
+    const before=f.calls.length,task=await f.claim();
+    assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),43);
+    assert.equal(f.calls.slice(before).filter(c=>c.operation==='cardTransaction'&&c.body.card_id===42).length,0);
+    assert.equal(f.calls.slice(before).filter(c=>['deleteCard','createCard'].includes(c.operation)).length,0);
 });
 test('changed credential cannot resume an existing retirement',async()=>{
     const f=await setup([7,0,0,0,0],{deleteCard:async()=>({success:false})});
@@ -167,7 +293,7 @@ test('changed credential cannot resume an existing retirement',async()=>{
     await assert.rejects(f.service.synchronize({...cfg,api_key:'different'}),/API Key/);
     assert.equal(f.calls.filter(c=>c.operation==='deleteCard').length,before);
 });
-test('missing card after unknown delete requires confirmed DELETED detail before replacement',async()=>{
+test('missing card after unknown delete requires confirmed DELETED detail without replacement',async()=>{
     let hidden=false;
     const f=await setup([7,0,0,0,0],{
         deleteCard:async()=>{hidden=true;return {success:false};},
@@ -177,7 +303,7 @@ test('missing card after unknown delete requires confirmed DELETED detail before
     await assert.rejects(f.service.synchronize(cfg),/删除仍未确认/);
     assert.equal(f.calls.filter(c=>c.operation==='createCard').length,0);
     f.remote[0].status='DELETED';await f.service.synchronize(cfg);
-    assert.equal(f.calls.filter(c=>c.operation==='createCard').length,1);
+    assert.equal(f.calls.filter(c=>c.operation==='createCard').length,0);
 });
 test('transaction API failures stop all lifecycle writes without erasing confirmed counts',async()=>{
     const f=await setup([7,0,0,0,0],{cardTransaction:async()=>{throw Error('transactions unavailable');}});
@@ -209,11 +335,15 @@ test('disabled configuration imports authorization counts without opening or del
     assert.equal(f.db.cards[0].authorization_count,7);
     assert.equal(f.calls.filter(c=>['createCard','deleteCard'].includes(c.operation)).length,0);
 });
-test('surplus pool directly deletes its most-used idle frozen card without unfreezing it',async()=>{
-    const f=await setup([6,1,0,0,0,0]);f.remote[0].status='CANCELLED';await f.service.synchronize(cfg);
-    assert.equal(f.remote.filter(c=>c.status!=='DELETED').length,5);
-    assert.deepEqual(f.calls.filter(c=>['freezeCard','deleteCard'].includes(c.operation)).map(c=>c.operation),['deleteCard']);
+test('synchronization keeps more than five cards and retires only exhausted cards',async()=>{
+    const f=await setup([6,1,0,0,0,0,0,7]);f.remote[0].status='CANCELLED';
+    await f.service.synchronize(cfg);
+    assert.equal(f.remote.filter(c=>c.status!=='DELETED').length,7);
+    assert.equal(f.remote[0].status,'CANCELLED');
+    assert.deepEqual(f.calls.filter(c=>c.operation==='deleteCard').map(c=>c.body.card_id),[49]);
+    assert.equal(f.calls.filter(c=>['freezeCard','createCard'].includes(c.operation)).length,0);
 });
+
 test('allocation refreshes authorizations and ignores obsolete activation counters',async()=>{
     const f=await setup([6,0,0,0,0]);f.db.cards[0].activation_count=99;
     const task=await f.claim();assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),42);
@@ -229,4 +359,31 @@ test('settled authorizations remain counted and later distinct authorizations st
     await f.service.transactions(cfg,42);assert.equal(f.db.cards[0].authorization_count,2);
     f.ledger.set(42,[settlement('A'),settlement('B')]);
     await f.service.transactions(cfg,42);assert.equal(f.db.cards[0].authorization_count,2);
+});
+
+test('manual application opens exactly one card and synchronization does not fill remaining slots',async()=>{
+    const f=await setup([]);
+    assert.equal((await f.service.apply(cfg)).card_id,100);
+    await f.service.synchronize(cfg);
+    assert.equal(f.calls.filter(c=>c.operation==='createCard').length,1);
+    assert.equal(f.remote.length,1);
+    assert.equal(f.db.issues.length,1);
+});
+
+test('manual requests can each open one card beyond five without synchronization trimming them',async()=>{
+    const f=await setup(Array(6).fill(0));
+    await f.service.apply(cfg);await f.service.apply(cfg);await f.service.synchronize(cfg);
+    assert.equal(f.remote.length,8);
+    assert.equal(f.calls.filter(c=>c.operation==='createCard').length,2);
+    assert.equal(f.calls.filter(c=>c.operation==='deleteCard').length,0);
+});
+
+test('an order can open one needed card beyond five inactive cards',async()=>{
+    const f=await setup(Array(6).fill(0));
+    for(const card of f.remote)card.status='CANCELLED';
+    const task=await f.claim();
+    assert.equal(await f.service.allocate({...cfg,orbitcard_plan_prices:{...cfg.orbitcard_plan_prices,plus:'19.00'}},task.jobKey,'plus'),100);
+    assert.equal(f.remote.length,7);
+    assert.equal(f.calls.filter(c=>c.operation==='createCard').length,1);
+    assert.equal(f.calls.filter(c=>c.operation==='deleteCard').length,0);
 });

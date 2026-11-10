@@ -19,10 +19,12 @@ module.exports = function createPaymentAutomation({ runQuery }) {
         if (!owner) return { allowed: false, keys: [] };
         const [code] = owner.cdk_code
             ? await runQuery('SELECT * FROM cdk_codes WHERE cdk_code = ? LIMIT 1', [owner.cdk_code]) : [];
-        const allowed = (!owner.cdk_code || Boolean(code?.is_active && !code.manual_redeemed_at))
-            && (manual ? ['preparing', 'prepared', 'submitting', 'pending'].includes(owner.state)
-                : !requiresManualHandling(owner) && ['prepared', 'submitting', 'pending'].includes(owner.orbitcard_state));
-        return { allowed, keys: manual ? manualLockKeys(owner.request_id, owner.cdk_code)
+        const activeOwner = !owner.cdk_code || Boolean(code?.is_active && !code.manual_redeemed_at);
+        const state = manual ? owner.state : owner.orbitcard_state;
+        const allowed = activeOwner
+            && (manual ? ['preparing', 'prepared', 'funding_waiting', 'submitting', 'pending'].includes(owner.state)
+                : !requiresManualHandling(owner) && ['preparing', 'prepared', 'funding_waiting', 'submitting', 'pending'].includes(owner.orbitcard_state));
+        return { allowed, canReconcileFunding: activeOwner && state === 'funding_review', state, keys: manual ? manualLockKeys(owner.request_id, owner.cdk_code)
             : owner.cdk_code ? [cdkLockKey(owner.cdk_code)] : [] };
     }
     async function assertPaymentAllowed(jobKey) {
@@ -30,7 +32,13 @@ module.exports = function createPaymentAutomation({ runQuery }) {
             throw new PaymentStoppedError('任务已转人工处理或已结束，自动开卡、补款和订阅充值已停止');
         }
     }
-    return { paymentOwner, assertPaymentAllowed };
+    async function assertFundingReconciliationAllowed(jobKey) {
+        const owner = await paymentOwner(jobKey);
+        if (!owner.allowed && !owner.canReconcileFunding) {
+            throw new PaymentStoppedError('原补款已停止自动对账或任务已结束，请人工核对');
+        }
+    }
+    return { paymentOwner, assertPaymentAllowed, assertFundingReconciliationAllowed };
 };
 module.exports.requiresManualHandling = requiresManualHandling;
 module.exports.PaymentStoppedError = PaymentStoppedError;

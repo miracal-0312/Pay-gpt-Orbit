@@ -58,7 +58,8 @@ module.exports = function createActivationHandler({ store, ensureStoreReady, act
         } catch (_) {
             if (task && !dispatched) {
                 try { await executionGuard.assertOwned(); await store.settleOrbitcardTask(task.jobKey, { status: 'failed', progress: 0,
-                    orbitcardState: 'rejected', expectedState: 'prepared', message: '任务尚未提交，CDK 已释放' }); } catch (_) { /* startup recovery will reconcile the durable prepared record */ }
+                    orbitcardState: 'rejected', expectedState: task.orbitcardState || 'prepared',
+                    expectedClientOrderNo: task.orbitcardClientOrderNo, message: '任务尚未提交，CDK 已释放' }); } catch (_) { /* startup recovery will reconcile the durable preparation record */ }
             }
             return res.status(503).json({ success: false, message: '充值服务暂不可用，请联系管理员检查配置或查询原订单' });
         } finally {

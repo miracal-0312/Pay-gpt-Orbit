@@ -1,5 +1,6 @@
 'use strict';
 const { requiresManualHandling } = require('./payment-automation');
+const { cardScope, planFor } = require('./orbitcard-card-policy');
 
 // Transaction boundaries keep task creation, order linkage and CDK ownership consistent.
 module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, runExecute, createTaskLog, settleCardUse = async () => {}, enqueueRedemption = async () => {} }) {
@@ -11,6 +12,28 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
         return Boolean(funding.length || issue.length);
     }
 
+    async function ownsPreparedCard(task, options) {
+        const cardId = Number(task.orbitcard_card_id);
+        if (!Number.isSafeInteger(cardId) || cardId < 1) return false;
+        const [card] = await runQuery('SELECT * FROM orbitcard_managed_cards WHERE scope=? AND card_id=? FOR UPDATE',
+            [cardScope(task.orbitcard_base_url), cardId], options);
+        return Boolean(card && card.active_job === task.job_key && card.provider_status === 'ACTIVE'
+            && card.currency === 'USD' && card.balance != null);
+    }
+
+    async function canReleaseFundingReview(task, options) {
+        const [funding] = await runQuery('SELECT * FROM orbitcard_card_fundings WHERE job_key=? FOR UPDATE', [task.job_key], options);
+        if (!funding || !['ready','failed'].includes(funding.state)
+            || funding.scope !== cardScope(task.orbitcard_base_url) || funding.plan_type !== planFor(task.orbitcard_plan_type)
+            || Number(funding.card_id) !== Number(task.orbitcard_card_id)
+            || (task.orbitcard_api_key_hash && funding.credential_hash !== task.orbitcard_api_key_hash)) return false;
+        const cardId = Number(task.orbitcard_card_id);
+        if (!Number.isSafeInteger(cardId) || cardId < 1) return false;
+        const [card] = await runQuery('SELECT * FROM orbitcard_managed_cards WHERE scope=? AND card_id=? FOR UPDATE',
+            [funding.scope, cardId], options);
+        return Boolean(card && card.active_job === task.job_key);
+    }
+
     async function createOrbitcardTask({ cdk, planType, email, baseUrl, apiKeyHash = null }) {
         return withTransaction(async connection => {
             const options = { connection };
@@ -19,17 +42,17 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
             if (!code || !code.is_active || code.used_at || code.type !== '自助') return null;
             if (String(code.plan_type || 'plus') !== String(planType)) return null;
             const unfinished = await runQuery(`SELECT job_key FROM task_logs WHERE cdk_code = ?
-                AND (status IN ('running','manual') OR orbitcard_state IN ('prepared','retry_waiting','support_locked','balance_blocked','funding_pending','submitting','pending','manual','success')) LIMIT 1`, [cdk], options);
+                AND (status IN ('running','manual') OR orbitcard_state IN ('preparing','prepared','funding_waiting','funding_review','retry_waiting','support_locked','balance_blocked','funding_pending','submitting','pending','manual','success')) LIMIT 1`, [cdk], options);
             if (unfinished.length) return null;
             const task = await createTaskLog({ tokenPreview: email || 'Orbitcard', cdkCode: cdk, status: 'running', progress: 3 }, options);
             const identity = require('./orbitcard-cdk').clientOrderNo(cdk, task.jobKey);
-            await runExecute(`UPDATE task_logs SET orbitcard_client_order_no = ?, orbitcard_state = 'prepared',
+            await runExecute(`UPDATE task_logs SET orbitcard_client_order_no = ?, orbitcard_state = 'preparing',
                 orbitcard_plan_type = ?, orbitcard_email = ?, orbitcard_base_url = ?,
                 orbitcard_retry_root_job_key = ?, orbitcard_retry_attempt_no = 1,
                 orbitcard_api_key_hash = ? WHERE job_key = ?`,
             [identity, planType, email || '', baseUrl, task.jobKey, apiKeyHash, task.jobKey], options);
             await runExecute('UPDATE cdk_codes SET used_at = CURRENT_TIMESTAMP WHERE cdk_code = ?', [cdk], options);
-            return { ...task, orbitcardClientOrderNo: identity, orbitcardRetryRootJobKey: task.jobKey, orbitcardRetryAttemptNo: 1 };
+            return { ...task, orbitcardState: 'preparing', orbitcardClientOrderNo: identity, orbitcardRetryRootJobKey: task.jobKey, orbitcardRetryAttemptNo: 1 };
         });
     }
 
@@ -48,16 +71,41 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
             const options = { connection };
             const cdk = initial[0].cdk_code;
             // Every transaction takes CDK then task locks in the same order.
-            await runQuery('SELECT cdk_code FROM cdk_codes WHERE cdk_code = ? FOR UPDATE', [cdk], options);
+            const [code] = await runQuery('SELECT * FROM cdk_codes WHERE cdk_code = ? FOR UPDATE', [cdk], options);
             const rows = await runQuery('SELECT * FROM task_logs WHERE job_key = ? FOR UPDATE', [jobKey], options);
             const task = rows[0];
             if (!task?.orbitcard_client_order_no) throw new Error('兑换任务未绑定 Orbitcard 订单');
             if (expectedState && task.orbitcard_state !== expectedState) return { applied: false, status: task.status };
             if (expectedClientOrderNo && task.orbitcard_client_order_no !== expectedClientOrderNo) return { applied: false, status: task.status };
             if (gptApiOrderId && task.gpt_api_order_id && task.gpt_api_order_id !== gptApiOrderId) return { applied: false, status: task.status };
-            if (['prepared','submitting'].includes(orbitcardState)
-                && (expectedState !== 'prepared' || !expectedClientOrderNo || task.orbitcard_state !== 'prepared')) {
-                return { applied: false, status: task.status };
+            if (['preparing','prepared','submitting','funding_waiting','funding_review'].includes(orbitcardState)) {
+                const allowedFrom = orbitcardState === 'submitting' ? ['prepared']
+                    : orbitcardState === 'preparing' ? ['preparing'] : ['preparing','prepared','funding_waiting'];
+                if (!allowedFrom.includes(expectedState) || !expectedClientOrderNo || task.orbitcard_state !== expectedState) {
+                    return { applied: false, status: task.status };
+                }
+                if (task.orbitcard_state === 'funding_waiting' && orbitcardState === 'prepared') {
+                    const [funding] = await runQuery('SELECT * FROM orbitcard_card_fundings WHERE job_key=? FOR UPDATE', [jobKey], options);
+                    if (!funding || funding.state !== 'ready' || Number(funding.card_id) !== Number(task.orbitcard_card_id)) {
+                        return { applied: false, status: task.status };
+                    }
+                }
+                if (task.orbitcard_state === 'preparing' && orbitcardState === 'prepared') {
+                    if (!await ownsPreparedCard(task, options) || await hasPendingPreparation(task, options)) {
+                        return { applied: false, status: task.status };
+                    }
+                    const [funding] = await runQuery('SELECT * FROM orbitcard_card_fundings WHERE job_key=? FOR UPDATE', [jobKey], options);
+                    if (funding && (funding.state !== 'ready' || Number(funding.card_id) !== Number(task.orbitcard_card_id))) {
+                        return { applied: false, status: task.status };
+                    }
+                    if (task.orbitcard_issue_key) {
+                        const [issue] = await runQuery('SELECT * FROM orbitcard_card_issues WHERE issue_key=? FOR UPDATE', [task.orbitcard_issue_key], options);
+                        if (!issue || issue.state !== 'ready' || Number(issue.card_id) !== Number(task.orbitcard_card_id)) {
+                            return { applied: false, status: task.status };
+                        }
+                    }
+                }
+                if (orbitcardState === 'funding_review') status = 'manual';
             }
             const latest = await runQuery('SELECT job_key FROM task_logs WHERE cdk_code = ? ORDER BY id DESC LIMIT 1', [cdk], options);
             if (latest[0]?.job_key !== jobKey) return { applied: false, status: task.status };
@@ -65,9 +113,19 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
             if (task.orbitcard_state === 'success' && orbitcardState !== 'success') return { applied: false, status: 'success' };
             if (task.orbitcard_state === 'support_locked') return { applied: false, status: 'failed' };
             if (['failed', 'rejected'].includes(task.orbitcard_state)) return { applied: false, status: task.status };
+            const reviewRelease = task.orbitcard_state === 'funding_review' && orbitcardState === 'rejected';
+            const reviewStop = task.orbitcard_state === 'funding_review' && orbitcardState === 'funding_pending';
+            if (task.orbitcard_state === 'funding_review') {
+                if ((!reviewRelease && !reviewStop) || expectedState !== 'funding_review'
+                    || expectedClientOrderNo !== task.orbitcard_client_order_no || code?.manual_redeemed_at) {
+                    return { applied: false, status: task.status };
+                }
+                if (reviewRelease && !await canReleaseFundingReview(task, options)) return { applied: false, status: task.status };
+                if (reviewStop) status = 'manual';
+            }
             const paymentState = orbitcardState;
             const manual = requiresManualHandling(task);
-            if (manual) {
+            if (manual && !reviewRelease && !reviewStop) {
                 // Handoff is durable: a pending query cannot put the task back in the payment loop.
                 if (!['submitting', 'pending', 'manual'].includes(task.orbitcard_state)
                     || !['pending', 'manual', 'success', 'failed', 'rejected'].includes(orbitcardState)) {
@@ -83,7 +141,7 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
                     message = '已转人工处理，自动支付已停止；仅核对原订单结果，勿重复充值';
                 }
             }
-            if (task.orbitcard_state === 'prepared' && ['failed','rejected'].includes(orbitcardState)) {
+            if (['preparing','prepared','funding_waiting','funding_review'].includes(task.orbitcard_state) && ['failed','rejected'].includes(orbitcardState)) {
                 // Recheck inside the transaction: a recovery snapshot can predate
                 // a funding/issuance intent committed by a worker losing its lock.
                 if (await hasPendingPreparation(task, options)) return { applied: false, status: task.status };
@@ -164,7 +222,7 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
             await runQuery('SELECT cdk_code FROM cdk_codes WHERE cdk_code = ? FOR UPDATE', [cdk], options);
             const task = (await runQuery('SELECT * FROM task_logs WHERE job_key = ? FOR UPDATE', [jobKey], options))[0];
             const latest = await runQuery('SELECT job_key FROM task_logs WHERE cdk_code = ? ORDER BY id DESC LIMIT 1', [cdk], options);
-            const selectionExhausted = details.cardSelectionExhausted === true && expectedState === 'prepared';
+            const selectionExhausted = details.cardSelectionExhausted === true && ['preparing','prepared'].includes(expectedState);
             const legacyRetry = details.legacyRetry === true && expectedState === 'retry_waiting';
             if (!task || latest[0]?.job_key !== jobKey || task.orbitcard_state !== expectedState
                 || (Number(task.orbitcard_retry_attempt_no || 1) < 2 && !selectionExhausted && !legacyRetry)) return { applied: false };

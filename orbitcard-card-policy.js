@@ -6,6 +6,15 @@ const { paymentPlan } = require('./plan-registry');
 class CardPreparationError extends Error {}
 class AccountBalanceError extends CardPreparationError {}
 class FundingPendingError extends CardPreparationError {}
+const FUNDING_POLL_MS = 5000;
+const FUNDING_WAIT_MS = 120000;
+class FundingAwaitingError extends FundingPendingError {
+    constructor(message, retryAfterMs = FUNDING_POLL_MS) {
+        super(message);
+        this.retryAfterMs = Number.isFinite(Number(retryAfterMs)) && Number(retryAfterMs) > 0
+            ? Math.max(FUNDING_POLL_MS, Number(retryAfterMs)) : FUNDING_POLL_MS;
+    }
+}
 class CardDataError extends CardPreparationError {}
 class CardSelectionError extends CardPreparationError {}
 
@@ -28,5 +37,5 @@ function settlementState(current, orbitcardState) {
     return current;
 }
 
-module.exports = { planFor, cardScope, settlementState, CardPreparationError, AccountBalanceError, FundingPendingError,
+module.exports = { planFor, cardScope, settlementState, CardPreparationError, AccountBalanceError, FundingPendingError, FundingAwaitingError, FUNDING_POLL_MS, FUNDING_WAIT_MS,
     CardDataError, CardSelectionError };

@@ -3,7 +3,8 @@
 const crypto = require('node:crypto');
 const api = require('./orbitcard-client');
 const { parseSession } = require('./session-input');
-const { cardScope, CardPreparationError } = require('./orbitcard-card-policy');
+const { cardScope, CardPreparationError, FundingAwaitingError, FUNDING_POLL_MS, FUNDING_WAIT_MS } = require('./orbitcard-card-policy');
+const { PaymentStoppedError } = require('./payment-automation');
 const { PROVIDER_TO_PLAN: CDK_PLAN } = require('./plan-registry');
 const { manualLockKeys } = require('./payment-execution-lock');
 
@@ -16,7 +17,8 @@ class ManualOrderError extends Error {
     constructor(message, status = 400) { super(message); this.status = status; }
 }
 
-module.exports = function createManualService({ store, activeJobs, audit, cardService, provider = api, now = Date.now }) {
+module.exports = function createManualService({ store, activeJobs, audit, cardService, provider = api, now = Date.now,
+    sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), fundingWaitMs = FUNDING_WAIT_MS }) {
     const subscription = require('./orbitcard-subscription-service')(provider, audit);
     const inFlight = new Set(), challenges = new Map(), nextQueryAt = new Map();
     let recovering = false;
@@ -147,8 +149,20 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
                     existing = await store.markManualPrepared(requestId, existing.client_order_no, cardId);
                     record(existing, 'manual_card_ready', '管理员订单支付卡已准备', { card_id: cardId, plan_type: planType });
                 } catch (error) {
-                    // Release a preparation with no remote write or reserved card;
-                    // otherwise preserve the original issue/funding intent for retry.
+                    if (error instanceof FundingAwaitingError && typeof cardService.confirmFunding === 'function') {
+                        await executionGuard.assertOwned();
+                        await store.assertPaymentAllowed(existing.client_order_no);
+                        existing = await store.waitManualFunding(requestId, existing.client_order_no,
+                            `原补款仍待到账，后台每 ${FUNDING_POLL_MS / 1000} 秒核对；确认足额后继续原订阅`);
+                        activeJobs.delete(slot);
+                        activeJobs.add(existing.client_order_no);
+                        const job = continueFunding(existing, cfg, session, error.retryAfterMs);
+                        handoff(job);
+                        job.catch(() => {}).finally(() => activeJobs.delete(existing.client_order_no));
+                        return publicOrder(existing);
+                    }
+                    // Release only after the store verifies that any original
+                    // issue/funding is final; unresolved money operations stay locked.
                     try {
                         await executionGuard.assertOwned();
                         await store.failManualPreparation(requestId, existing.client_order_no, `支付准备失败：${error.message}`);
@@ -179,6 +193,102 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
         } finally { activeJobs.delete(slot); }
     }
 
+    async function finishFundingError(order, cfg, error) {
+        if (error instanceof PaymentStoppedError) return;
+        await cfg.executionGuard?.assertOwned();
+        const released = await store.releaseManualFunding(order.request_id, order.client_order_no,
+            '原补款已核对，会员订阅尚未提交；准备任务已释放，请使用最新 Session 和新的请求编号重新提交');
+        if (!released) await store.pauseManualPreparation(order.request_id, order.client_order_no,
+            '原补款出现需要人工核对的异常，自动支付已停止；保留原卡片与资金记录');
+    }
+
+    async function continueFunding(order, cfg, session, retryAfterMs) {
+        const deadline = now() + fundingWaitMs;
+        let delay = Math.max(FUNDING_POLL_MS, retryAfterMs || 0);
+        async function review(message) {
+            await cfg.executionGuard?.assertOwned();
+            await store.assertPaymentAllowed(order.client_order_no);
+            await store.reviewManualFunding(order.request_id, order.client_order_no, message);
+            record(order, 'manual_funding_review', '原补款已转人工对账，停止自动订阅；后台仅只读核对原资金');
+        }
+        try {
+            while (now() < deadline) {
+                await cfg.executionGuard?.assertOwned();
+                await store.assertPaymentAllowed(order.client_order_no);
+                try { parseSession(session); }
+                catch (_) {
+                    await review('Session 已过期，已转人工对账；后台仅核对原补款，确认后释放准备任务，需重新提交最新 Session');
+                    return;
+                }
+                await sleep(Math.min(delay, deadline - now()));
+                await cfg.executionGuard?.assertOwned();
+                await store.assertPaymentAllowed(order.client_order_no);
+                if (now() >= deadline) break;
+                try { parseSession(session); }
+                catch (_) {
+                    await review('Session 已过期，已转人工对账；后台仅核对原补款，确认后释放准备任务，需重新提交最新 Session');
+                    return;
+                }
+                let cardId;
+                try { cardId = await cardService.confirmFunding(cfg, order.client_order_no, order.plan_type); }
+                catch (error) {
+                    if (!(error instanceof FundingAwaitingError)) throw error;
+                    delay = Math.max(FUNDING_POLL_MS, error.retryAfterMs || 0);
+                    continue;
+                }
+                await cfg.executionGuard?.assertOwned();
+                await store.assertPaymentAllowed(order.client_order_no);
+                if (now() >= deadline) break;
+                try { parseSession(session); }
+                catch (_) {
+                    await review('原补款已到账，但 Session 已过期；已转人工对账，请核对后使用最新 Session 和新的请求编号重新提交');
+                    return;
+                }
+                const prepared = await store.markManualPrepared(order.request_id, order.client_order_no, cardId);
+                if (await store.claimManualSubmission(order.request_id)) await submit(prepared, cfg, session);
+                return;
+            }
+            await review('补款等待已超过 120 秒，已转人工对账；后台仅核对原补款，确认后释放准备任务，需重新提交最新 Session');
+        } catch (error) {
+            try { await finishFundingError(order, cfg, error); }
+            catch (_) { record(order, 'manual_funding_recovery_deferred', '原补款等待暂未完成，保留原记录供后台继续核对'); }
+        }
+    }
+
+    async function recoverFunding(order) {
+        if ((nextQueryAt.get(order.request_id) || 0) > now()) return;
+        const guard = await store.acquirePaymentLock(manualLockKeys(order.request_id, order.cdk_code));
+        if (!guard) return;
+        try {
+            await guard.assertOwned();
+            order = await store.getManualOrder(order.request_id);
+            if (!order || !['funding_waiting','funding_review'].includes(order.state)) return;
+            const cfg = { ...await config(), executionGuard: guard, auditJobKey: order.client_order_no };
+            if (!matches(order, { cfg, planType: order.plan_type, targetEmail: order.target_email })) {
+                throw new ManualOrderError('补款平台或 API Key 与原管理员订单不一致，请恢复原配置后核对',409);
+            }
+            await store.assertFundingReconciliationAllowed(order.client_order_no);
+            if (order.state === 'funding_waiting') {
+                order = await store.reviewManualFunding(order.request_id, order.client_order_no,
+                    '原 Session 已不可用，已转人工对账；后台仅核对原补款，确认后释放准备任务，需重新提交最新 Session');
+            }
+            nextQueryAt.set(order.request_id, now() + FUNDING_POLL_MS);
+            try {
+                await cardService.confirmFunding(cfg, order.client_order_no, order.plan_type);
+                await guard.assertOwned();
+                await store.assertFundingReconciliationAllowed(order.client_order_no);
+                await store.releaseManualFunding(order.request_id, order.client_order_no,
+                    '原补款已到账，会员订阅尚未提交；准备任务已释放，请使用最新 Session 和新的请求编号重新提交');
+            } catch (error) {
+                if (error instanceof FundingAwaitingError) {
+                    nextQueryAt.set(order.request_id, now() + Math.max(FUNDING_POLL_MS, error.retryAfterMs || 0));
+                    return;
+                }
+                await finishFundingError(order, cfg, error);
+            }
+        } finally { await guard.release(); }
+    }
+
     async function submit(order, cfg, session) {
         const identity = order.client_order_no;
         try {
@@ -187,7 +297,7 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
             await cfg.executionGuard?.assertOwned();
             const snapshot = result.snapshot;
             if (result.rejected) {
-                await store.settleManualOrder(order.request_id, { state: 'failed', snapshot,
+                await store.settleManualOrder(order.request_id, { state: 'rejected', snapshot,
                     message: 'Orbitcard 明确拒绝提交；支付卡已释放，请核对 Session 与配置' });
                 record(order, 'manual_order_rejected', '卡台明确拒绝管理员订单');
                 return;
@@ -204,7 +314,7 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
                 try { await cfg.executionGuard.assertOwned(); }
                 catch (_) { record(order, 'execution_lock_lost', '管理员订单执行权已失效，保留原单等待恢复核对'); return; }
             }
-            await store.settleManualOrder(order.request_id, { state: 'manual',
+            await store.settleManualOrder(order.request_id, { state: 'pending',
                 message: '提交结果尚未确认；请查询原订单，勿重新发起付款' }).catch(() => {});
             record(order, 'manual_order_unknown', '管理员订单提交结果待核对');
         }
@@ -240,7 +350,7 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
             if (!result.success) {
                 challenges.delete(requestId);
                 record(order, 'manual_order_query_unconfirmed', '原管理员订单尚未返回可核对的归属结果');
-                return publicOrder(await store.settleManualOrder(requestId, { state: 'manual',
+                return publicOrder(await store.settleManualOrder(requestId, { state: 'pending',
                     message: '原订单查询暂不可确认；保留支付卡占用，勿重新付款' }));
             }
             const state = result.state;
@@ -253,7 +363,7 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
                 state: next, taskNo: result.orderId,
                 snapshot: result.snapshot,
                 message: next === 'success' ? 'Orbitcard 已确认开通成功' : next === 'failed'
-                    ? 'Orbitcard 已确认开通失败；支付卡已释放' : captcha
+                    ? 'Orbitcard 已确认开通失败；支付卡已释放，CDK 保持锁定，请人工售后处理' : captcha
                         ? '需要完成人机验证，然后继续查询原订单' : 'Orbitcard 仍在处理；继续查询原订单'
             });
             record(order, 'manual_order_query', '管理员原订单查询完成', { state: next, task_no: updated.task_no });
@@ -267,6 +377,10 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
         try {
             for (const order of await store.listRecoverableManualOrders()) {
                 if (activeJobs.has(order.client_order_no) || inFlight.has(order.request_id)) continue;
+                if (['funding_waiting','funding_review'].includes(order.state)) {
+                    await recoverFunding(order).catch(() => {});
+                    continue;
+                }
                 if (order.state === 'prepared') {
                     const guard = await store.acquirePaymentLock(manualLockKeys(order.request_id, order.cdk_code));
                     if (!guard) continue;

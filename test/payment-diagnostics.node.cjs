@@ -97,52 +97,45 @@ test('preflight rejects missing configured USD prices without financial writes',
     assert.equal(result.passed,false);assert.deepEqual(f.writes,[]);
 });
 
-test('enabled preflight budgets each missing pool card together with the selected payment deficit',async()=>{
-    const full=managedPool(5);full.state.available='0.00';
-    const ready=await full.service.preflight({stage:'cards',plan_type:'plus'});
-    assert.equal(ready.passed,true);assert.equal(ready.result.selection.maintenance.open_count,0);
-    assert.equal(ready.result.selection.maintenance.required_balance,'0.00');
-    for(const [count,balance,required] of [[4,'20.00','20.00'],[4,'2.00','34.00'],[3,'2.00','54.00']]) {
-        const f=managedPool(count,balance);f.state.available=required;
+test('enabled preflight budgets only the selected deficit regardless of pool size',async()=>{
+    for(const count of [1,4,5,6,25]) for(const balance of ['20.00','2.00']) {
+        const f=managedPool(count,balance),required=balance==='2.00'?'14.00':'0.00';f.state.available=required;
         const before=structuredClone(f.state.rows);
         const enough=await f.service.preflight({stage:'cards',plan_type:'plus'});
         assert.equal(enough.passed,true);
         const maintenance=enough.result.selection.maintenance;
-        assert.equal(maintenance.target_size,5);assert.equal(maintenance.current_size,count);
-        assert.equal(maintenance.open_count,5-count);assert.equal(maintenance.opening_amount,((5-count)*20).toFixed(2));
-        assert.equal(maintenance.funding_amount,balance==='2.00'?'14.00':'0.00');
-        assert.equal(maintenance.required_balance,required);assert.equal(maintenance.fees_included,false);
-        assert.equal(maintenance.snapshot_only,true);assert.deepEqual(maintenance.retire_card_ids,[]);
-        f.state.available=(Number(required)-0.01).toFixed(2);
-        const short=await f.service.preflight({stage:'cards',plan_type:'plus'});
-        assert.equal(short.passed,false);assert.equal(short.result.selection.account_check,'failed');
+        assert.equal(maintenance.capacity_limit,null);assert.equal(maintenance.auto_refill,false);
+        assert.equal(maintenance.current_size,count);assert.equal(maintenance.open_count,0);
+        assert.equal(maintenance.opening_amount,'0.00');assert.equal(maintenance.required_balance,required);
+        if(Number(required)>0) {
+            f.state.available='13.99';
+            const short=await f.service.preflight({stage:'cards',plan_type:'plus'});
+            assert.equal(short.passed,false);assert.equal(short.result.selection.account_check,'failed');
+        }
         assert.deepEqual(f.state.rows,before);assert.deepEqual(f.writes,[]);
     }
 });
 
-test('enabled preflight includes a seventh-use card replacement even when another card can pay',async()=>{
-    const f=managedPool();f.state.rows[0].authorization_count=7;f.state.available='19.99';
+test('enabled preflight requires no replacement funds when another card can pay',async()=>{
+    const f=managedPool();f.state.rows[0].authorization_count=7;f.state.available='0.00';
     const before=structuredClone(f.state.rows);
-    const short=await f.service.preflight({stage:'cards',plan_type:'plus'});
-    assert.equal(short.passed,false);assert.equal(short.result.selection.account_check,'failed');
-    assert.deepEqual(short.result.selection.maintenance.retire_card_ids,[42]);
-    assert.equal(short.result.selection.maintenance.open_count,1);
-    assert.equal(short.result.selection.maintenance.required_balance,'20.00');
-    f.state.available='20.00';
     const ready=await f.service.preflight({stage:'cards',plan_type:'plus'});
     assert.equal(ready.passed,true);assert.equal(ready.result.selection.action,'pay');
+    assert.deepEqual(ready.result.selection.maintenance.retire_card_ids,[42]);
+    assert.equal(ready.result.selection.maintenance.open_count,0);
+    assert.equal(ready.result.selection.maintenance.required_balance,'0.00');
     assert.equal(ready.result.selection.card_id,43);assert.deepEqual(f.state.rows,before);assert.deepEqual(f.writes,[]);
 });
 
-test('enabled empty-pool preflight budgets five openings plus the selected new card payment deficit',async()=>{
-    const f=managedPool(0);f.cfg.orbitcard_plan_prices.pro100='100.00';f.state.available='179.99';
+test('enabled empty-pool preflight budgets one opening plus its payment deficit',async()=>{
+    const f=managedPool(0);f.cfg.orbitcard_plan_prices.pro100='100.00';f.state.available='99.99';
     const short=await f.service.preflight({stage:'cards',plan_type:'pro100'});
     assert.equal(short.passed,false);assert.equal(short.result.selection.account_check,'failed');
-    assert.equal(short.result.selection.maintenance.open_count,5);
-    assert.equal(short.result.selection.maintenance.opening_amount,'100.00');
+    assert.equal(short.result.selection.maintenance.open_count,1);
+    assert.equal(short.result.selection.maintenance.opening_amount,'20.00');
     assert.equal(short.result.selection.maintenance.funding_amount,'80.00');
-    assert.equal(short.result.selection.maintenance.required_balance,'180.00');
-    f.state.available='180.00';
+    assert.equal(short.result.selection.maintenance.required_balance,'100.00');
+    f.state.available='100.00';
     const ready=await f.service.preflight({stage:'cards',plan_type:'pro100'});
     assert.equal(ready.passed,true);assert.equal(ready.result.selection.action,'open');
     assert.deepEqual(f.state.rows,[]);assert.deepEqual(f.writes,[]);
@@ -170,8 +163,8 @@ test('preflight confirms an unknown deletion readonly before skipping its unavai
     const result=await f.service.preflight({stage:'cards',plan_type:'plus'});
     assert.equal(result.passed,true);assert.equal(result.result.selection.card_id,43);
     assert.equal(result.result.selection.maintenance.current_size,4);
-    assert.equal(result.result.selection.maintenance.open_count,1);
-    assert.equal(result.result.selection.maintenance.required_balance,'20.00');
+    assert.equal(result.result.selection.maintenance.open_count,0);
+    assert.equal(result.result.selection.maintenance.required_balance,'0.00');
     assert.ok(f.calls.some(([op,,body])=>op==='cardDetail'&&body?.card_id===42));
     assert.ok(!f.calls.some(([op,,body])=>op==='cardTransaction'&&body.card_id===42));
     assert.deepEqual(f.state.rows,before);assert.deepEqual(f.writes,[]);
@@ -253,17 +246,27 @@ test('successful local order waits until a new platform authorization is observa
     assert.equal(ready.passed,true);assert.equal(ready.result.selection.action,'pay');assert.equal(ready.result.selection.cards[0].authorization_pending,false);
     assert.equal(f.state.rows[0].authorization_count,0);assert.deepEqual(f.writes,[]);
 });
-test('a full pool waits instead of predicting a sixth card unless an idle exhausted card can be replaced',async()=>{
-    for(const replaceable of [false,true]) {
-        const f=fixture();f.state.live=Array.from({length:5},(_,index)=>({...f.state.live[0],card_id:42+index,provider_status:'CANCELLED'}));
-        f.state.details=f.state.live;f.state.rows=f.state.live.map(card=>({card_id:card.card_id,authorization_count:0}));
-        if(replaceable)f.state.rows[0].authorization_count=7;
-        const response=await f.service.preflight({stage:'cards',plan_type:'plus'});
-        assert.equal(response.passed,replaceable);assert.equal(response.result.selection.action,replaceable?'open':'wait');
-        if(!replaceable) {assert.equal(response.result.selection.opening,undefined);assert.deepEqual(response.result.selection.waiting,[{reason:'pool_full'}]);}
-        assert.deepEqual(f.writes,[]);
-    }
+
+test('preflight excludes a cooling card even with synchronized authorization and a high balance',async()=>{
+    const f=fixture();f.state.rows[0].authorization_pending_count=1;
+    f.state.rows[0].reuse_after_ms=Date.now()+300000;
+    f.state.transactions.set(42,[authorization('new')]);
+    const response=await f.service.preflight({stage:'cards',plan_type:'plus'});
+    assert.equal(response.passed,false);
+    assert.equal(response.result.selection.action,'wait');
+    assert.equal(response.result.selection.waiting[0].reason,'cooldown');
+    assert.deepEqual(f.writes,[]);
 });
+test('preflight permits one on-demand opening beyond five inactive cards',async()=>{
+    const f=managedPool(6);
+    for(const card of f.state.live)card.provider_status='CANCELLED';
+    const response=await f.service.preflight({stage:'cards',plan_type:'plus'});
+    assert.equal(response.passed,true);assert.equal(response.result.selection.action,'open');
+    assert.equal(response.result.selection.maintenance.open_count,1);
+    assert.equal(response.result.selection.maintenance.required_balance,'20.00');
+    assert.deepEqual(response.result.selection.waiting,[]);assert.deepEqual(f.writes,[]);
+});
+
 test('invalid Session, disabled region, insufficient balance and broken batch details stop the read-only chain',async()=>{
     await assert.rejects(fixture().service.preflight({stage:'session',request_id:'../../bad',session}));
     const invalid=fixture();const bad=await invalid.service.preflight({stage:'full',plan_type:'plus',session:'not-json never-log-access'});

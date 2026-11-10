@@ -1,9 +1,19 @@
 'use strict';
 const { cdkLockKey } = require('./payment-execution-lock');
-const { requiresManualHandling } = require('./payment-automation');
+const { requiresManualHandling, PaymentStoppedError } = require('./payment-automation');
+const { FundingAwaitingError, FUNDING_POLL_MS } = require('./orbitcard-card-policy');
 
 // Both interactive refresh and restart recovery query the same durable identity.
-module.exports = function createRecovery({ store, query, activeJobs, audit, notify = async () => {}, checkBalance = async () => false, now = Date.now }) {
+module.exports = function createRecovery({ store, query, activeJobs, audit, notify = async () => {}, checkBalance = async () => false,
+    confirmFunding = null, now = Date.now }) {
+    const fundingCheckAt = new Map();
+    function deferFunding(jobKey, delay = FUNDING_POLL_MS) {
+        const waitMs = Math.max(FUNDING_POLL_MS, Number(delay) || 0);
+        for (const [key, until] of fundingCheckAt) if (until <= now()) fundingCheckAt.delete(key);
+        if (!fundingCheckAt.has(jobKey) && fundingCheckAt.size >= 1000) fundingCheckAt.delete(fundingCheckAt.keys().next().value);
+        fundingCheckAt.set(jobKey, now() + waitMs);
+        return { success: true, querySkipped: true, waitMs };
+    }
     async function refreshTask(task) {
         if (activeJobs.has(task.job_key)) return { success: true, querySkipped: true };
         const guard = await store.acquirePaymentLock(cdkLockKey(task.cdk_code));
@@ -22,7 +32,7 @@ module.exports = function createRecovery({ store, query, activeJobs, audit, noti
         const lockSupport = (...args) => mutate('lockOrbitcardSupport', args);
         const recordFailure = (...args) => mutate('recordOrbitcardPaymentFailure', args);
         if (activeJobs.has(task.job_key)) return { success: true, querySkipped: true };
-        if (requiresManualHandling(task) && !['submitting', 'pending', 'manual'].includes(task.orbitcard_state)) {
+        if (requiresManualHandling(task) && !['submitting', 'pending', 'manual', 'funding_review'].includes(task.orbitcard_state)) {
             return { success: true, querySkipped: true };
         }
         if (task.orbitcard_state === 'retry_waiting') {
@@ -31,6 +41,60 @@ module.exports = function createRecovery({ store, query, activeJobs, audit, noti
             return { success: true, querySkipped: true };
         }
         if (task.orbitcard_state === 'support_locked') return { success: true, querySkipped: true };
+        if (['funding_waiting', 'funding_review'].includes(task.orbitcard_state)) {
+            // This process has no original Session. Reconcile funds only, then let
+            // the user explicitly submit fresh credentials after releasing the CDK.
+            let funding = await store.getCardFundingForTask(task.job_key);
+            if (task.orbitcard_state === 'funding_waiting') {
+                const result = await settle(task.job_key, { status: 'manual', progress: 10,
+                    orbitcardState: 'funding_review', expectedState: task.orbitcard_state,
+                    expectedClientOrderNo: task.orbitcard_client_order_no,
+                    message: '原 Session 已丢失，补款已转对账工单；后台仅核对原流水，到账后请提交最新 Session' });
+                return { ...deferFunding(task.job_key, Number(funding?.retry_at || 0) - now()), applied: result.applied };
+            }
+            const release = async failed => {
+                const result = await settle(task.job_key, { status: failed ? 'failed' : 'retry', progress: 0,
+                    orbitcardState: 'rejected', expectedState: task.orbitcard_state,
+                    expectedClientOrderNo: task.orbitcard_client_order_no,
+                    message: failed ? '原补款已确认失败，订阅尚未提交，CDK 与支付卡已释放'
+                        : '原补款已确认到账，CDK 与支付卡已释放；请重新验证卡密并提交最新 Session 继续充值' });
+                fundingCheckAt.delete(task.job_key);
+                audit({ jobKey: task.job_key, source: 'orbitcard', event: 'funding_recovery_released',
+                    text: failed ? '原补款失败，释放未提交任务' : '原补款到账，等待用户提交最新 Session', data: { applied: result.applied } });
+                return { success: true, applied: result.applied, querySkipped: true };
+            };
+            if (funding?.state === 'failed') return release(true);
+            const due = Math.max(fundingCheckAt.get(task.job_key) || 0, Number(funding?.retry_at) || 0);
+            if (due > now()) return { success: true, querySkipped: true, waitMs: due - now() };
+            if (typeof confirmFunding !== 'function') return deferFunding(task.job_key);
+            // Set before calling so interactive refreshes cannot exceed the polling interval.
+            deferFunding(task.job_key);
+            try {
+                if (!funding?.order_no) throw new Error('原补款缺少平台订单号，禁止自动恢复');
+                const cardId = await confirmFunding(task, guard);
+                await guard.assertOwned();
+                funding = await store.getCardFundingForTask(task.job_key);
+                if (funding?.state !== 'ready' || !Number.isSafeInteger(Number(cardId)) || Number(cardId) <= 0
+                    || Number(cardId) !== Number(task.orbitcard_card_id) || Number(cardId) !== Number(funding.card_id)) {
+                    throw new Error('原补款尚未确认可用或支付卡不匹配');
+                }
+                return release(false);
+            } catch (error) {
+                if (error instanceof PaymentStoppedError) return { success: true, querySkipped: true };
+                await guard.assertOwned();
+                if (error instanceof FundingAwaitingError) {
+                    return deferFunding(task.job_key, error.retryAfterMs);
+                }
+                funding = await store.getCardFundingForTask(task.job_key);
+                if (funding?.state === 'failed') return release(true);
+                const result = await settle(task.job_key, { status: 'manual', progress: 10,
+                    orbitcardState: 'funding_pending', expectedState: task.orbitcard_state,
+                    expectedClientOrderNo: task.orbitcard_client_order_no,
+                    message: '原补款对账存在异常，已停止自动处理；保留支付卡和 CDK，请人工核对' });
+                fundingCheckAt.delete(task.job_key);
+                return { success: true, applied: result.applied, querySkipped: true };
+            }
+        }
         if(task.orbitcard_state==='balance_blocked') {
             if(!await checkBalance(task)) return {success:true,querySkipped:true,waitMs:60000};
             if (Number(task.orbitcard_retry_attempt_no || 1) > 1) {
@@ -43,11 +107,20 @@ module.exports = function createRecovery({ store, query, activeJobs, audit, noti
             audit({jobKey:task.job_key,source:'orbitcard',event:'account_balance_restored',text:'账户余额已补足，等待用户重新提交 Session',data:{applied:result.applied}});
             return {success:true,applied:result.applied,querySkipped:true};
         }
-        if (task.orbitcard_state === 'prepared') {
+        if (['preparing', 'prepared'].includes(task.orbitcard_state)) {
             let preparedIssue = null;
             const preparedFunding=store.getCardFundingForTask?await store.getCardFundingForTask(task.job_key):null;
             if(preparedFunding && !['ready','failed'].includes(preparedFunding.state)) {
-                const result=await settle(task.job_key,{status:'manual',progress:10,orbitcardState:'funding_pending',expectedState:'prepared',
+                if (preparedFunding.state === 'pending' && preparedFunding.order_no
+                    && Number(task.orbitcard_retry_attempt_no || 1) === 1) {
+                    const result = await settle(task.job_key, { status: 'manual', progress: 10,
+                        orbitcardState: 'funding_review', expectedState: task.orbitcard_state,
+                        expectedClientOrderNo: task.orbitcard_client_order_no,
+                        message: '原 Session 已丢失，补款已转对账工单；后台仅核对原流水，到账后请提交最新 Session' });
+                    return { ...deferFunding(task.job_key, Math.max(FUNDING_POLL_MS, Number(preparedFunding.retry_at || 0) - now())), applied: result.applied };
+                }
+                const result=await settle(task.job_key,{status:'manual',progress:10,orbitcardState:'funding_pending',expectedState:task.orbitcard_state,
+                    expectedClientOrderNo:task.orbitcard_client_order_no,
                     message:'原卡片补款仍待确认，已转人工处理并停止自动支付；会员充值未提交，保留卡片和 CDK'});
                 return {success:true,applied:result.applied,querySkipped:true};
             }
@@ -55,12 +128,14 @@ module.exports = function createRecovery({ store, query, activeJobs, audit, noti
                 preparedIssue = await store.getCardIssueForTask(task.job_key);
                 if (preparedIssue && !['ready','failed'].includes(preparedIssue.state)) {
                     const result = await settle(task.job_key, { status: 'manual', progress: 10,
-                        orbitcardState: 'card_pending', expectedState: 'prepared', message: '原支付卡申请仍待确认，已转人工处理并停止自动支付；会员充值未提交，保留 CDK 和原申请' });
+                        orbitcardState: 'card_pending', expectedState: task.orbitcard_state,
+                        expectedClientOrderNo: task.orbitcard_client_order_no,
+                        message: '原支付卡申请仍待确认，已转人工处理并停止自动支付；会员充值未提交，保留 CDK 和原申请' });
                     return { success: true, applied: result.applied, querySkipped: true };
                 }
             }
             if (Number(task.orbitcard_retry_attempt_no || 1) > 1) {
-                const result = await lockSupport(task.job_key, 'prepared',
+                const result = await lockSupport(task.job_key, task.orbitcard_state,
                     '支付重试在订阅提交前中断，CDK 已锁定；请联系人工售后');
                 return { success: true, applied: result.applied, querySkipped: true };
             }
@@ -68,7 +143,9 @@ module.exports = function createRecovery({ store, query, activeJobs, audit, noti
             const cardReady = !fundingFailed && (preparedIssue?.state === 'ready' || preparedFunding?.state==='ready');
             const result = await settle(task.job_key, { status: cardReady ? 'retry' : 'failed', progress: 0,
                 message: cardReady ? '支付卡已准备，任务在订阅提交前中断；请重新验证 CDK 并提交最新 Session'
-                    : fundingFailed?'原卡片补款未成功，会员充值未提交，CDK 已释放':'任务在提交前中断，CDK 已释放', orbitcardState: 'rejected', expectedState: 'prepared' });
+                    : fundingFailed?'原卡片补款未成功，会员充值未提交，CDK 已释放':'任务在提交前中断，CDK 已释放',
+                orbitcardState: 'rejected', expectedState: task.orbitcard_state,
+                expectedClientOrderNo: task.orbitcard_client_order_no });
             audit({ jobKey: task.job_key, source: 'orbitcard', event: 'recovery_unsubmitted', text: '恢复未提交任务', data: { applied: result.applied } });
             return { success: true, applied: result.applied, querySkipped: true };
         }

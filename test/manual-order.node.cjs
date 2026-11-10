@@ -29,7 +29,7 @@ function fixture({ unknown = false, pendingAllocation = false, now = Date.now } 
         getMaxConcurrentActivations: async () => 5,
         getManualOrder: async id => orders.get(id) || null,
         listManualOrders: async () => [...orders.values()],
-        listRecoverableManualOrders: async () => [...orders.values()].filter(x => x.state === 'manual'),
+        listRecoverableManualOrders: async () => [...orders.values()].filter(x => ['submitting','pending','manual'].includes(x.state)),
         cardMethods: () => ({ listCards: async () => [{ card_id: 12, authorization_count: 0,
             active_job: null }] }),
         withCardAllocationLock: async (_url, action) => action({ syncCards: async () => {} }),
@@ -205,10 +205,40 @@ test('unknown submission queries the original order and never submits again', as
     const { service, calls, orders } = fixture({ unknown: true });
     await service.create({ requestId: id, planType: 'gpt-plus', cardId: 12,
         mode: 'test', session, authorized: true });
-    await until(() => orders.get(id).state === 'manual');
+    await until(() => orders.get(id).state === 'pending');
     await service.refresh(id);
     assert.equal(calls.filter(x => x.operation === 'createSubscription').length, 1);
     assert(calls.filter(x => x.operation === 'getSubscription').every(x => x.body.client_order_no === `manual-${id}`));
+    assert.equal(orders.get(id).state,'pending');
+});
+
+test('a thrown subscription submission stays pending and recovery queries the original identity only',async()=>{
+    process.env.ORBITCARD_API_KEY='key';process.env.ORBITCARD_API_SECRET='secret';
+    const f=fixture(),request=f.provider.request;
+    f.provider.request=async(...args)=>{
+        if(args[1]==='createSubscription') { f.calls.push({operation:args[1],body:args[2],key:args[3]});throw Error('connection lost'); }
+        return request(...args);
+    };
+    const input={requestId:id,planType:'gpt-plus',mode:'test',session,authorized:true};
+    await f.service.create(input);await until(()=>f.orders.get(id).state==='pending'&&f.activeJobs.size===0);
+    await f.service.create(input);await f.service.recover();
+    assert.equal(f.orders.get(id).state,'success');
+    assert.equal(f.calls.filter(call=>call.operation==='createSubscription').length,1);
+    assert.equal(f.calls.find(call=>call.operation==='getSubscription').body.client_order_no,`manual-${id}`);
+});
+
+test('an explicit non-acceptance is settled as rejected without querying or resubmitting',async()=>{
+    process.env.ORBITCARD_API_KEY='key';process.env.ORBITCARD_API_SECRET='secret';
+    const f=fixture();
+    f.provider.request=async(_cfg,operation)=>{
+        f.calls.push({operation});
+        assert.equal(operation,'createSubscription');
+        return {success:false,requestError:{submission_outcome:'rejected'}};
+    };
+    const input={requestId:id,planType:'gpt-plus',mode:'test',session,authorized:true};
+    await f.service.create(input);await until(()=>f.orders.get(id).state==='rejected'&&f.activeJobs.size===0);
+    await f.service.create(input);await f.service.recover();
+    assert.deepEqual(f.calls,[{operation:'createSubscription'}]);
 });
 
 test('administrator test and fulfillment use configured regions, and changing defaults never resubmits an unknown order', async () => {
@@ -218,7 +248,7 @@ test('administrator test and fulfillment use configured regions, and changing de
         const input = { requestId: id, planType: 'gpt-plus', mode, session, authorized: true,
             ...(mode === 'fulfillment' ? { cdkCode: 'KC-TEST123' } : {}) };
         await f.service.create(input);
-        await until(() => f.orders.get(id).state === 'manual');
+        await until(() => f.orders.get(id).state === 'pending');
         assert.equal(f.calls[0].operation, 'getSubscriptionPaymentRegions');
         assert.equal(f.calls.find(row => row.operation === 'createSubscription').body.payment_region, 'PH');
         f.cfg.orbitcard_payment_regions.plus = 'US';
@@ -248,7 +278,7 @@ test('manual query checks original platform before making another request', asyn
     process.env.ORBITCARD_API_KEY='key';process.env.ORBITCARD_API_SECRET='secret';
     const f=fixture({unknown:true});
     await f.service.create({requestId:id,planType:'gpt-plus',mode:'test',session,authorized:true});
-    await until(()=>f.orders.get(id).state==='manual');
+    await until(()=>f.orders.get(id).state==='pending');
     const previous=f.calls.length;f.cfg.base_url='https://different.example';
     await assert.rejects(f.service.refresh(id),/平台地址与原订单不一致/);
     assert.equal(f.calls.length,previous);
@@ -295,10 +325,11 @@ test('pending funding hands the administrator order to support and repeated subm
 });
 
 function storeFixture({ enqueueRedemption } = {}) {
+    let clock = Date.parse('2026-11-10T08:00:00Z');
     const scope = cardScope('https://orbitcard.cc');
-    const db = { orders: [], cdks: [{ cdk_code: 'KC-READY', is_active: 1, type: '自助',
+    const db = { orders: [], fundings: [], issues: [], cdks: [{ cdk_code: 'KC-READY', is_active: 1, type: '自助',
         plan_type: 'plus', used_at: null }], card: { scope, card_id: 12, authorization_count: 0,
-        active_job: null, provider_status: 'ACTIVE', currency: 'USD' } };
+        active_job: null, provider_status: 'ACTIVE', currency: 'USD', reuse_after_ms: 0 } };
     const clean = sql => sql.replace(/\s+/g, ' ').trim();
     let inTransaction = false;
     const runQuery = async (sql, p = [], options) => {
@@ -307,11 +338,17 @@ function storeFixture({ enqueueRedemption } = {}) {
         if (q.startsWith('SELECT * FROM orbitcard_admin_orders WHERE request_id')) return db.orders.filter(o => o.request_id === p[0]
             && (!q.includes("state = 'prepared'") || o.state === 'prepared')).map(o => structuredClone(o));
         if (q.startsWith('SELECT request_id FROM orbitcard_admin_orders WHERE scope')) return db.orders.filter(o => o.scope === p[0]
-            && o.target_email === p[1] && o.plan_type === p[2] && ['preparing','prepared','submitting','pending','manual'].includes(o.state)).map(o => structuredClone(o));
+            && o.target_email === p[1] && o.plan_type === p[2] && ['preparing','prepared','funding_waiting','funding_review','submitting','pending','manual'].includes(o.state)).map(o => structuredClone(o));
         if (q.startsWith('SELECT request_id FROM orbitcard_admin_orders WHERE cdk_code')) return db.orders.filter(o => o.cdk_code === p[0] && o.state === 'success').map(o => structuredClone(o));
         if (q.startsWith('SELECT * FROM cdk_codes') || q.startsWith('SELECT cdk_code FROM cdk_codes')) return db.cdks.filter(c => c.cdk_code === p[0]).map(o => structuredClone(o));
         if (q.startsWith('SELECT job_key FROM task_logs')) return [];
         if (q.startsWith('SELECT funding_key FROM orbitcard_card_fundings')) return [];
+        if (q.startsWith('SELECT * FROM orbitcard_card_fundings')) return db.fundings.filter(f=>f.job_key===p[0]).map(f=>structuredClone(f));
+        if (q.startsWith('SELECT * FROM orbitcard_card_issues')) {
+            assert.ok(q.endsWith('FOR UPDATE'));
+            return db.issues.filter(issue => q.includes('WHERE job_key = ? OR issue_key = ?')
+                ? issue.job_key === p[0] || issue.issue_key === p[1] : issue.issue_key === p[0]).map(issue => structuredClone(issue));
+        }
         if (q.startsWith('SELECT * FROM orbitcard_managed_cards')) return db.card.scope === p[0] && db.card.card_id === p[1] ? [structuredClone(db.card)] : [];
         throw new Error(`Unexpected query ${q}`);
     };
@@ -333,11 +370,22 @@ function storeFixture({ enqueueRedemption } = {}) {
         } else if (q.startsWith('UPDATE orbitcard_admin_orders SET issue_key = ?')) {
             const row = db.orders.find(o => o.request_id === p[2]); row.issue_key = p[0]; row.message = p[1];
         } else if (q.startsWith("UPDATE orbitcard_admin_orders SET state = 'prepared'")) {
-            const row = db.orders.find(o => o.request_id === p[1]); row.state = 'prepared'; row.message = p[0];
+            const row = db.orders.find(o => o.request_id === p[1]);
+            if(!row || !['preparing','funding_waiting'].includes(row.state) || row.client_order_no!==p[2] || row.card_id!==p[3])return {affectedRows:0};
+            row.state = 'prepared'; row.message = p[0];
+        } else if (q.startsWith("UPDATE orbitcard_admin_orders SET state = 'funding_waiting'")) {
+            const row = db.orders.find(o=>o.request_id===p[1]);row.state='funding_waiting';row.message=p[0];
+        } else if (q.startsWith("UPDATE orbitcard_admin_orders SET state = 'funding_review'")) {
+            const row = db.orders.find(o=>o.request_id===p[1]);row.state='funding_review';row.message=p[0];
+        } else if (q.startsWith("UPDATE orbitcard_admin_orders SET state = 'support_locked'")) {
+            const row = db.orders.find(o=>o.request_id===p[1]);if(['preparing','funding_waiting','funding_review'].includes(row.state)){row.state='support_locked';row.message=p[0];}
         }
         else if (q.startsWith('UPDATE orbitcard_managed_cards SET authorization_pending_count=')) {
             if (db.card.scope !== p[1] || db.card.card_id !== p[2]) return { affectedRows: 0 };
             db.card.authorization_pending_count = Math.max(db.card.authorization_pending_count || 0, p[0]);
+        } else if (q.startsWith('UPDATE orbitcard_managed_cards SET reuse_after_ms=')) {
+            if (db.card.scope !== p[1] || db.card.card_id !== p[2] || db.failCooldown) return { affectedRows: 0 };
+            db.card.reuse_after_ms = Math.max(db.card.reuse_after_ms || 0, p[0]);
         } else if (q.startsWith('UPDATE orbitcard_managed_cards SET active_job = ?')) {
             db.card.active_job = p[0];
         } else if (q.startsWith("UPDATE orbitcard_admin_orders SET state = 'submitting'")) {
@@ -364,7 +412,8 @@ function storeFixture({ enqueueRedemption } = {}) {
         catch (error) { Object.assign(db, backup); throw error; }
         finally { inTransaction = false; }
     };
-    return { db, store: createStore({ runQuery, runExecute, withTransaction, enqueueRedemption }) };
+    return { db, advance: ms => { clock += ms; }, now: () => clock,
+        store: createStore({ runQuery, runExecute, withTransaction, enqueueRedemption, now: () => clock }) };
 }
 
 async function prepareOrder(store, input) {
@@ -373,6 +422,76 @@ async function prepareOrder(store, input) {
     assert.ok(card, 'test order must reserve an eligible card');
     return store.markManualPrepared(input.requestId, order.client_order_no, input.cardId);
 }
+
+test('waiting administrator funding releases CDK and card only after confirmed final funding and cannot bypass support',async()=>{
+    for(const state of ['pending','ready','failed']) {
+        const {db,store}=storeFixture();const input=manualInput(id);
+        const order=await store.prepareManualOrder(input);
+        await store.reserveManualCard(id,12,order.client_order_no,input.planType);
+        db.fundings.push({job_key:order.client_order_no,scope:order.scope,card_id:12,plan_type:'plus',
+            credential_hash:order.api_key_hash,order_no:'FUND-1',state});
+        await store.waitManualFunding(id,order.client_order_no,'waiting');
+        assert.equal(db.orders[0].state,'funding_waiting');
+        assert.ok(db.cdks[0].used_at);assert.equal(db.card.active_job,order.client_order_no);
+        const result=await store.releaseManualFunding(id,order.client_order_no,'use fresh Session');
+        if(state==='pending') {
+            assert.equal(result,null);assert.ok(db.cdks[0].used_at);assert.equal(db.card.active_job,order.client_order_no);
+            await store.pauseManualPreparation(id,order.client_order_no,'support');db.fundings[0].state='ready';
+            assert.equal(await store.releaseManualFunding(id,order.client_order_no,'release'),null);
+            assert.equal(db.orders[0].state,'support_locked');assert.ok(db.cdks[0].used_at);
+        } else {
+            assert.equal(result.state,'failed');assert.equal(db.cdks[0].used_at,null);assert.equal(db.card.active_job,null);
+            assert.equal(db.card.reuse_after_ms,0,'no subscription was submitted');
+        }
+    }
+});
+
+test('waiting administrator funding blocks a second order and resumes preparation with the original card',async()=>{
+    const {db,store}=storeFixture();const input=manualInput(id,{mode:'test',cdkCode:null});
+    const order=await store.prepareManualOrder(input);await store.reserveManualCard(id,12,order.client_order_no,input.planType);
+    db.fundings.push({job_key:order.client_order_no,scope:order.scope,card_id:12,plan_type:'plus',
+        credential_hash:order.api_key_hash,order_no:'FUND-1',state:'pending'});
+    await store.waitManualFunding(id,order.client_order_no,'waiting');
+    await assert.rejects(store.prepareManualOrder(manualInput('36aad0bb-5eb7-4771-93f5-1ebd049b29e0',{mode:'test',cdkCode:null})),/待确认/);
+    db.fundings[0].state='ready';await store.markManualPrepared(id,order.client_order_no,12);
+    assert.equal(await store.claimManualSubmission(id),true);assert.equal(await store.claimManualSubmission(id),false);
+});
+
+test('funding review blocks submission and new orders, and releases only confirmed original funding',async()=>{
+    for(const state of ['pending','ready','failed']) {
+        const {db,store}=storeFixture();const input=manualInput(id);
+        const order=await store.prepareManualOrder(input);await store.reserveManualCard(id,12,order.client_order_no,input.planType);
+        db.fundings.push({job_key:order.client_order_no,scope:order.scope,card_id:12,plan_type:'plus',
+            credential_hash:order.api_key_hash,order_no:'FUND-1',state});
+        await store.waitManualFunding(id,order.client_order_no,'waiting');
+        await store.reviewManualFunding(id,order.client_order_no,'timeout review');
+        assert.equal(db.orders[0].state,'funding_review');
+        await assert.rejects(store.markManualPrepared(id,order.client_order_no,12),/准备状态不一致/);
+        await assert.rejects(store.waitManualFunding(id,order.client_order_no,'resume'),/不能继续等待/);
+        assert.equal(await store.claimManualSubmission(id),false);
+        await assert.rejects(store.prepareManualOrder(manualInput('36aad0bb-5eb7-4771-93f5-1ebd049b29e0')),/待确认/);
+        const result=await store.releaseManualFunding(id,order.client_order_no,'review complete');
+        assert.equal(db.card.active_job,state==='pending'?order.client_order_no:null);
+        assert.equal(db.cdks[0].used_at,state==='pending'?'reserved':null);
+        assert.equal(result?.state,state==='pending'?undefined:'failed');
+        assert.equal(db.card.reuse_after_ms,0);
+    }
+});
+
+test('explicit support handoff and mismatched original funding cannot be reclassified as funding review',async()=>{
+    for(const support of [true,false]) {
+        const {db,store}=storeFixture();const input=manualInput(id);
+        const order=await store.prepareManualOrder(input);await store.reserveManualCard(id,12,order.client_order_no,input.planType);
+        db.fundings.push({job_key:order.client_order_no,scope:order.scope,card_id:12,plan_type:'plus',
+            credential_hash:order.api_key_hash,order_no:'FUND-1',state:'pending'});
+        await store.waitManualFunding(id,order.client_order_no,'waiting');
+        if(support)await store.pauseManualPreparation(id,order.client_order_no,'support');
+        else db.fundings[0].credential_hash='another-key';
+        await assert.rejects(store.reviewManualFunding(id,order.client_order_no,'review'));
+        assert.equal(db.orders[0].state,support?'support_locked':'funding_waiting');
+        assert.equal(db.card.active_job,order.client_order_no);assert.equal(db.cdks[0].used_at,'reserved');
+    }
+});
 
 function manualInput(requestId, overrides = {}) {
     return { requestId, planType: 'gpt-plus', planName: 'Plus', targetEmail: 'buyer@example.com',
@@ -411,7 +530,7 @@ test('manual fulfillment emits a receipt atomically, while test orders and failu
 });
 
 test('manual CDK and card reservation settle atomically on verified success or failure', async () => {
-    const { db, store } = storeFixture();
+    const { db, store, advance } = storeFixture();
     db.card.authorization_count=3;
     await assert.rejects(prepareOrder(store, manualInput(id, { acceptedCdkPlans: ['gpt-go'] })), /CDK/);
     assert.equal(db.cdks[0].used_at, null);
@@ -422,11 +541,14 @@ test('manual CDK and card reservation settle atomically on verified success or f
     await assert.rejects(prepareOrder(store, manualInput('36aad0bb-5eb7-4771-93f5-1ebd049b29e0')), /待确认管理员订单/);
     assert.equal(await store.claimManualSubmission(id), true);
     await store.settleManualOrder(id, { state: 'failed', message: 'confirmed failure' });
-    assert.equal(db.cdks[0].used_at, null);
+    assert.equal(db.cdks[0].used_at, 'reserved');
+    assert.equal(db.orders[0].state,'support_locked');
     assert.equal(db.card.active_job, null);
     assert.equal(db.card.authorization_count, 3);
+    advance(require('../orbitcard-pool').REUSE_COOLDOWN_MS);
     const next = '36aad0bb-5eb7-4771-93f5-1ebd049b29e0';
-    await prepareOrder(store, manualInput(next));
+    db.cdks.push({...db.cdks[0],cdk_code:'KC-SECOND',used_at:null});
+    await prepareOrder(store, manualInput(next,{cdkCode:'KC-SECOND'}));
     await store.claimManualSubmission(next);
     await store.settleManualOrder(next, { state: 'success', message: 'confirmed success' });
     assert.equal(db.cdks[0].used_at, 'reserved');
@@ -439,8 +561,36 @@ test('manual CDK and card reservation settle atomically on verified success or f
     assert.equal(db.card.authorization_pending_count, 4);
 });
 
+test('only an explicitly rejected unaccepted subscription releases the CDK without payment cooldown',async()=>{
+    const {db,store}=storeFixture({enqueueRedemption:async()=>{throw Error('rejected orders cannot emit redemption');}});
+    await prepareOrder(store,manualInput(id));await store.claimManualSubmission(id);
+    await store.settleManualOrder(id,{state:'rejected',message:'not accepted'});
+    assert.equal(db.orders[0].state,'rejected');assert.equal(db.card.active_job,null);assert.equal(db.cdks[0].used_at,null);
+    assert.equal(db.card.reuse_after_ms,0);assert.equal(db.card.authorization_pending_count,undefined);
+    await store.settleManualOrder(id,{state:'pending',message:'stale callback'});
+    assert.equal(db.orders[0].state,'rejected');
+    for(const state of ['pending','manual']) {
+        const f=storeFixture();await prepareOrder(f.store,manualInput(id));await f.store.claimManualSubmission(id);
+        await f.store.settleManualOrder(id,{state,message:'accepted or manually held'});
+        await assert.rejects(f.store.settleManualOrder(id,{state:'rejected',message:'unsafe release'}),/不能按未受理释放/);
+        assert.equal(f.db.orders[0].state,state);assert.equal(f.db.cdks[0].used_at,'reserved');assert.equal(f.db.card.active_job,`manual-${id}`);
+    }
+});
+
+test('every confirmed accepted subscription failure locks the CDK and releases the card with cooldown',async()=>{
+    for(const previous of ['submitting','pending','manual']) {
+        const {db,store,now}=storeFixture();await prepareOrder(store,manualInput(id));await store.claimManualSubmission(id);
+        if(previous!=='submitting')await store.settleManualOrder(id,{state:previous,message:previous});
+        await store.settleManualOrder(id,{state:'failed',message:'confirmed failed'});
+        assert.equal(db.orders[0].state,'support_locked');assert.equal(db.cdks[0].used_at,'reserved');assert.equal(db.card.active_job,null);
+        assert.equal(db.card.reuse_after_ms,now()+require('../orbitcard-pool').REUSE_COOLDOWN_MS);
+        await store.settleManualOrder(id,{state:'pending',message:'stale query'});
+        assert.equal(db.orders[0].state,'support_locked');assert.equal(db.cdks[0].used_at,'reserved');
+    }
+});
+
 test('administrator success waits for its authorization; seven observed authorizations stop further allocations', async () => {
-    const { db, store } = storeFixture();
+    const { db, store, advance } = storeFixture();
     for (let count = 0; count < 7; count++) {
         const requestId = `00000000-0000-4000-8000-${String(count).padStart(12, '0')}`;
         const input = manualInput(requestId, { mode: 'test', cdkCode: null });
@@ -460,12 +610,63 @@ test('administrator success waits for its authorization; seven observed authoriz
         await store.failManualPreparation(waitingId,waiting.client_order_no,'still awaiting authorization');
         // This fixture stands in for a successful transaction-ID synchronization.
         db.card.authorization_count = count + 1;
+        advance(require('../orbitcard-pool').REUSE_COOLDOWN_MS);
     }
     const eighth = manualInput(id, { mode: 'test', cdkCode: null });
     const order = await store.prepareManualOrder(eighth);
     assert.equal(await store.reserveManualCard(id, 12, order.client_order_no, eighth.planType), null);
     assert.equal(db.card.authorization_count, 7);
     assert.equal(db.card.active_job, null);
+});
+
+test('submitted administrator success and failure cool the card even when authorization has already synchronized', async () => {
+    const { REUSE_COOLDOWN_MS } = require('../orbitcard-pool');
+    for (const state of ['success', 'failed']) {
+        const { db, store, now, advance } = storeFixture();
+        await prepareOrder(store, manualInput(id, { mode: 'test', cdkCode: null }));
+        await store.claimManualSubmission(id);
+        // An authorization can become visible before the card balance catches up.
+        db.card.authorization_count = 1;
+        await store.settleManualOrder(id, { state, message: 'confirmed' });
+        const reuseAfter = now() + REUSE_COOLDOWN_MS;
+        assert.equal(db.card.reuse_after_ms, reuseAfter);
+        assert.equal(db.card.active_job, null);
+        const nextId = '36aad0bb-5eb7-4771-93f5-1ebd049b29e0';
+        const next = await store.prepareManualOrder(manualInput(nextId, { mode: 'test', cdkCode: null }));
+        assert.equal(await store.reserveManualCard(nextId, 12, next.client_order_no, 'gpt-plus'), null);
+        advance(REUSE_COOLDOWN_MS - 1);
+        await store.settleManualOrder(id, { state, message: 'duplicate final result' });
+        assert.equal(db.card.reuse_after_ms, reuseAfter, 'duplicate settlement must not extend cooldown');
+        assert.equal(await store.reserveManualCard(nextId, 12, next.client_order_no, 'gpt-plus'), null);
+        advance(1);
+        assert.ok(await store.reserveManualCard(nextId, 12, next.client_order_no, 'gpt-plus'));
+    }
+});
+
+test('expired administrator cooldown still requires the successful authorization to be visible', async () => {
+    const { db, store, advance } = storeFixture();
+    await prepareOrder(store, manualInput(id, { mode: 'test', cdkCode: null }));
+    await store.claimManualSubmission(id);
+    await store.settleManualOrder(id, { state: 'success', message: 'confirmed' });
+    advance(require('../orbitcard-pool').REUSE_COOLDOWN_MS);
+    const nextId = '36aad0bb-5eb7-4771-93f5-1ebd049b29e0';
+    const next = await store.prepareManualOrder(manualInput(nextId, { mode: 'test', cdkCode: null }));
+    assert.equal(await store.reserveManualCard(nextId, 12, next.client_order_no, 'gpt-plus'), null);
+    db.card.authorization_count = 1;
+    assert.ok(await store.reserveManualCard(nextId, 12, next.client_order_no, 'gpt-plus'));
+});
+
+test('failure to persist administrator card cooldown rolls back settlement and keeps ownership', async () => {
+    const { db, store } = storeFixture();
+    await prepareOrder(store, manualInput(id));
+    await store.claimManualSubmission(id);
+    db.failCooldown = true;
+    await assert.rejects(store.settleManualOrder(id, { state: 'success', message: 'confirmed' }), /冷却/);
+    assert.equal(db.orders[0].state, 'submitting');
+    assert.equal(db.card.active_job, `manual-${id}`);
+    assert.equal(db.card.reuse_after_ms, 0);
+    assert.equal(db.card.authorization_pending_count, undefined);
+    assert.equal(db.cdks[0].used_at, 'reserved');
 });
 
 test('a lost transaction snapshot does not change an order result or invent a consumption count', async () => {
@@ -484,7 +685,7 @@ test('a lost transaction snapshot does not change an order result or invent a co
 });
 
 test('a replayed manual reservation keeps its original authorization baseline', async () => {
-    const {db,store}=storeFixture();
+    const {db,store,advance}=storeFixture();
     const order=await store.prepareManualOrder(manualInput(id));
     assert.ok(await store.reserveManualCard(id,12,order.client_order_no,'gpt-plus'));
     assert.equal(db.orders[0].authorization_baseline,0);
@@ -496,6 +697,8 @@ test('a replayed manual reservation keeps its original authorization baseline', 
     assert.equal(db.card.authorization_pending_count,1);
     const nextId='36aad0bb-5eb7-4771-93f5-1ebd049b29e0';
     const next=await store.prepareManualOrder(manualInput(nextId,{mode:'test',cdkCode:null}));
+    assert.equal(await store.reserveManualCard(nextId,12,next.client_order_no,'gpt-plus'),null);
+    advance(require('../orbitcard-pool').REUSE_COOLDOWN_MS);
     assert.ok(await store.reserveManualCard(nextId,12,next.client_order_no,'gpt-plus'));
 });
 
@@ -505,7 +708,7 @@ test('late manual-order failure preserves a support-redeemed CDK while releasing
     await store.claimManualSubmission(id);
     db.cdks[0].manual_redeemed_at = '2026-10-26';
     await store.settleManualOrder(id, { state: 'failed', message: 'original payment failed' });
-    assert.equal(db.orders[0].state, 'failed');
+    assert.equal(db.orders[0].state, 'support_locked');
     assert.equal(db.cdks[0].used_at, 'reserved');
     assert.equal(db.card.active_job, null);
     assert.equal(db.card.authorization_count, 0);
@@ -530,6 +733,7 @@ test('a prepared order interrupted before submission releases its CDK and card w
     assert.equal(db.orders[0].state, 'failed');
     assert.equal(db.cdks[0].used_at, null);
     assert.equal(db.card.active_job, null);
+    assert.equal(db.card.reuse_after_ms, 0);
 });
 
 test('a stale query cannot settle an unsubmitted admin preparation', async () => {
@@ -565,4 +769,58 @@ test('a failed manual preparation before any remote write releases its card and 
     assert.equal(db.orders[0].state, 'failed');
     assert.equal(db.card.active_job, null);
     assert.equal(db.cdks[0].used_at, null);
+});
+
+test('insufficient funds after a confirmed card issue releases the original card and CDK in one transaction',async()=>{
+    for(const fundingState of [null,'ready','failed']) {
+        const {db,store}=storeFixture();const order=await store.prepareManualOrder(manualInput(id));
+        await store.reserveManualCard(id,12,order.client_order_no,'gpt-plus');
+        await store.attachManualIssue(id,order.client_order_no,'issue-original');
+        const identity={scope:order.scope,job_key:order.client_order_no,credential_hash:order.api_key_hash,plan_type:'plus',card_id:12};
+        db.issues.push({...identity,issue_key:'issue-original',state:'ready'});
+        if(fundingState)db.fundings.push({...identity,funding_key:'funding-original',state:fundingState});
+        await store.failManualPreparation(id,order.client_order_no,'账户余额不足');
+        assert.equal(db.orders[0].state,'failed');assert.equal(db.card.active_job,null);assert.equal(db.cdks[0].used_at,null);
+        assert.equal(db.card.reuse_after_ms,0);assert.equal(db.issues[0].state,'ready');
+    }
+});
+
+test('a confirmed failed card issue without a card releases the CDK',async()=>{
+    const {db,store}=storeFixture();const order=await store.prepareManualOrder(manualInput(id));
+    await store.attachManualIssue(id,order.client_order_no,'issue-failed');
+    db.issues.push({issue_key:'issue-failed',scope:order.scope,job_key:order.client_order_no,
+        credential_hash:order.api_key_hash,plan_type:'plus',card_id:null,state:'failed'});
+    await store.failManualPreparation(id,order.client_order_no,'原开卡已失败');
+    assert.equal(db.orders[0].state,'failed');assert.equal(db.cdks[0].used_at,null);
+});
+
+test('unresolved or mismatched funding and issue records prevent preparation release',async()=>{
+    const mutations=[{state:'pending'},{state:'unknown'},{state:'submitting'},{state:'prepared'},
+        {scope:'another-platform'},{credential_hash:'another-key'},{plan_type:'pro100'},{card_id:99}];
+    for(const kind of ['issue','funding'])for(const mutation of mutations) {
+        const {db,store}=storeFixture();const order=await store.prepareManualOrder(manualInput(id));
+        await store.reserveManualCard(id,12,order.client_order_no,'gpt-plus');
+        const identity={scope:order.scope,job_key:order.client_order_no,credential_hash:order.api_key_hash,plan_type:'plus',card_id:12,state:'ready'};
+        if(kind==='issue') {
+            await store.attachManualIssue(id,order.client_order_no,'issue-original');
+            db.issues.push({...identity,issue_key:'issue-original',...mutation});
+        } else db.fundings.push({...identity,funding_key:'funding-original',...mutation});
+        await assert.rejects(store.failManualPreparation(id,order.client_order_no,'账户余额不足'),/不能自动释放/);
+        assert.equal(db.orders[0].state,'preparing');assert.equal(db.card.active_job,order.client_order_no);assert.equal(db.cdks[0].used_at,'reserved');
+    }
+});
+
+test('missing, foreign, or unlinked pending issue records cannot unlock an administrator preparation',async()=>{
+    for(const scenario of ['missing','foreign-job','unlinked-pending','duplicate']) {
+        const {db,store}=storeFixture();const order=await store.prepareManualOrder(manualInput(id));
+        await store.reserveManualCard(id,12,order.client_order_no,'gpt-plus');
+        const issue={issue_key:'issue-original',scope:order.scope,job_key:order.client_order_no,
+            credential_hash:order.api_key_hash,plan_type:'plus',card_id:12,state:'ready'};
+        if(scenario!=='unlinked-pending')await store.attachManualIssue(id,order.client_order_no,issue.issue_key);
+        if(scenario!=='missing')db.issues.push({...issue,...(scenario==='foreign-job'?{job_key:'manual-other'}:{}),
+            ...(scenario==='unlinked-pending'?{state:'pending'}:{})});
+        if(scenario==='duplicate')db.issues.push({...issue,issue_key:'issue-second'});
+        await assert.rejects(store.failManualPreparation(id,order.client_order_no,'账户余额不足'),/不能自动释放/);
+        assert.equal(db.orders[0].state,'preparing');assert.equal(db.card.active_job,order.client_order_no);assert.equal(db.cdks[0].used_at,'reserved');
+    }
 });

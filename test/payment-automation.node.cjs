@@ -95,3 +95,23 @@ test('subscription guard runs immediately before the write and blocks handoff af
     await assert.rejects(service.submit({ paymentGuard: { assertAllowed: async () => { throw new factory.PaymentStoppedError('stopped'); } } }, {}), factory.PaymentStoppedError);
     assert.equal(writes, 0);
 });
+
+test('funding review permits only original-funding reconciliation and never payment or a stopped owner',async()=>{
+    for(const manual of [false,true]) {
+        let state='funding_review',redeemed=false;
+        const jobKey=manual?'manual-review':'job-review';
+        const store=factory({runQuery:async sql=>sql.includes('FROM cdk_codes')
+            ?[{is_active:1,manual_redeemed_at:redeemed?'done':null}]
+            :[manual?{client_order_no:jobKey,request_id:'review',state,cdk_code:'CODE-REVIEW'}
+                :{job_key:jobKey,orbitcard_state:state,status:'manual',cdk_code:'CODE-REVIEW'}]});
+        await store.assertFundingReconciliationAllowed(jobKey);
+        await assert.rejects(store.assertPaymentAllowed(jobKey),factory.PaymentStoppedError);
+        redeemed=true;
+        await assert.rejects(store.assertFundingReconciliationAllowed(jobKey),factory.PaymentStoppedError);
+        redeemed=false;
+        for(state of ['funding_pending','support_locked','manual','success','rejected']) {
+            await assert.rejects(store.assertFundingReconciliationAllowed(jobKey),factory.PaymentStoppedError);
+            await assert.rejects(store.assertPaymentAllowed(jobKey),factory.PaymentStoppedError);
+        }
+    }
+});

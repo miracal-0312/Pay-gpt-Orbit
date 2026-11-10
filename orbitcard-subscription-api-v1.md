@@ -1,8 +1,8 @@
-# Orbitcard GPT 订阅 API V1
+# Orbitcard 订阅充值 API V1
 
-本接口转发 GPT 自动订阅请求并保存上游结果。2026-09-08 起的新收费政策为 `success_debit_v1`：创建、等待、失败和请求超时均不预占余额；只有上游明确 `succeeded` 后，才按创建时固定的服务费从可用余额扣款一次。服务费扣款失败不改变订阅成功结果。历史订单固定为 `legacy`，已释放费用不追扣。
+本接口支持 ChatGPT 与 Grok，共用订单、鉴权和费用流水，通过 `service_code` 区分服务。2026-09-08 起的新收费政策为 `success_debit_v1`：创建、等待、失败和请求超时均不预占余额；只有上游明确 `succeeded` 后，才按创建时固定的服务费从可用余额扣款一次。服务费扣款失败不改变订阅成功结果。历史订单固定为 `legacy`，已释放费用不追扣。
 
-现有支付流程仍需调用用户自己的有效卡 ID 和目标账号完整 Session。卡片用于现有订阅支付流程；`service_fee` 仅表示平台使用费。本页不提供充值接口。平台服务费为 USDT 十进制字符串；查询结果中的 `payment.amount` 是订阅支付金额的 JSON 数字，币种以 `payment.currency` 为准。
+现有支付流程仍需调用用户自己的有效卡 ID 和对应服务的登录凭据（ChatGPT 完整 Session，Grok 原始 SSO / Cookie / JSON）。卡片用于现有订阅支付流程；`service_fee` 仅表示平台使用费。本页不提供充值接口。平台服务费为 USDT 十进制字符串；查询结果中的 `payment.amount` 是订阅支付金额的 JSON 数字，币种以 `payment.currency` 为准。
 
 订阅 API 默认开启：未单独配置的新老用户均可使用 GO、Plus、Pro 100、Pro 200 及 250/500/1000/2500 点数套餐，处理中 API 订单并发上限为 5。超管可在「分发客户」停用用户或调整套餐与并发上限；已保存的停用和限制继续生效。用户仍需创建 API Key 并勾选订阅权限，旧密钥不会自动增加权限。Secret 仅创建时显示一次。
 
@@ -18,7 +18,7 @@
 | `X-Timestamp` | 必填 | UTC Unix 秒；服务端允许 ±300 秒误差。 |
 | `X-Nonce` | 必填 | 16–128 位 URL-safe 随机字符串；同一 Key 下 10 分钟内不得重复。 |
 | `X-Signature` | 必填 | Canonical Request 的 HMAC-SHA256 小写十六进制摘要。 |
-| `Idempotency-Key` | 按接口 | 写操作必填，8–128 字节；参与签名。 |
+| `Idempotency-Key` | 按接口 | 创建订阅必填，8–128 字节；参与签名。小助手接口不要求。 |
 
 ### Canonical Request
 
@@ -87,8 +87,8 @@ print(response.json())
 
 | Path | Scope | 请求体 |
 | --- | --- | --- |
-| `/api/open/v1/getSubscriptionPlans` | `subscriptions:read` | `{}`；查询当前客户已启用套餐 |
-| `/api/open/v1/getSubscriptionCatalog` | `subscriptions:read` | `{}` |
+| `/api/open/v1/getSubscriptionPlans` | `subscriptions:read` | `{}` 默认查询 GPT；Grok 用 `{"service_code":"grok"}`，全部服务用 `{"service_code":"all"}` |
+| `/api/open/v1/getSubscriptionCatalog` | `subscriptions:read` | `{}` 默认查询 GPT；支持同上 `service_code` 选项 |
 | `/api/open/v1/getSubscriptionPaymentRegions` | `subscriptions:read` | `{"plan_type":"gpt-plus"}` |
 | `/api/open/v1/createSubscription` | `subscriptions:create` | 见下方；必须带 Idempotency-Key |
 | `/api/open/v1/getSubscription` | `subscriptions:read` | `{"task_no":"平台订单号"}` 或 `{"client_order_no":"客户订单号"}`，或 `{"orderId":"平台订单号"}`，三选一 |
@@ -97,11 +97,11 @@ print(response.json())
 
 返回统一为 `{ "code": 0, "msg": "ok", "data": ... }`。HTTP 成功还需检查业务 code；受理下单还需查询订单最终状态。
 
-目录 `data` 包含 `enabled`、`tier_id`、`tier_name` 和 `plans:[{type,name,service_fee}]`，只返回当前客户允许的套餐。Pro 500 当前支持 PH（菲律宾）、JP（日本）、US（美国）、CL（智利）；可用地区及默认项以 getSubscriptionPaymentRegions 实时返回为准。套餐标识为 `gpt-go`、`gpt-plus`、`gpt-pro-5x`、`gpt-pro-20x`、`gpt-pro-25x`（Pro 500），以及一次性点数套餐 `gpt-credits-250`、`gpt-credits-500`、`gpt-credits-1000`、`gpt-credits-2500`。
+目录 `data` 包含 `enabled`、`tier_id`、`tier_name` 和 `plans:[{type,name,category,service_fee,fee_configured}]`。用户目录只读取 Orbitcard 本地已上架、上游可用且当前客户档位已定价的套餐，并遵循套餐权限；读取目录不会触发上游同步。管理员在“套餐管理”中手动同步上游，配置名称、分类和价格后上架。请直接使用目录返回的 `type` 查询地区及创建订单。历史标识保持兼容；新增套餐可使用原始上游标识，例如 `chatgptplusplan-50pct-off`。支付地区仍按所选套餐实时查询。
 
 ## 查询已启用套餐
 
-调用 `POST /api/open/v1/getSubscriptionPlans`，使用 `subscriptions:read` 权限及上文的 HMAC 签名。请求体为 `{}`，无需 Idempotency-Key，不接受 URL Query 或用户 ID。
+调用 `POST /api/open/v1/getSubscriptionPlans`，使用 `subscriptions:read` 权限及上文的 HMAC 签名。请求体 `{}` 或空请求体仍按原行为查询 GPT；新客户端可传 `{"service_code":"grok"}` 或 `{"service_code":"all"}`。无需 Idempotency-Key，不接受 URL Query 或用户 ID。
 
 ```json
 {}
@@ -118,8 +118,8 @@ print(response.json())
     "tier_id": 1,
     "tier_name": "VIP1",
     "plans": [
-      {"type": "gpt-plus", "name": "ChatGPT Plus", "service_fee": "0.15"},
-      {"type": "gpt-pro-25x", "name": "ChatGPT Pro 25x", "service_fee": "0.15"}
+      {"type": "gpt-plus", "name": "ChatGPT Plus", "service_fee": "0.15", "fee_configured": true},
+      {"type": "gpt-pro-25x", "name": "ChatGPT Pro 25x", "service_fee": "0.15", "fee_configured": true}
     ]
   }
 }
@@ -130,9 +130,12 @@ print(response.json())
 | `enabled` | 平台当前是否开放订阅；暂停服务或未配置上游密钥时为 false，且 plans 返回空数组 |
 | `tier_id` / `tier_name` | 当前客户的费率等级 |
 | `plans` | 当前客户有权使用的套餐；无可用套餐时为 [] |
+| `plans[].category` | 本地配置分类：subscription（订阅套餐）或 credits（额度充值） |
+| `plans[].service_code` | 可选服务标识；省略表示 `chatgpt`，Grok 返回 `grok`；创建时必须与套餐匹配 |
 | `plans[].type` | 套餐标识，作为地区查询及创建订阅的 plan_type |
 | `plans[].name` | 套餐显示名称 |
-| `plans[].service_fee` | 当前客户的平台服务费，USDT 金额字符串，不是银行卡实际付款金额 |
+| `plans[].service_fee` | 当前客户的平台服务费，USDT 金额字符串；未配置价格的套餐不进入用户目录，不是银行卡实际付款金额 |
+| `plans[].fee_configured` | 用户目录中为 true；未定价套餐仅在后台套餐管理和价格设置中可见 |
 
 此接口自动包含当前支持且对客户开放的套餐，包括 GO、Plus、Pro 和点数套餐；接入方应遍历 `plans`，不要写死套餐列表。客户被管理员停用或密钥缺少权限时返回 403。查询不创建订单、不扣费，也不查询上游地区。
 
@@ -151,6 +154,34 @@ print(response.json())
 ## 获取自己的支付卡
 
 使用 `POST /api/open/v1/getCardList` 查询本人卡列表，需要 `cards:read` 权限。请求体可使用 `{"page":1,"page_size":20}`；从返回的卡片记录取得平台卡 ID，再作为 `card_id` 提交。接口完整字段见平台通用开放 API 文档。网页订阅直接从卡片选择器选择，不需要 API 密钥。
+
+## 服务分类与 Grok 接入
+
+- `service_code` 支持 `chatgpt`、`grok`。创建时省略仍按 ChatGPT 处理；Grok 必须显式传 `grok`。
+- `getSubscriptionPlans` / `getSubscriptionCatalog` 默认仅返回当前用户可用的 GPT 套餐，保持旧调用兼容；传 `service_code: "grok"` 查询 Grok，传 `service_code: "all"` 查询全部。按 `plans[].service_code` 分类（省略视为 ChatGPT），用返回的 `type` 下单；不要根据套餐名称猜测服务。
+- `getSubscriptionPaymentRegions` 仍按 `plan_type` 查询，平台从本地目录确定服务并传给上游；无需在客户端猜测上游参数。
+- `getSubscriptionList` 增加可选 `service_code` 筛选，省略或空字符串仍只返回 GPT；`grok` 返回 Grok，`all` 返回全部服务。网页共享订单列表不受这个旧开放 API 默认值影响。为兼容旧 GPT 客户端，ChatGPT 响应保持原有形状，省略服务字段时视为 `chatgpt`。Grok 创建、列表及详情返回 `service_code`；详情的上游形状同时包含 `serviceCode`。
+- Grok 使用 `session_json` 传原始 SSO 字符串，或包含 `sso` / `sso-rw` / `cookieHeader` 的凭据 JSON；总大小不得超过 64 KiB。字段为字符串时也参与原始请求签名，不能签名后改为对象。
+- Grok 首期仅支持 US 地区首次购买。`target_email` / `targetEmail` 创建时可能为空，账号由上游核验后回填；不得将空邮箱视为下单失败，也不要用 SSO 内未核验的声明推断邮箱。
+- 查询中的 `session` 可能是字符串或对象，仅用于所属用户的明确凭据查询，不写日志或 URL。普通网页详情、列表及统计不会携带凭据。
+- 同一客户订单号与幂等键不能换服务、套餐、卡片或凭据重用。结果不明确时仍只确认原订单，不创建第二笔。
+
+Grok 创建请求示意（套餐需先在后台同步、定价并上架）：
+
+```json
+{
+  "service_code": "grok",
+  "client_order_no": "SHOP-GROK-001",
+  "plan_type": "grok-super-monthly",
+  "payment_region": "US",
+  "card_id": 123,
+  "session_json": "替换为目标账号的原始 SSO",
+  "authorized": true,
+  "max_service_fee": "0.25"
+}
+```
+
+`max_service_fee` 为示意上限，请以套餐接口返回的当前用户服务费为准。
 
 ## 创建订阅
 
@@ -175,7 +206,7 @@ print(response.json())
 - `client_order_no` 必填，当前用户范围内唯一，最多 128 字节。
 - `payment_region` 可选，为地区查询返回的两位大写代码；省略时由上游选择默认地区。地区已停用时上游会拒绝，不会自动切换。该字段参与幂等校验，同一订单重试必须保持原地区。创建/列表通过 `payment_region` 返回已知地区，详情通过 `paymentRegion` 返回支付地区；历史记录可能没有该字段。
 - `card_id` 为属于调用用户的有效平台卡 ID。凭证无效或卡不可用时不创建可执行订单。
-- `session_json` 必须是目标账号的完整有效资料，可包含其他上游要求的字段；上例不能直接执行。请求日志不保存此内容。
+- ChatGPT 的 `session_json` 必须是目标账号的完整有效资料，可包含其他上游要求的字段；上例不能直接执行。请求日志不保存此内容。
 - `authorized` 必须为 true，表示已取得对应订阅支付授权。
 - `max_service_fee` 可选，可接受的最高平台使用费；超过此值拒绝且不扣费。
 - `Idempotency-Key` 必填，8–128 字节，参与签名。每笔业务使用固定值。
@@ -267,7 +298,7 @@ print(response.json())
 | `task_status` | string | 平台任务状态：`queued / running / succeeded / failed`。仅代表本地执行状态，不能单独用于判断订阅成败。服务费以 `fee_status` 为准。 |
 | `paymentRegion` | string | 订单支付地区；上游受理后保存实际地区，未受理时为请求地区，未指定且未返回时省略。 |
 | `targetEmail` / `planCode` | string | 目标账号邮箱、上游套餐代码。 |
-| `session` | object，可省略 | 当前上游查询返回的完整 Session JSON 对象，保留全部扩展字段及原始类型。仅所属用户可见；字段缺失时省略；归属校验失败则本次查询返回错误，不返回任何 Session。不会使用提交时的旧凭证冒充最新结果。 |
+| `session` | object 或 string，可省略 | 当前上游查询返回的登录凭据；ChatGPT 为 Session JSON，Grok 可为 SSO 字符串或对象。保留原始类型与扩展字段。仅所属用户可见；字段缺失时省略；归属校验失败则本次查询返回错误，不返回任何 Session。不会使用提交时的旧凭证冒充最新结果。 |
 | `payment` | object，可省略 | 订单支付金额快照，`amount` 为数字，`currency` 为实际币种；不等于平台服务费，也不单独证明扣款成功。 |
 | `subscriptionCancelled` | boolean / null | true 已取消自动续费；false 未取消；null 没有明确结果。 |
 | `createdAt / updatedAt / completedAt` | RFC3339 | 最新上游结果的创建、更新、完成时间；未完成时省略 completedAt。仅从上游取值；没有上游时间时不从本地完成时间推断。 |
@@ -413,3 +444,144 @@ Session 在客户服务端 API 的本次详情响应内返回，不写入任务�
 扣费幂等身份固定为 `auto-pay-success-fee:<task_no>`，按创建价格快照执行。技术失败在 15 分钟内最多 5 次，余额不足直接结束；充值、刷新、重复查询不会重新开启收费事项。新政策迟到成功收费一次；历史已释放订单永不追扣。已收取后上游返回更新结果，只更新事实，不自动退款或再次收费。
 
 实收费以钱包 debit / 历史 frozen_debit 流水计入报表；charge_pending / charge_failed 不算已收取。订阅成功率只统计已验证上游 succeeded/failed，不把本地超时、请求错误或服务费失败放入订阅失败分母。
+
+## GPT 小助手 OpenAPI
+
+小助手提供实时账号查询、升级价格预览、自动续费管理、账单中心链接和最新 Session。沿用本平台 `/api/open/v1` 的 HMAC-SHA256 签名、API Key、IP 白名单和统一响应格式；不是上游仅传 X-API-Key 的接口。只从客户服务端调用，不使用网页登录 Cookie。所有接口均为 POST，不接受 URL Query。
+
+在「API 密钥」或开发者中心为密钥显式勾选“小助手查询”或“小助手管理”；旧密钥的订阅查询 / 下单权限不会自动包含小助手权限。管理员也可在 API 密钥管理中授予或限制这两项权限。
+
+| 路径 | 必要权限 | 请求参数 |
+| --- | --- | --- |
+| `/api/open/v1/assistants/gpt/session` | `assistants:read` | `session` |
+| `/api/open/v1/assistants/gpt/upgrade-price` | `assistants:read` | `session`、`targetPlan` |
+| `/api/open/v1/assistants/gpt/auto-renewal` | `assistants:manage` | `session`、`accountId`、`enabled` |
+| `/api/open/v1/assistants/gpt/billing-portal` | `assistants:manage` | `session` |
+| `/api/open/v1/assistants/gpt/latest-session` | `assistants:manage` | `session`（包含登录 Cookie 凭据） |
+
+`session` 必须是完整 JSON 对象，不能是转义字符串；不超过 64 KiB，包含 `user.email` 和 `accessToken`。请保留完整对象及扩展字段。请求体上限为 72 KiB；除表中字段外不要添加其他顶层字段。建议客户端超时设置为 90 秒。
+
+小助手请求不创建订阅订单、不收取平台使用费，不要求 Idempotency-Key，也不缓存或重放操作结果。请求仍需每次生成新 X-Nonce 并重新签名。每个操作按用户和来源 IP 分别限流：查询类每分钟最多 5 次，管理类每分钟最多 3 次，使用固定分钟窗口；同一用户的多个 Key 共享额度，并同时受密钥总额度和上游限流约束。遇到 HTTP 429 或上游限流错误时遵循 Retry-After。
+
+响应带 `Cache-Control: no-store`。调用日志仅记录用户、密钥 ID、请求 ID、路径、状态码与耗时，不保存 Session、Token、报价响应或账单链接。不要将凭据放入 URL、请求 ID、自定义日志或浏览器持久存储。
+
+### Session 查询
+
+```json
+{
+  "session": {
+    "user": { "email": "target@example.com" },
+    "accessToken": "<完整 Access Token>"
+  }
+}
+```
+
+成功时 `data` 是账号对象：
+
+```json
+{
+  "code": 0,
+  "msg": "ok",
+  "data": {
+    "email": "target@example.com",
+    "accountId": "account_example",
+    "plan": "plus",
+    "subscriptionPlan": "chatgptplusplan",
+    "active": true,
+    "willRenew": true,
+    "startedAt": "2026-10-20T07:42:00Z",
+    "expiresAt": "2026-11-20T07:42:00Z",
+    "renewsAt": "2026-11-20T07:42:00Z",
+    "billingPeriod": "month",
+    "currency": "USD",
+    "accountStatus": "active",
+    "paymentChannel": "chatgpt_web",
+    "checkedAt": "2026-10-28T08:00:00Z",
+    "warnings": []
+  }
+}
+```
+
+当前套餐以 `plan` 为准；`subscriptionPlan` 可能保留历史值。只有 `active=true` 且 `plan=pro` 时，使用匹配的订阅代码细分 Pro 档位。`active` 和 `willRenew` 无法确认时为 null，不能当作 false；未知时间为空字符串，提示为空时 `warnings=[]`。
+
+### 升级价格查询
+
+请求 `POST /api/open/v1/assistants/gpt/upgrade-price`：
+
+```json
+{
+  "session": {
+    "user": { "email": "target@example.com" },
+    "accessToken": "<完整 Access Token>"
+  },
+  "targetPlan": "chatgptpro"
+}
+```
+
+`targetPlan` 必填，没有默认值；使用下面的上游目标套餐代码，不使用订单接口的 gpt-plus / gpt-pro-20x 等标识。
+
+| targetPlan | 目标套餐 |
+| --- | --- |
+| `chatgptplusplan` | ChatGPT Plus |
+| `chatgptprolite` | ChatGPT Pro $100 |
+| `chatgptpro` | ChatGPT Pro $200 |
+| `chatgptpromax` | ChatGPT Pro $500 |
+
+成功时 `data.account` 是上述账号对象，其余字段示例：
+
+```json
+{
+  "targetPlan": "chatgptpro",
+  "currency": "USD",
+  "amountDue": 18000,
+  "totalAmount": 18000,
+  "taxAmount": 0,
+  "positiveLineItemTotal": 20000,
+  "negativeLineItemTotal": -2000,
+  "discountAmount": 0,
+  "appliedBalance": 0,
+  "renewalDate": "2026-11-20T07:42:00Z",
+  "checkedAt": "2026-10-28T08:00:00Z"
+}
+```
+
+| 响应字段 | 含义 |
+| --- | --- |
+| `account` | 本次查询的目标账号；内部字段与 Session 查询一致 |
+| `targetPlan` | 本次报价对应的目标套餐 |
+| `currency` / `amountDue` | 实际报价币种、本次应付金额；始终返回 |
+| `totalAmount` / `taxAmount` | 账单总额、税费；上游提供时才返回 |
+| `positiveLineItemTotal` / `negativeLineItemTotal` | 计费项目总额、抵扣项目总额；保留正负号 |
+| `discountAmount` / `appliedBalance` | 优惠金额、余额调整；上游提供时才返回 |
+| `renewalDate` / `checkedAt` | 下次续费时间、报价查询时间；无有效续费时间时为空字符串 |
+
+**全部金额为该币种最小单位的整数**，例如 USD 18000 = 180.00 美元、JPY 100 = 100 日元。以 `amountDue` 为本次应付，不用套餐标价、`totalAmount` 或自行加减其他字段替代。缺失的可选金额省略，明确返回 0 才表示零金额。缺少应付金额或币种、账号或目标套餐不匹配时返回失败，不会把无效报价当作 0 元。
+
+网页端查询成功后隐藏并清空 Session 输入框；返回查询可以复用当前页面内的账号凭据查询其他套餐。查询其他账号、清空、切换功能或离开页面会清除凭据和报价，不写入浏览器存储。
+
+该接口仅预览，不会扣款、开启续费或提交升级。仅支持有效网页付费订阅；App Store / Google Play、同档、降档、没有有效订阅或档位未知等情况会返回具体原因。实际报价会随剩余时间、税费和优惠变化，最终支付以账单为准。
+
+### 自动续费、账单中心与最新 Session
+
+自动续费请求额外传 `accountId`（Session 查询返回值）及布尔值 `enabled`：true 开启，false 关闭。成功时返回核对后的完整账号对象。一次请求不会自动重试提交；超时或续费状态未确认时，先调用 Session 查询核对 `willRenew`，不要立即重复提交。
+
+账单中心请求只需 `session`，成功时返回 `data.url`（HTTPS 临时链接）。每次实时获取，不记录或缓存完整链接。
+
+最新 Session 请求需要 `session` 包含 `sessionToken`、`session_token` 或完整登录 `cookies` 数组之一，仅 accessToken 不够。成功时返回 `data.session` 完整对象，保留扩展字段；不要只提取 accessToken。返回 Token 与原 Token 相同也可能是有效结果。
+
+### 小助手错误响应
+
+本站参数、签名与权限错误沿用平台错误码。上游失败使用 HTTP 502、本站 `code=59018`，详细分类读取 `data.request_error.upstream_code`，不要将上游业务码误认为本站顶层 code。上游 HTTP 状态在 `data.request_error.upstream_http_status` 中；本站拒绝不完整或不匹配的结果时为 `source=relay`、`code=assistant_invalid_response`。
+
+| upstream_code | 含义及处理 |
+| --- | --- |
+| `40030 / 40031 / 40032 / 40033` | Session、登录 Cookie、续费参数或目标套餐无效；修正对应参数 |
+| `42230 / 40934` | 登录失效或目标账号不匹配；重新获取完整 Session |
+| `42231 / 42232` | 非网页订阅或渠道无法确认；查看具体错误消息 |
+| `40935 / 40936` | 已拥有目标套餐或目标为降档；选择更高档位 |
+| `40937 / 40938 / 40939` | 无有效订阅、状态或档位无法确认；刷新账号信息 |
+| `42233 / 40940 / 40941` | 无购买资格、未结清账单或暂不支持升级；处理账号问题后重试 |
+| `50233` | 上游报价缺少应付金额或币种；不要当作免费升级 |
+| `40930 / 40931 / 40932` | 续费不可用、进行中或结果未确认；先查询账号状态 |
+| `42900 / 50331` | 上游限流；遵循 Retry-After |
+| `50230 / 50231 / 50232 / 50330` | 上游请求失败、拒绝访问、无有效最新 Session 或服务不可用 |

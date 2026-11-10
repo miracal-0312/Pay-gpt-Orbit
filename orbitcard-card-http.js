@@ -2,7 +2,7 @@
 
 const cardsApi = require('./orbitcard-cards-client');
 const api = require('./orbitcard-client');
-const { MAX_USES } = require('./orbitcard-pool');
+const { MAX_USES, coolingDown } = require('./orbitcard-pool');
 const { CardPreparationError } = require('./orbitcard-card-policy');
 const { PLAN_TYPES: CANONICAL_PLAN_TYPES, PROVIDER_PLANS } = require('./plan-registry');
 
@@ -22,6 +22,7 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
             authorization_pending: card.authorization_pending_count != null
                 && (card.authorization_count == null || Number(card.authorization_count) < Number(card.authorization_pending_count)),
             retiring: Boolean(card.retirement_key),
+            cooling_down: coolingDown(card), reuse_after_ms: Number(card.reuse_after_ms || 0),
             provider_status: card.provider_status, product_code: card.product_code, last4: card.last4,
             balance: card.balance, currency: card.currency, source: card.source, updated_at: card.updated_at
         }));

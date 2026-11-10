@@ -24,7 +24,7 @@ function fixture(overrides = {}) {
         verifyCdkDetails: async () => ({ type: '自助', plan_type: 'plus' }), getRunningTaskByCdk: async () => null,
         getMaintenanceModeState: async () => ({}), getGptApiConfig: async () => ({ enabled: true, api_key: 'key', orbitcard_card_id: '42', base_url: 'https://orbitcard.test' }),
         getMaxConcurrentActivations: async () => 1,
-        createOrbitcardTask: async input => { events.push(['claim',input]); return { jobKey: 'job', orbitcardClientOrderNo: 'original' }; },
+        createOrbitcardTask: async input => { events.push(['claim',input]); return { jobKey: 'job', orbitcardState: 'preparing', orbitcardClientOrderNo: 'original' }; },
         settleOrbitcardTask: async (...args) => { events.push(['settle',...args]); return { applied: true }; }, ...overrides
     };
     const handler = require('../activation-service')({ store, activeJobs, ensureStoreReady: async () => {},
@@ -98,7 +98,7 @@ test('admission capacity is reserved before an asynchronous task insert', async 
         assert.equal(f.events.filter(event => event[0] === 'worker').length,1);
     } finally { release(); if (old === undefined) delete process.env.ORBITCARD_API_SECRET; else process.env.ORBITCARD_API_SECRET = old; }
 });
-test('a synchronous dispatch failure only releases its own still-prepared attempt', async () => {
+test('a synchronous dispatch failure only releases its own still-preparing attempt', async () => {
     const old = process.env.ORBITCARD_API_SECRET; process.env.ORBITCARD_API_SECRET = 'test-secret';
     try {
         const f = fixture();
@@ -106,7 +106,7 @@ test('a synchronous dispatch failure only releases its own still-prepared attemp
         const res = { status(code) { this.code=code; return this; }, json(data) { this.data=data; } };
         await handler({ body: { cdk: 'CDK-TEST', session: JSON.stringify(session) } },res);
         const settlement = f.events.find(event => event[0] === 'settle');
-        assert.equal(settlement[1],'job'); assert.equal(settlement[2].expectedState,'prepared'); assert.equal(settlement[2].orbitcardState,'rejected');
+        assert.equal(settlement[1],'job'); assert.equal(settlement[2].expectedState,'preparing'); assert.equal(settlement[2].orbitcardState,'rejected');
         assert.equal(f.activeJobs.size,0);
     } finally { if (old === undefined) delete process.env.ORBITCARD_API_SECRET; else process.env.ORBITCARD_API_SECRET = old; }
 });

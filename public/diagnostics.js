@@ -87,10 +87,11 @@ $('diagSessionFile').addEventListener('change', async event => {
 });
 function diagShowOrder(order) {
     diagOrder = order;
-    const terminal = ['success','failed'].includes(order.state);
+    const terminal = ['success','failed','rejected'].includes(order.state);
     $('diagNewTest').disabled = !terminal;
     $('diagPay').disabled = !['preparing','prepared'].includes(order.state);
-    $('diagPay').textContent = ['preparing','prepared'].includes(order.state) ? '继续原测试订单准备 · 可能真实扣款' : '当前订单已提交，请查询原单';
+    $('diagPay').textContent = ['preparing','prepared'].includes(order.state) ? '继续原测试订单准备 · 可能真实扣款'
+        : ['funding_waiting','funding_review'].includes(order.state) ? '补款正在核对，请查询原任务' : '当前订单已结束或已提交，请查询原单';
     $('diagOrderState').textContent = `${order.client_order_no} · ${order.plan_name || order.plan_type} · ${order.card_id ? `卡 ${order.card_id}` : '待选卡'} · ${order.state} · ${order.message || ''}`;
     $('diagCaptcha').replaceChildren();
     if (order.captcha?.url) {
@@ -143,7 +144,7 @@ $('diagQueryOrder').onclick = () => perform(async () => {
     await diagQueryOrder(); await diagReadLogs();
 });
 $('diagNewTest').onclick = () => {
-    if (!diagOrder || !['success','failed'].includes(diagOrder.state)) return;
+    if (!diagOrder || !['success','failed','rejected'].includes(diagOrder.state)) return;
     diagSetRequestId(''); diagOrder = null; $('diagNewTest').disabled = true;
     $('diagPay').disabled = false; $('diagPay').textContent = '真实扣款测试开通';
     $('diagAuthorized').checked = false; $('diagSession').value = ''; $('diagSessionFile').value = '';
@@ -177,7 +178,7 @@ setInterval(async () => {
     diagPolling = true;
     try {
         if ($('diagTraceId').value.trim()) await diagReadLogs();
-        if ($('diagRequestId').value && !diagPayBusy && (!diagOrder || ['submitting','pending','manual'].includes(diagOrder.state))) await diagQueryOrder();
+        if ($('diagRequestId').value && !diagPayBusy && (!diagOrder || ['funding_waiting','funding_review','submitting','pending','manual'].includes(diagOrder.state))) await diagQueryOrder();
         diagPollFailures = 0;
     } catch (_) { diagPollFailures++; }
     finally {

@@ -5,7 +5,7 @@ const money = require('./orbitcard-money');
 const { planFor, CardPreparationError } = require('./orbitcard-card-policy');
 
 // Pure decisions over one platform snapshot. No network requests or persistence.
-function decideCards({ saved, listed, detailed, products, jobKey, planType, priceFor }) {
+function decideCards({ saved, listed, detailed, products, jobKey, planType, priceFor, now = Date.now() }) {
     const plan = planFor(planType), live = new Map(listed.map(card => [Number(card.card_id), card]));
     const details = new Map(detailed.map(card => [Number(card.card_id), card]));
     const candidates = [], skipped = [], waiting = [];
@@ -22,7 +22,10 @@ function decideCards({ saved, listed, detailed, products, jobKey, planType, pric
         if (poolPolicy.awaitingAuthorization(row) && used < poolPolicy.MAX_USES && !row.retirement_key) {
             waiting.push({ card_id: id, reason: 'authorization_pending' }); continue;
         }
-        if (!poolPolicy.eligible(row)) { skipped.push({ card_id: id, reason: 'limit_reached', successful_uses: used, limit: poolPolicy.MAX_USES }); continue; }
+        if (poolPolicy.coolingDown(row, now) && used < poolPolicy.MAX_USES && !row.retirement_key) {
+            waiting.push({ card_id: id, reason: 'cooldown', reuse_after_ms: row.reuse_after_ms }); continue;
+        }
+        if (!poolPolicy.eligible(row, now)) { skipped.push({ card_id: id, reason: 'limit_reached', successful_uses: used, limit: poolPolicy.MAX_USES }); continue; }
         if (row.active_job && !owned) { waiting.push({ card_id: id, reason: 'busy' }); continue; }
         const detail = details.get(id);
         if (!detail) {

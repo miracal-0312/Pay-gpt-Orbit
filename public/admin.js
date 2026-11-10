@@ -67,15 +67,16 @@ async function perform(action, success) {
     try { const result = await action(); if (success) notice(success, 'success'); return result; }
     catch (error) { notice(error.message, 'error'); return null; }
 }
-function status(value) { const text = { success: '成功', failed: '失败', retry: '待重新提交 Session', running: '处理中', preparing: '准备支付', prepared: '已保存', submitting: '提交中', manual: '人工处理（支付已停止）', support_locked: '人工售后（支付已停止）', pending: '待确认', unused: '未使用', used: '已使用', redeemed: '已核销', processing: '占用中' }[value] || value; return `<span class="pill ${escapeHtml(value)}">${escapeHtml(text)}</span>`; }
+function status(value) { const text = { success: '成功', failed: '失败', rejected: '未受理（已释放）', retry: '待重新提交 Session', running: '处理中', preparing: '准备支付', funding_waiting: '等待补款到账', funding_review: '补款对账工单（后台跟进）', prepared: '资金已就绪', submitting: '提交中', manual: '人工处理（支付已停止）', support_locked: '人工售后（支付已停止）', pending: '待确认', unused: '未使用', used: '已使用', redeemed: '已核销', processing: '占用中' }[value] || value; return `<span class="pill ${escapeHtml(value)}">${escapeHtml(text)}</span>`; }
 function renderTasks(tasks) {
     $('tasks').innerHTML = tasks.map(task => {
         const order = task.order || {}, fee = order.fee_status ? `${order.service_fee ?? '—'} ${order.currency || 'USDT'} / ${order.fee_status}` : '—';
         const payment = order.payment ? `${order.payment.amount} ${order.payment.currency}` : '—';
-        const refresh = task.provider === 'orbitcard' ? `<button class="secondary" data-refresh-order="${escapeHtml(task.jobKey)}">查原单</button> <button type="button" class="secondary" data-edit-order="${escapeHtml(task.jobKey)}" data-order-status="${escapeHtml(task.status)}">人工修改</button>` : '<small>历史记录</small>';
+        const preparing = ['preparing','prepared','funding_waiting','funding_review','card_pending','funding_pending','balance_blocked'].includes(task.orbitcard_state);
+        const refresh = task.provider === 'orbitcard' ? `<button class="secondary" data-refresh-order="${escapeHtml(task.jobKey)}">${['funding_waiting','funding_review'].includes(task.orbitcard_state) ? '核对原补款' : '查原单'}</button>${preparing ? '' : ` <button type="button" class="secondary" data-edit-order="${escapeHtml(task.jobKey)}" data-order-status="${escapeHtml(task.status)}">人工修改</button>`}` : '<small>历史记录</small>';
         const cardLabel = task.card_id || (task.provider !== 'orbitcard' ? '历史未绑定'
-            : ['prepared','rejected','balance_blocked','card_pending'].includes(task.orbitcard_state) ? '尚未分配支付卡' : '未记录支付卡');
-        return `<tr><td>${escapeHtml(task.time)}<br><code>${escapeHtml(task.cdk)}</code></td><td>${escapeHtml(task.provider === 'orbitcard' ? task.token : '历史账号')}<br><code>${escapeHtml(task.order_id || task.client_order_no || task.jobKey)}</code><br>卡 ID：${escapeHtml(cardLabel)}</td><td>${status(task.status)}<br>${escapeHtml(task.message)}</td><td>${escapeHtml(fee)}</td><td>${escapeHtml(payment)}</td><td>${refresh} <button class="secondary" data-download-audit="${escapeHtml(task.jobKey)}">下载日志</button> <button class="secondary" data-debug-trace="${escapeHtml(task.jobKey)}">链路日志</button></td></tr>`;
+            : ['preparing','prepared','rejected','balance_blocked','card_pending'].includes(task.orbitcard_state) ? '尚未分配支付卡' : '未记录支付卡');
+        return `<tr><td>${escapeHtml(task.time)}<br><code>${escapeHtml(task.cdk)}</code></td><td>${escapeHtml(task.provider === 'orbitcard' ? task.token : '历史账号')}<br><code>${escapeHtml(task.order_id || task.client_order_no || task.jobKey)}</code><br>卡 ID：${escapeHtml(cardLabel)}</td><td>${status(task.orbitcard_state === 'funding_review' ? 'funding_review' : task.status)}<br>${escapeHtml(task.message)}</td><td>${escapeHtml(fee)}</td><td>${escapeHtml(payment)}</td><td>${refresh} <button class="secondary" data-download-audit="${escapeHtml(task.jobKey)}">下载日志</button> <button class="secondary" data-debug-trace="${escapeHtml(task.jobKey)}">链路日志</button></td></tr>`;
     }).join('') || '<tr><td colspan="6">暂无任务</td></tr>';
 }
 async function loadOverview() {
@@ -184,7 +185,8 @@ function renderCardRow(card, sync = null) {
     const usage = `${escapeHtml(card.authorization_count ?? '待同步')} / ${escapeHtml(card.authorization_limit)} 次成功消费授权`;
     const history = card.retiring ? '待确认删卡'
         : card.authorization_count != null && Number(card.authorization_count) >= Number(card.authorization_limit) ? '达到上限，停止分配'
-            : card.authorization_pending ? '等待授权同步，暂不分配' : '平台成功消费授权自动累计';
+            : card.authorization_pending ? '等待授权同步，暂不分配'
+            : card.cooling_down ? '支付后冷却中，暂不分配' : '平台成功消费授权自动累计';
     const countedAt = card.authorizations_checked_at ? `授权统计时间：${escapeHtml(card.authorizations_checked_at)}` : '尚未完成授权统计';
     const last4 = card.last4 ? `****${escapeHtml(card.last4)}` : '尾号未提供';
     const confirmed = sync?.synced_ids?.includes(Number(card.card_id));
