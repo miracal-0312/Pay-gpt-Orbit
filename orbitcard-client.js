@@ -115,10 +115,19 @@ async function fetchPlans(cfg) {
     return { ...res, plans };
 }
 
+function terminalUpstreamSnapshot(data) {
+    // query_source describes this read; result_source describes the saved
+    // result. The provider may serve a completed upstream order as a snapshot.
+    // Require all terminal indicators, not merely its local task_status.
+    return data?.query_source === 'snapshot' && data.result_source === 'upstream' && !data.request_error
+        && (data.status === 'failed' && data.upstream_status === 'failed' && data.subscription_succeeded === false
+            || data.status === 'succeeded' && data.upstream_status === 'succeeded' && data.subscription_succeeded === true);
+}
+
 function outcome(data, detail = false) {
-    // A detail snapshot or contradictory indicators cannot authorize a CDK
-    // settlement or a new payment attempt. Local task_status is never evidence.
-    if (detail && data?.query_source && data.query_source !== 'upstream') return 'pending';
+    // Callers must validate the original order identity before settlement.
+    // Unverified snapshots and contradictory indicators remain unresolved.
+    if (detail && data?.query_source && data.query_source !== 'upstream' && !terminalUpstreamSnapshot(data)) return 'pending';
     const observed = [data?.upstream_status, detail ? data?.status : null]
         .filter(value => value !== null && value !== undefined && value !== '');
     const signal = data?.subscription_succeeded;
@@ -178,4 +187,4 @@ async function testConnection(cfg) {
         balanceError: balance.success ? null : balance.error, checks };
 }
 
-module.exports = { request, fetchPlans, testConnection, outcome, summary, captcha };
+module.exports = { request, fetchPlans, testConnection, outcome, terminalUpstreamSnapshot, summary, captcha };

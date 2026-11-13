@@ -86,6 +86,7 @@ Session 必须是 JSON 对象，包含 `user`、`account`、字符串 `accessTok
 | 开卡待确认 | `card_pending` / `manual` | 有原订单号时以原正文和幂等键确认；未发送意图可失败，无订单号的未知申请不重放；确认后安全收尾 |
 | 可能已发送 | `submitting` | 占用 |
 | 等待上游或验证 | `pending` / `running` | 占用 |
+| 原订单返回上游终态快照 | `success` 或 `support_locked` | 归属匹配，且 `query_source=snapshot`、`result_source=upstream`、`status`/`upstream_status`/`subscription_succeeded` 三项明确一致时按正常终态收尾；释放卡片并冷却 5 分钟，失败 CDK 保持售后锁定 |
 | 已提交订阅结果未知或超时 | `pending` / `running` | 继续占用，后台查询原单，不自动转人工 |
 | 历史人工订阅任务 | `manual` | 保留人工状态，仅核对原单，不恢复付款 |
 | 明确订阅成功 | `success` | 核销 |

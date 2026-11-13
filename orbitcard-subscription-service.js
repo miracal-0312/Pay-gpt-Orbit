@@ -79,11 +79,11 @@ module.exports = function createSubscriptionService(provider, audit = () => {}) 
     async function query(cfg, expected) {
         const result = await provider.request(cfg, 'getSubscription', expected.orderId
             ? { task_no: expected.orderId } : { client_order_no: expected.clientOrderNo });
-        if (!result.success) {
+        if (!result.success || result.requestError || result.data?.request_error) {
             record(cfg, 'subscription_query_unconfirmed', '原订单查询暂不可确认，保留原订单及支付卡', {
                 client_order_no: expected.clientOrderNo, http_status: result.status ?? null, platform_code: result.code ?? null
             });
-            return { success: false, error: result.error, retryAfterMs: result.retryAfterMs || 5000,
+            return { success: false, error: result.error || '原订单查询返回请求异常，暂不能确认订阅结果', retryAfterMs: result.retryAfterMs || 5000,
                 stopTracking: [401,403,404].includes(result.status) || result.code === 59009 };
         }
         if (!validOrder(result.data, expected)) {

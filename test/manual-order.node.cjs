@@ -668,6 +668,73 @@ test('every confirmed accepted subscription failure locks the CDK and releases t
     }
 });
 
+test('manual original-order refresh settles terminal upstream snapshots and releases the card without another payment', async () => {
+    for (const mode of ['test', 'fulfillment']) for (const status of ['failed', 'succeeded']) {
+        const { db, store, now } = storeFixture();
+        const cfg = { base_url: 'https://orbitcard.cc', api_key: 'snapshot-test-key' };
+        const apiKeyHash = require('node:crypto').createHash('sha256').update(cfg.api_key).digest('hex');
+        await prepareOrder(store, manualInput(id, { mode, cdkCode: mode === 'test' ? null : 'KC-READY', apiKeyHash }));
+        await store.claimManualSubmission(id);
+        await store.settleManualOrder(id, { state: 'pending', taskNo: 'SUB-SNAPSHOT', message: 'waiting' });
+        db.card.balance = 91;
+        store.acquirePaymentLock = require('./helpers/payment-locks.cjs')().acquirePaymentLock;
+        const calls = [], events = [];
+        const provider = { ...require('../orbitcard-client'), request: async (_, operation, body) => {
+            calls.push(operation);
+            assert.equal(operation, 'getSubscription');
+            assert.deepEqual(body, { task_no: 'SUB-SNAPSHOT' });
+            return { success: true, data: { task_no: 'SUB-SNAPSHOT', client_order_no: `manual-${id}`,
+                plan_type: 'gpt-plus', card_id: 12, status, upstream_status: status,
+                subscription_succeeded: status === 'succeeded', query_source: 'snapshot', result_source: 'upstream',
+                ...(status === 'failed' ? { failureCode: 'EXISTING_SUBSCRIPTION_NOT_OURS' } : {}) } };
+        } };
+        const service = createService({ store, provider, now, activeJobs: new Set(), audit: event => events.push(event),
+            cardService: { allocate: async () => assert.fail('reconciliation cannot allocate or fund a card') } });
+        const result = await service.refresh(id, cfg);
+        assert.equal(result.state, status === 'failed' ? 'support_locked' : 'success');
+        assert.equal(db.card.active_job, null);
+        assert.equal(db.card.balance, 91);
+        assert.equal(db.card.authorization_count, 0);
+        assert.equal(db.card.authorization_pending_count || 0, status === 'succeeded' ? 1 : 0);
+        assert.equal(db.card.reuse_after_ms, now() + require('../orbitcard-pool').REUSE_COOLDOWN_MS);
+        assert.equal(db.cdks[0].used_at, mode === 'test' ? null : 'reserved');
+        assert.equal(events.find(event => event.event === 'subscription_result_checked').data.state,
+            status === 'failed' ? 'failed' : 'success');
+        await service.refresh(id, cfg);
+        assert.deepEqual(calls, ['getSubscription']);
+    }
+});
+
+test('manual snapshots with missing provenance, mismatched ownership or query errors retain the card', async () => {
+    for (const scenario of ['provenance', 'identity', 'card', 'request_error', 'data_error', 'http_failure']) {
+        const { db, store, now } = storeFixture();
+        const cfg = { base_url: 'https://orbitcard.cc', api_key: 'snapshot-test-key' };
+        const apiKeyHash = require('node:crypto').createHash('sha256').update(cfg.api_key).digest('hex');
+        await prepareOrder(store, manualInput(id, { apiKeyHash }));
+        await store.claimManualSubmission(id);
+        await store.settleManualOrder(id, { state: 'pending', taskNo: 'SUB-SNAPSHOT', message: 'waiting' });
+        store.acquirePaymentLock = require('./helpers/payment-locks.cjs')().acquirePaymentLock;
+        const data = { task_no: 'SUB-SNAPSHOT', client_order_no: `manual-${id}`, plan_type: 'gpt-plus', card_id: 12,
+            status: 'failed', upstream_status: 'failed', subscription_succeeded: false,
+            query_source: 'snapshot', result_source: 'upstream' };
+        const response = { success: true, data };
+        if (scenario === 'provenance') delete data.result_source;
+        if (scenario === 'identity') data.client_order_no = 'another-order';
+        if (scenario === 'card') data.card_id = 99;
+        if (scenario === 'request_error') response.requestError = { code: 'relay_query_failed' };
+        if (scenario === 'data_error') data.request_error = { code: 'relay_query_failed' };
+        if (scenario === 'http_failure') response.success = false;
+        const provider = { ...require('../orbitcard-client'), request: async (_, operation) => {
+            assert.equal(operation, 'getSubscription'); return response;
+        } };
+        const service = createService({ store, provider, now, activeJobs: new Set(), audit() {}, cardService: {} });
+        assert.equal((await service.refresh(id, cfg)).state, 'pending', scenario);
+        assert.equal(db.card.active_job, `manual-${id}`, scenario);
+        assert.equal(db.card.reuse_after_ms, 0, scenario);
+        assert.equal(db.cdks[0].used_at, 'reserved', scenario);
+    }
+});
+
 test('administrator success waits for its authorization; seven observed authorizations stop further allocations', async () => {
     const { db, store, advance } = storeFixture();
     for (let count = 0; count < 7; count++) {

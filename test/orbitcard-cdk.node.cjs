@@ -207,7 +207,7 @@ test('abnormal card exhaustion locks the CDK before the first subscription submi
     assert.equal((await f.store.lockOrbitcardSupport(task.jobKey,'prepared','again',{cardSelectionExhausted:true})).applied,false);
 });
 
-test('only a consistent live upstream result settles or retries an order', () => {
+test('unverified snapshots and contradictory upstream results remain pending', () => {
     const {api,domain}=modules();
     const valid={orderId:'SUB-1',client_order_no:'ORDER-1',plan_type:'gpt-plus'};
     assert.equal(domain.validOrder(valid,{clientOrderNo:'ORDER-1',planType:'gpt-plus'}),true);
@@ -218,6 +218,51 @@ test('only a consistent live upstream result settles or retries an order', () =>
     assert.equal(api.outcome({status:'failed',subscription_succeeded:false,query_source:'snapshot'},true),'pending');
     assert.equal(api.outcome({status:'succeeded',subscription_succeeded:true,query_source:'upstream'},true),'success');
     assert.equal(api.outcome({status:'failed',subscription_succeeded:false,query_source:'upstream'},true),'failed');
+});
+
+test('terminal snapshots require explicit upstream provenance and three consistent result fields', () => {
+    const { api } = modules();
+    for (const [status, succeeded, expected] of [['failed', false, 'failed'], ['succeeded', true, 'success']]) {
+        const snapshot = { query_source: 'snapshot', result_source: 'upstream', status,
+            upstream_status: status, subscription_succeeded: succeeded };
+        assert.equal(api.outcome(snapshot, true), expected);
+        for (const change of [
+            { result_source: undefined }, { result_source: 'local' }, { query_source: 'unknown' },
+            { status: undefined }, { upstream_status: undefined }, { subscription_succeeded: undefined },
+            { subscription_succeeded: null }, { subscription_succeeded: !succeeded },
+            { status: 'processing' }, { upstream_status: 'pending' },
+            { status: status === 'failed' ? 'succeeded' : 'failed' },
+            { request_error: { code: 'relay_query_failed' } }
+        ]) assert.equal(api.outcome({ ...snapshot, ...change }, true), 'pending', JSON.stringify(change));
+    }
+    assert.equal(api.outcome({ query_source: 'snapshot', result_source: 'upstream', task_status: 'failed' }, true), 'pending');
+});
+
+test('restart query settles an upstream failure snapshot once and releases the self-service card', async () => {
+    const f = require('./helpers/card-db.cjs')(), task = await f.claim();
+    await f.addCard(42);
+    await f.store.cardMethods(f.base).reserveCard(42, task.jobKey, 'plus');
+    await f.settle(task, 'submitting');
+    const { query, api } = modules(), calls = [];
+    const snapshot = { task_no: 'SUB-SNAPSHOT', client_order_no: task.orbitcardClientOrderNo,
+        plan_type: 'gpt-plus', card_id: 42, status: 'failed', upstream_status: 'failed',
+        subscription_succeeded: false, query_source: 'snapshot', result_source: 'upstream',
+        failureCode: 'EXISTING_SUBSCRIPTION_NOT_OURS' };
+    api.request = async (_, operation) => { calls.push(operation); return { success: true, data: snapshot }; };
+    const input = { cfg: { base_url: f.base }, task: structuredClone(f.db.tasks[0]),
+        persist: (...args) => f.store.settleOrbitcardTask(...args),
+        onConfirmedFailure: (original, failure) => f.store.recordOrbitcardPaymentFailure(original.job_key, failure) };
+    await Promise.all([query.refresh(input), query.refresh(input)]);
+    assert.deepEqual(calls, ['getSubscription']);
+    assert.equal(f.db.tasks[0].orbitcard_state, 'support_locked');
+    assert.equal(f.db.cards[0].active_job, null);
+    assert.equal(f.db.uses[0].state, 'released');
+    assert.equal(f.db.cards[0].authorization_count, 0);
+    assert.equal(f.db.cards[0].reuse_after_ms, f.now() + require('../orbitcard-pool').REUSE_COOLDOWN_MS);
+    assert.ok(f.db.cdks[0].used_at);
+    assert.equal((await f.store.recordOrbitcardPaymentFailure(task.jobKey, {
+        clientOrderNo: task.orbitcardClientOrderNo, cardId: 42, orderId: 'SUB-SNAPSHOT', raw: JSON.stringify(snapshot)
+    })).applied, false);
 });
 
 test('a mismatched create snapshot cannot redirect follow-up queries to another task',async () => {

@@ -1,6 +1,7 @@
 'use strict';
 const { requiresManualHandling } = require('./payment-automation');
 const { cardScope, planFor } = require('./orbitcard-card-policy');
+const { terminalUpstreamSnapshot } = require('./orbitcard-client');
 
 // Transaction boundaries keep task creation, order linkage and CDK ownership consistent.
 module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, runExecute, createTaskLog, settleCardUse = async () => {}, enqueueRedemption = async () => {} }) {
@@ -211,7 +212,7 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
                 return { applied: false };
             }
             const failure = JSON.parse(raw || '{}');
-            if (failure.query_source && failure.query_source !== 'upstream') {
+            if (failure.query_source && failure.query_source !== 'upstream' && !terminalUpstreamSnapshot(failure)) {
                 throw new Error('订阅详情不是本次验证的上游结果，不能自动重试');
             }
             if (failure.upstream_status && failure.status && failure.upstream_status !== failure.status) {
