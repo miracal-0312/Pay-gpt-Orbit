@@ -8,13 +8,15 @@ const { PLAN_TYPES, PROVIDER_PLANS, paymentPlan } = require('./plan-registry');
 const { paymentRegion, planPrice } = require('./orbitcard-config');
 const { CardPreparationError } = require('./orbitcard-card-policy');
 const { decideCards } = require('./orbitcard-payment-decision');
+const { simulateSelection, taskCount } = require('./orbitcard-concurrency-simulation');
 const money = require('./orbitcard-money');
 
 // Read-only: no allocation locks, reservations, synchronization, card creation or funding.
 module.exports = function createDiagnostics({ store, audit, provider = require('./orbitcard-client'), cards = require('./orbitcard-cards-client') }) {
     async function preflight(input = {}) {
         const stage = input.stage || 'full';
-        if (!['session','plans','balance','regions','cards','full'].includes(stage)) throw new Error('无效的预检步骤');
+        if (!['session','plans','balance','regions','cards','concurrency','full'].includes(stage)) throw new Error('无效的预检步骤');
+        const concurrentTasks = stage === 'concurrency' ? taskCount(input.concurrent_tasks) : null;
         const requestId = input.request_id || crypto.randomUUID();
         if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId)) throw new Error('无效的预检编号');
         const traceId = `debug-${requestId}`, steps = [], result = {};
@@ -64,7 +66,7 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
             if (selected && !options.some(item => item.code === selected)) throw new CardPreparationError('该套餐保存的地区已不可用，请在默认充值地区中重新选择并保存');
             return result.region;
         }
-        async function selection() {
+        async function selectionSnapshot() {
             if (!planPrice(cfg, plan)) throw new CardPreparationError('请先在后台配置当前套餐的 USD 支付金额，已停止代充');
             const products = await cards.products(cfg);
             const listed = await cards.listCards(cfg);
@@ -126,18 +128,32 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
                     throw error;
                 }
             }
+            const snapshotNow = Date.now();
             const relevant = saved.filter(row => readable.some(card => card.card_id === Number(row.card_id)
                 && !['DELETED','CANCELLED','FROZEN'].includes(card.provider_status))
-                && poolPolicy.eligible(row) && !row.active_job);
+                && poolPolicy.eligible(row, snapshotNow) && !row.active_job);
             const detailed = await cards.cardDetailsInBatches(cfg, relevant.map(row => Number(row.card_id)), { allowPartial: true });
             if (relevant.length && !detailed.length) throw new CardPreparationError('批量卡片详情全部缺失，停止选卡，请联系售后');
-            const decision = decideCards({ saved, listed:readable, detailed, products, jobKey: traceId, planType: plan,
-                priceFor: (_product, type) => planPrice(cfg, type) });
-            const selected = decision.candidates[0];
             for (const card of detailed) {
                 const summary = summaries.find(item => item.card_id === card.card_id);
                 if (summary) Object.assign(summary, { status: card.provider_status, balance: card.balance_amount, currency: card.currency });
             }
+            return { saved, listed: readable, detailed, products, now: snapshotNow };
+        }
+        async function concurrency() {
+            const snapshot = await selectionSnapshot();
+            result.concurrency = await simulateSelection({ snapshot, count: concurrentTasks, available,
+                planType: plan, jobPrefix: traceId, priceFor: (_product, type) => planPrice(cfg, type),
+                openingFor: () => cards.chooseProduct(snapshot.products, plan, cfg) });
+            delete result.selection;
+            return result.concurrency;
+        }
+        async function selection() {
+            const snapshot = await selectionSnapshot();
+            const { saved, listed: readable, products } = snapshot;
+            const decision = decideCards({ ...snapshot, jobKey: traceId, planType: plan,
+                priceFor: (_product, type) => planPrice(cfg, type) });
+            const selected = decision.candidates[0];
             Object.assign(result.selection, { action: decision.action, card_id: selected?.card.card_id || null,
                 candidate_count: decision.candidates.length, skipped: decision.skipped, waiting: decision.waiting });
             let funding = selected ? money.units(money.cents(selected.deficit)) : 0n;
@@ -184,9 +200,10 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
             return { plan_type: plan || null };
         })) return finish();
         const actions = stage === 'full' ? ['plans','balance','regions','cards']
-            : stage === 'cards' ? ['plans','balance','cards'] : [stage];
-        const handlers = { plans, balance, regions, cards: selection };
-        const titles = { plans: '核对卡台已开放套餐', balance: '读取账户可用余额', regions: '核对本套餐默认支付地区', cards: '读取实时卡片和成功消费授权记录，模拟选卡、补款或开卡决策' };
+            : ['cards','concurrency'].includes(stage) ? ['plans','balance',stage] : [stage];
+        const handlers = { plans, balance, regions, cards: selection, concurrency };
+        const titles = { plans: '核对卡台已开放套餐', balance: '读取账户可用余额', regions: '核对本套餐默认支付地区', cards: '读取实时卡片和成功消费授权记录，模拟选卡、补款或开卡决策',
+            concurrency: `读取实时快照，模拟 ${concurrentTasks} 个任务同时进入选卡` };
         for (const name of actions) if (!await step(name, titles[name], handlers[name])) break;
         return finish();
         function finish() {

@@ -1,11 +1,13 @@
 'use strict';
+const { CardPreparationError } = require('./orbitcard-card-policy');
 
 module.exports = function registerDiagnostics(app, { store, requireSecondaryAuth, logs }) {
     const service = require('./orbitcard-diagnostics')({ store, audit: entry => logs.push(entry) });
     app.post('/api/admin/orbitcard/diagnostics/preflight', requireSecondaryAuth, async (req, res) => {
         res.set('Cache-Control', 'no-store');
         try { res.json(await service.preflight(req.body || {})); }
-        catch (_) { res.status(503).json({ success: false, message: '预检暂不可用，请核对步骤及日志存储状态；未创建支付订单' }); }
+        catch (error) { res.status(error instanceof CardPreparationError ? 400 : 503).json({ success: false,
+            message: error instanceof CardPreparationError ? error.message : '预检暂不可用，请核对步骤及日志存储状态；未创建支付订单' }); }
     });
     app.get('/api/admin/orbitcard/diagnostics/logs/:jobKey', requireSecondaryAuth, async (req, res) => {
         res.set('Cache-Control', 'no-store');

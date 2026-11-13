@@ -49,6 +49,23 @@ test('only confirmed authorization counts below seven are eligible',()=>{
     assert.equal(policy.eligible({authorization_count:4,authorization_pending_count:4}),true);
 });
 
+test('twenty concurrent allocation requests reserve five distinct cards without replacement writes', async () => {
+    const f = await setup([0, 0, 0, 0, 0], { getCardList: async () => {
+        await new Promise(resolve => setImmediate(resolve));
+    } });
+    const tasks = [];
+    for (let index = 0; index < 20; index++) tasks.push(await f.claim());
+    const results = await Promise.allSettled(tasks.map(task => f.service.allocate(cfg, task.jobKey, 'plus')));
+    const assigned = results.filter(result => result.status === 'fulfilled').map(result => result.value);
+    const waiting = results.filter(result => result.status === 'rejected');
+    assert.equal(assigned.length, 5); assert.equal(new Set(assigned).size, 5);
+    assert.equal(waiting.length, 15);
+    assert.ok(waiting.every(result => /支付卡正在使用/.test(result.reason.message)));
+    assert.equal(new Set(f.db.cards.map(card => card.active_job)).size, 5);
+    assert.equal(f.db.uses.filter(use => use.state === 'reserved').length, 5);
+    assert.ok(f.calls.every(call => !['createCard', 'rechargeCard', 'createSubscription'].includes(call.operation)));
+});
+
 test('a synchronized authorization and a stale high balance cannot bypass payment cooldown',async()=>{
     const f=await setup();
     const first=await f.claim();assert.equal(await f.service.allocate(cfg,first.jobKey,'plus'),42);

@@ -44,6 +44,23 @@ async function diagReadLogs(reset = false) {
     } catch (error) { if (sequence === diagLogSequence) $('diagLogState').textContent = `日志读取失败：${error.message}`; throw error; }
     finally { diagReading = false; }
 }
+function diagShowConcurrency(simulation) {
+    $('diagConcurrency').hidden = !simulation;
+    $('diagConcurrencyRows').replaceChildren();
+    if (!simulation) return;
+    const summary = simulation.summary;
+    const contention = simulation.initial_contention;
+    $('diagConcurrencySummary').textContent = `${simulation.task_count} 个任务：分配现有卡 ${summary.assigned} 个（直接支付 ${summary.pay}、需补款 ${summary.fund}），等待 ${summary.waiting} 个，预算或开卡条件不满足 ${summary.blocked} 个，需开卡评估 ${summary.opening} 个。模型内重复分配 ${summary.duplicate_assignments} 次。${contention ? `初始有 ${contention.tasks} 个任务同时首选卡 ${contention.card_id}，分配时会重新检查占用。` : ''}`;
+    $('diagConcurrencyBudget').textContent = `账户快照 ${simulation.budget.available} USD；模拟预留预算 ${simulation.budget.reserved} USD；剩余 ${simulation.budget.remaining} USD。预算包含预计开卡首充和补款，不含平台额外费用。仅为快照模拟结果，不代表真实并发压测通过。`;
+    const actions = { pay: '可直接支付', fund: '分配后需补款', wait: '等待', open: '需开卡评估', blocked: '未分配' };
+    const reasons = { reserved_in_simulation: '仅在模拟中占用', busy: '卡片已被其他任务占用', cooldown: '支付后冷却中',
+        authorizations_unconfirmed: '授权次数未确认', status_unconfirmed: '卡片状态未确认', account_balance: '共享账户预算不足',
+        opening_result: '等待模拟开卡结果', opening_not_simulated: '停在开卡前，未模拟新卡结果', opening_unavailable: '无符合条件的开卡产品', multiple_waiting: '多项等待条件' };
+    $('diagConcurrencyRows').innerHTML = simulation.tasks.map(row => {
+        const reason = row.reasons?.map(value => reasons[value] || value).join('、') || row.message || reasons[row.reason] || row.reason;
+        return `<tr><td>${escapeHtml(row.task)}</td><td>${escapeHtml(row.initial_card_id ?? '—')}</td><td>${escapeHtml(actions[row.action] || row.action)}</td><td>${escapeHtml(row.card_id ?? '—')}</td><td>${escapeHtml(row.funding_amount)}</td><td>${escapeHtml(reason)}</td></tr>`;
+    }).join('');
+}
 function diagPlanRequired() {
     const plan = $('diagPlan').value;
     if (!plan) throw new Error('请先读取并选择卡台开放的套餐');
@@ -53,25 +70,33 @@ async function diagPreflight(stage) {
     if (diagPreflightBusy) return;
     const input = { stage, request_id: crypto.randomUUID() };
     if (!['plans','balance','session'].includes(stage)) input.plan_type = diagPlanRequired();
+    if (stage === 'concurrency') {
+        input.concurrent_tasks = Number($('diagConcurrentTasks').value);
+        if (!Number.isSafeInteger(input.concurrent_tasks) || input.concurrent_tasks < 2 || input.concurrent_tasks > 100) {
+            throw new Error('并发模拟任务数必须为 2 到 100 的整数');
+        }
+    }
     if (['session','full'].includes(stage)) input.session = $('diagSession').value;
     const buttons = [...document.querySelectorAll('[data-diag-stage]')];
     diagPreflightBusy = true;
     buttons.forEach(button => { button.disabled = true; });
     diagFollow(`debug-${input.request_id}`);
+    diagShowConcurrency(null);
     $('diagSteps').textContent = '预检进行中，只调用读取接口…';
     $('diagResult').textContent = '等待本次预检结果…';
     try {
         const data = await diagnosticFetch('/api/admin/orbitcard/diagnostics/preflight', input);
         diagFollow(data.trace_id);
-        $('diagSteps').innerHTML = data.steps.map(step => `<li class="${step.state === 'passed' ? 'debug-passed' : 'debug-failed'}"><strong>${step.state === 'passed' ? '通过' : '未通过'}</strong> · ${escapeHtml(step.message)} <small>${step.elapsed_ms} ms</small></li>`).join('');
+        $('diagSteps').innerHTML = data.steps.map(step => `<li class="${step.state === 'passed' ? 'debug-passed' : 'debug-failed'}"><strong>${step.state === 'passed' ? step.step === 'concurrency' ? '完成模拟' : '通过' : '未通过'}</strong> · ${escapeHtml(step.message)} <small>${step.elapsed_ms} ms</small></li>`).join('');
         $('diagResult').textContent = JSON.stringify({ read_only: data.read_only, ready: data.ready, ...data.result }, null, 2);
+        diagShowConcurrency(data.result.concurrency);
         if (Array.isArray(data.result.plans)) {
             const selectedPlan = $('diagPlan').value;
             $('diagPlan').replaceChildren(new Option('请选择平台已开放套餐', ''));
             for (const plan of data.result.plans) $('diagPlan').add(new Option(`${plan.name}（${plan.type}）`, plan.type));
             if (data.result.plans.some(plan => plan.type === selectedPlan)) $('diagPlan').value = selectedPlan;
         }
-        notice(data.passed ? '只读预检完成；未创建订单或扣款。' : '预检未通过，请查看具体步骤及日志。', data.passed ? 'success' : 'error');
+        notice(data.passed ? stage === 'concurrency' ? '模拟完成，请查看分配与等待结果；未创建订单或扣款。' : '只读预检完成；未创建订单或扣款。' : '预检未通过，请查看具体步骤及日志。', data.passed ? 'success' : 'error');
         await diagReadLogs();
     } catch (error) { $('diagSteps').textContent = `预检失败：${error.message}`; await diagReadLogs().catch(() => {}); throw error; }
     finally { diagPreflightBusy = false; buttons.forEach(button => { button.disabled = false; }); }

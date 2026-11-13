@@ -55,6 +55,95 @@ function managedPool(count=5,balance='20.00') {
     return f;
 }
 
+test('concurrent preflight assigns distinct cards from one readonly snapshot and leaves excess tasks waiting', async () => {
+    const f = managedPool(3);
+    f.state.live[1].balance_amount = '2.00';
+    f.state.live[2].balance_amount = '4.00';
+    const before = structuredClone(f.state.rows);
+    const result = await f.service.preflight({ stage: 'concurrency', plan_type: 'plus', concurrent_tasks: 10,
+        session: 'must-not-read-or-forward-this-session' });
+    assert.equal(result.passed, true); assert.equal(result.ready, false);
+    assert.deepEqual(result.steps.map(row => row.step), ['config', 'plans', 'balance', 'concurrency']);
+    const sim = result.result.concurrency;
+    assert.deepEqual(sim.summary, { assigned: 3, pay: 1, fund: 2, waiting: 7, blocked: 0, opening: 0, duplicate_assignments: 0 });
+    assert.deepEqual(sim.tasks.slice(0, 3).map(row => row.card_id), [42, 44, 43]);
+    assert.equal(sim.initial_contention.tasks, 10);
+    assert.equal(sim.database_locks_tested, false);
+    assert.equal(sim.budget.reserved, '26.00000000');
+    assert.equal(sim.budget.remaining, '74.00000000');
+    assert.equal(f.calls.filter(([op]) => op === 'getCardList').length, 1);
+    assert.equal(f.calls.filter(([op]) => op === 'cardDetail').length, 1);
+    assert.equal(f.calls.filter(([op]) => op === 'cardTransaction').length, 3);
+    assert.deepEqual(f.state.rows, before); assert.deepEqual(f.writes, []);
+    assert.ok(!JSON.stringify([f.calls, f.events, result]).includes('must-not-read-or-forward-this-session'));
+});
+
+test('concurrent selection shares the funding budget instead of spending the same balance for every task', async () => {
+    const f = managedPool(3, '4.37');
+    f.cfg.orbitcard_plan_prices.plus = '17.00'; f.state.available = '13.00';
+    const sim = (await f.service.preflight({ stage: 'concurrency', plan_type: 'plus', concurrent_tasks: 3 })).result.concurrency;
+    assert.equal(sim.summary.assigned, 1); assert.equal(sim.summary.blocked, 2);
+    assert.equal(sim.tasks[0].funding_amount, '12.63');
+    assert.equal(sim.budget.remaining, '0.37000000');
+    assert.ok(sim.tasks.slice(1).every(row => row.card_id === null && row.reason === 'account_balance'));
+    assert.deepEqual(f.writes, []);
+});
+
+test('concurrent opening stops at one planned new card and never fabricates its completion', async () => {
+    const f = managedPool(0);
+    const sim = (await f.service.preflight({ stage: 'concurrency', plan_type: 'plus', concurrent_tasks: 10 })).result.concurrency;
+    assert.equal(sim.summary.opening, 1); assert.equal(sim.summary.waiting, 9);
+    assert.equal(sim.summary.assigned, 0); assert.equal(sim.budget.reserved, '20.00000000');
+    assert.equal(sim.tasks[0].reason, 'opening_not_simulated');
+    assert.ok(sim.tasks.slice(1).every(row => row.reason === 'opening_result'));
+    assert.ok(sim.tasks.every(row => row.card_id === null)); assert.deepEqual(f.writes, []);
+    f.state.available = '19.99';
+    const short = (await f.service.preflight({ stage: 'concurrency', plan_type: 'plus', concurrent_tasks: 3 })).result.concurrency;
+    assert.equal(short.summary.blocked, 3); assert.equal(short.summary.opening, 0);
+    assert.equal(short.budget.reserved, '0.00000000');
+});
+
+test('concurrent simulation preserves real owners and cooldowns and supports 100 requests without repeated platform reads', async () => {
+    const f = managedPool(3);
+    f.state.rows[0].active_job = 'real-order';
+    f.state.rows[1].reuse_after_ms = Date.now() + 600000;
+    const before = structuredClone(f.state.rows);
+    const sim = (await f.service.preflight({ stage: 'concurrency', plan_type: 'plus', concurrent_tasks: 100 })).result.concurrency;
+    assert.equal(sim.task_count, 100); assert.equal(sim.summary.assigned, 1); assert.equal(sim.summary.waiting, 99);
+    assert.equal(sim.tasks[0].card_id, 44);
+    assert.deepEqual(sim.initial_waiting, { busy: 1, cooldown: 1 });
+    assert.equal(f.calls.filter(([op]) => op === 'cardDetail').length, 1);
+    assert.deepEqual(f.state.rows, before); assert.deepEqual(f.writes, []);
+});
+
+test('concurrent diagnostics stop on unreadable authorizations or missing details without declaring a clean simulation', async () => {
+    for (const failure of ['authorizations', 'details']) {
+        const f = managedPool(1);
+        if (failure === 'authorizations') f.state.transactionError = 42;
+        else f.state.details = [];
+        const result = await f.service.preflight({ stage: 'concurrency', plan_type: 'plus', concurrent_tasks: 10 });
+        assert.equal(result.passed, false); assert.equal(result.result.concurrency, undefined);
+        assert.deepEqual(f.writes, []);
+    }
+});
+
+test('invalid simulation sizes fail before any platform request and separate simulations never reserve real cards', async () => {
+    for (const concurrent_tasks of [0, 1, 101, 2.5, '10', null, true]) {
+        const f = fixture();
+        await assert.rejects(f.service.preflight({ stage: 'concurrency', plan_type: 'plus', concurrent_tasks }), /2 到 100/);
+        assert.deepEqual(f.calls, []); assert.deepEqual(f.writes, []);
+    }
+    const f = fixture();
+    const results = await Promise.all([f.service.preflight({ stage: 'concurrency', plan_type: 'plus' }),
+        f.service.preflight({ stage: 'concurrency', plan_type: 'plus' })]);
+    for (const result of results) {
+        assert.equal(result.result.concurrency.task_count, 10);
+        assert.equal(result.result.concurrency.tasks[0].card_id, 42);
+    }
+    assert.notEqual(results[0].trace_id, results[1].trace_id);
+    assert.equal(f.state.rows[0].active_job, undefined); assert.deepEqual(f.writes, []);
+});
+
 test('full preflight checks all four plans with readonly authorization queries', async()=>{
     for(const plan of Object.keys(PROVIDER_PLANS)) {
         const f=fixture(), result=await f.service.preflight({stage:'full',plan_type:plan,session});
@@ -315,6 +404,7 @@ test('diagnostics endpoints enforce secondary auth and never accept arbitrary up
     assert.equal((await fetch(`${base}/preflight`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).status,403);
     assert.equal((await fetch(`${base}/logs/debug-test`)).status,403);
     const headers={'Content-Type':'application/json','x-admin-secondary-token':'test-secondary'};
+    assert.equal((await fetch(`${base}/preflight`,{method:'POST',headers,body:JSON.stringify({stage:'concurrency',concurrent_tasks:101})})).status,400);
     const response=await fetch(`${base}/preflight`,{method:'POST',headers,body:JSON.stringify({stage:'session',session})});
     const data=await response.json();assert.equal(data.passed,true);assert.equal(data.ready,false);
     const trace=await (await fetch(`${base}/logs/${data.trace_id}`,{headers})).json();assert.ok(trace.entries.length>=3);
