@@ -32,7 +32,7 @@ module.exports = function createRecovery({ store, query, activeJobs, audit, noti
         const lockSupport = (...args) => mutate('lockOrbitcardSupport', args);
         const recordFailure = (...args) => mutate('recordOrbitcardPaymentFailure', args);
         if (activeJobs.has(task.job_key)) return { success: true, querySkipped: true };
-        if (requiresManualHandling(task) && !['submitting', 'pending', 'manual', 'funding_review'].includes(task.orbitcard_state)) {
+        if (requiresManualHandling(task) && !['submitting', 'pending', 'manual', 'funding_waiting', 'funding_review', 'funding_pending', 'card_pending'].includes(task.orbitcard_state)) {
             return { success: true, querySkipped: true };
         }
         if (task.orbitcard_state === 'retry_waiting') {
@@ -41,7 +41,17 @@ module.exports = function createRecovery({ store, query, activeJobs, audit, noti
             return { success: true, querySkipped: true };
         }
         if (task.orbitcard_state === 'support_locked') return { success: true, querySkipped: true };
-        if (['funding_waiting', 'funding_review'].includes(task.orbitcard_state)) {
+        if (task.orbitcard_state === 'card_pending') {
+            const issue = await store.getCardIssueForTask(task.job_key);
+            if (!issue || !['ready','failed'].includes(issue.state)) return deferFunding(task.job_key, 60000);
+            const result = await settle(task.job_key, { status: issue.state === 'ready' ? 'retry' : 'failed', progress: 0,
+                orbitcardState: 'rejected', expectedState: 'card_pending', expectedClientOrderNo: task.orbitcard_client_order_no,
+                message: '原开卡申请已完成核对，会员充值未提交，CDK 与卡片占用已释放；请重新验证卡密并提交最新 Session' });
+            if (!result.applied) return { ...deferFunding(task.job_key, 60000), applied: false };
+            audit({ jobKey: task.job_key, source: 'orbitcard', event: 'card_preparation_released', text: '原开卡申请已核对，释放未提交任务' });
+            return { success: true, querySkipped: true, applied: true };
+        }
+        if (['funding_waiting', 'funding_review', 'funding_pending'].includes(task.orbitcard_state)) {
             // This process has no original Session. Reconcile funds only, then let
             // the user explicitly submit fresh credentials after releasing the CDK.
             let funding = await store.getCardFundingForTask(task.job_key);
@@ -58,19 +68,21 @@ module.exports = function createRecovery({ store, query, activeJobs, audit, noti
                     expectedClientOrderNo: task.orbitcard_client_order_no,
                     message: failed ? '原补款已确认失败，订阅尚未提交，CDK 与支付卡已释放'
                         : '原补款已确认到账，CDK 与支付卡已释放；请重新验证卡密并提交最新 Session 继续充值' });
+                if (!result.applied) return { ...deferFunding(task.job_key, 60000), applied: false };
                 fundingCheckAt.delete(task.job_key);
                 audit({ jobKey: task.job_key, source: 'orbitcard', event: 'funding_recovery_released',
                     text: failed ? '原补款失败，释放未提交任务' : '原补款到账，等待用户提交最新 Session', data: { applied: result.applied } });
                 return { success: true, applied: result.applied, querySkipped: true };
             };
             if (funding?.state === 'failed') return release(true);
+            if (funding?.state === 'ready') return release(false);
             const due = Math.max(fundingCheckAt.get(task.job_key) || 0, Number(funding?.retry_at) || 0);
             if (due > now()) return { success: true, querySkipped: true, waitMs: due - now() };
             if (typeof confirmFunding !== 'function') return deferFunding(task.job_key);
             // Set before calling so interactive refreshes cannot exceed the polling interval.
             deferFunding(task.job_key);
             try {
-                if (!funding?.order_no) throw new Error('原补款缺少平台订单号，禁止自动恢复');
+                if (!funding?.order_no && funding?.state !== 'prepared') throw new Error('原补款缺少平台订单号，禁止自动恢复');
                 const cardId = await confirmFunding(task, guard);
                 await guard.assertOwned();
                 funding = await store.getCardFundingForTask(task.job_key);
@@ -91,8 +103,9 @@ module.exports = function createRecovery({ store, query, activeJobs, audit, noti
                     orbitcardState: 'funding_pending', expectedState: task.orbitcard_state,
                     expectedClientOrderNo: task.orbitcard_client_order_no,
                     message: '原补款对账存在异常，已停止自动处理；保留支付卡和 CDK，请人工核对' });
-                fundingCheckAt.delete(task.job_key);
-                return { success: true, applied: result.applied, querySkipped: true };
+                // Keep checking a known original funding without reopening payment.
+                // Missing identity or malformed evidence never authorizes a debit or release.
+                return { ...deferFunding(task.job_key, Math.max(60000, Number(funding?.retry_at || 0) - now())), applied: result.applied };
             }
         }
         if(task.orbitcard_state==='balance_blocked') {
@@ -124,7 +137,7 @@ module.exports = function createRecovery({ store, query, activeJobs, audit, noti
                     message:'原卡片补款仍待确认，已转人工处理并停止自动支付；会员充值未提交，保留卡片和 CDK'});
                 return {success:true,applied:result.applied,querySkipped:true};
             }
-            if (task.orbitcard_issue_key) {
+            if (store.getCardIssueForTask) {
                 preparedIssue = await store.getCardIssueForTask(task.job_key);
                 if (preparedIssue && !['ready','failed'].includes(preparedIssue.state)) {
                     const result = await settle(task.job_key, { status: 'manual', progress: 10,

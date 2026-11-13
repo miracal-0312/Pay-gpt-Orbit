@@ -75,6 +75,83 @@ test('a full cooling pool waits without opening cards and rechecks balance after
     assert.equal(await f.service.allocate(cfg,next.jobKey,'plus'),43);
 });
 
+test('delayed authorization isolates a settled card and opens one replacement only after cooldown',async()=>{
+    const f=await setup([0]),first=await f.claim();
+    assert.equal(await f.service.allocate(cfg,first.jobKey,'plus'),42);
+    await f.settle(first,'success');
+    const next=await f.claim(),openingCfg={...cfg,orbitcard_plan_prices:{...cfg.orbitcard_plan_prices,plus:'19.00'}};
+    await assert.rejects(f.service.allocate(openingCfg,next.jobKey,'plus'),/冷却/);
+    assert.equal(f.calls.filter(call=>call.operation==='createCard').length,0);
+    f.advance(300000);
+    assert.equal(await f.service.allocate(openingCfg,next.jobKey,'plus'),100);
+    assert.equal(f.calls.filter(call=>call.operation==='createCard').length,1);
+    const old=f.db.cards.find(card=>card.card_id===42);
+    assert.equal(old.active_job,null);assert.equal(old.authorization_count,0);assert.equal(old.authorization_pending_count,1);
+    assert.equal(policy.eligible(old),false);
+    const later=await f.claim();
+    assert.equal(await f.store.cardMethods(f.base).reserveCard(42,later.jobKey,'plus'),null);
+    assert.equal(f.calls.some(call=>call.operation==='rechargeCard' && call.body.card_id===42),false);
+    assert.equal(f.calls.some(call=>call.operation==='deleteCard' && call.body.card_id===42),false);
+    assert.equal(await f.service.allocate(openingCfg,next.jobKey,'plus'),100);
+    assert.equal(f.calls.filter(call=>call.operation==='createCard').length,1);
+});
+
+test('a settled card waiting for authorization never causes opening while another funded card is usable',async()=>{
+    const f=await setup([0,0]),first=await f.claim();
+    assert.equal(await f.service.allocate(cfg,first.jobKey,'plus'),42);await f.settle(first,'success');f.advance(300000);
+    const next=await f.claim();assert.equal(await f.service.allocate(cfg,next.jobKey,'plus'),43);
+    assert.equal(f.calls.filter(call=>['createCard','rechargeCard'].includes(call.operation)).length,0);
+    assert.equal(f.db.cards[0].authorization_pending_count,1);
+});
+
+test('frozen idle cards with old authorization or cooldown restrictions do not block an on-demand card',async()=>{
+    for(const status of ['CANCELLED','FROZEN']) {
+        const f=await setup([0]);f.remote[0].status=status;
+        Object.assign(f.db.cards[0],{authorization_pending_count:1,reuse_after_ms:Date.now()+300000});
+        const task=await f.claim();
+        assert.equal(await f.service.allocate({...cfg,orbitcard_plan_prices:{...cfg.orbitcard_plan_prices,plus:'19.00'}},task.jobKey,'plus'),100);
+        assert.equal(f.calls.filter(call=>call.operation==='createCard').length,1);
+        assert.equal(f.db.cards[0].active_job,null);assert.equal(f.db.cards[0].authorization_pending_count,1);
+    }
+});
+
+test('a confirmed frozen idle card does not need payment details before an on-demand opening',async()=>{
+    const f=await setup([0],{cardDetail:async body=>{
+        if(body.card_ids?.includes(42) || body.card_id===42) throw new Error('Frozen card details unavailable');
+    }});
+    f.remote[0].status='CANCELLED';const task=await f.claim();
+    assert.equal(await f.service.allocate({...cfg,orbitcard_plan_prices:{...cfg.orbitcard_plan_prices,plus:'19.00'}},task.jobKey,'plus'),100);
+    assert.equal(f.calls.filter(call=>call.operation==='createCard').length,1);
+});
+
+test('unresolved owners and original ownership still prevent replacement of a frozen card',async()=>{
+    for(const owner of ['other','self']) {
+        const f=await setup([0]),task=await f.claim();f.remote[0].status='CANCELLED';
+        await f.store.cardMethods(f.base).reserveCard(42,task.jobKey,'plus');
+        if(owner==='other') f.db.cards[0].active_job='other-job';
+        f.db.cards[0].authorization_pending_count=1;
+        await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),owner==='other'?/正在使用/:/原订单已预占/);
+        assert.equal(f.calls.filter(call=>['createCard','rechargeCard','deleteCard'].includes(call.operation)).length,0);
+    }
+});
+
+test('delayed authorization cannot bypass another unresolved opening',async()=>{
+    const f=await setup([0]);f.db.cards[0].authorization_pending_count=1;
+    f.db.issues.push({issue_key:'unresolved-opening',scope:f.scope,job_key:'other-job',plan_type:'pro100',state:'unknown'});
+    const task=await f.claim();
+    await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/待确认开卡申请/);
+    assert.equal(f.calls.filter(call=>['createCard','rechargeCard'].includes(call.operation)).length,0);
+});
+
+test('unconfirmed counts and unknown platform status continue to block an opening',()=>{
+    const {decideCards}=require('../orbitcard-payment-decision');
+    for(const [status,count,reason] of [['ACTIVE',null,'authorizations_unconfirmed'],['UNRECOGNIZED',0,'status_unconfirmed']]) {
+        const decision=decideCards({saved:[{card_id:42,authorization_count:count,authorization_pending_count:1}],
+            listed:[{card_id:42,provider_status:status}],detailed:[],products:[],jobKey:'new-job',planType:'plus',priceFor:()=>20});
+        assert.equal(decision.action,'wait');assert.equal(decision.waiting[0].reason,reason);
+    }
+});
+
 test('allocation uses an existing funded card without requiring money to fill the pool',async()=>{
     const f=await setup([0],{getAccountBalance:async()=>({success:true,data:{available_balance:'0.00'}})});
     const task=await f.claim();

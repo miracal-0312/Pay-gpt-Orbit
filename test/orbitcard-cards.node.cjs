@@ -722,7 +722,33 @@ test('funding-pending handoff cannot return to automatic payment even when the o
     await recovery.refreshTask({...f.db.tasks[0]});assert.equal(f.db.tasks[0].orbitcard_state,'funding_pending');assert.ok(f.db.cdks[0].used_at);
     await recovery.refreshTask({...f.db.tasks[0]});assert.equal(f.db.cards[0].active_job,task.jobKey);
     f.db.fundings[0].state='ready';await recovery.refreshTask({...f.db.tasks[0]});
-    assert.equal(f.db.tasks[0].status,'manual');assert.ok(f.db.cdks[0].used_at);assert.equal(f.db.cards[0].active_job,task.jobKey);assert.equal(f.db.cards[0].authorization_count,0);
+    assert.equal(f.db.tasks[0].status,'retry');assert.equal(f.db.cdks[0].used_at,null);assert.equal(f.db.cards[0].active_job,null);assert.equal(f.db.cards[0].authorization_count,0);
+    assert.equal(f.calls.filter(call=>call.operation==='rechargeCard').length,1);
+});
+
+test('detached funding reconciliation closes an unsent intent and does not depend on payment authorization reads',async()=>{
+    for(const unsent of [false,true]) {
+        const f=serviceFixture({
+            cardTransaction:async()=>assert.fail('cleanup must not depend on the consumption feed'),
+            getCardFlow:async()=>({success:true,data:{card_id:42,type:'recharge',list:[{order_no:'ORIGINAL',amount:'16.00',status:'success'}],total:1}})
+        });
+        const card=await f.addCard(),task=await f.claim(),methods=f.store.cardMethods(f.base);
+        f.setCards([{...card,status:'ACTIVE',balance:21}]);
+        await methods.reserveCard(42,task.jobKey,'plus');
+        await methods.createFunding({funding_key:'original',job_key:task.jobKey,plan_type:'plus',card_id:42,
+            credential_hash:require('node:crypto').createHash('sha256').update(cfg.api_key).digest('hex'),
+            request_body:JSON.stringify({card_id:42,amount:'16.00'}),amount:'16.00',target_balance:'21.00'});
+        if(!unsent) await methods.updateFunding('original',{state:'pending',order_no:'ORIGINAL'});
+        await f.store.settleOrbitcardTask(task.jobKey,{status:'manual',orbitcardState:'funding_pending'});
+        const recovery=require('../order-recovery')({store:f.store,activeJobs:new Set(),audit(){},
+            confirmFunding:(row,guard)=>f.service.confirmFunding({...cfg,executionGuard:guard},row.job_key,row.orbitcard_plan_type),
+            query:{refresh:async()=>assert.fail('must not query a nonexistent subscription')}});
+        assert.equal((await recovery.refreshTask(f.db.tasks[0])).applied,true);
+        assert.equal(f.db.fundings[0].state,unsent?'failed':'ready');
+        assert.equal(f.db.cards[0].active_job,null);assert.equal(f.db.cdks[0].used_at,null);
+        assert.equal(f.calls.some(c=>['createCard','rechargeCard','createSubscription','cardTransaction'].includes(c.operation)),false);
+        if(unsent) assert.equal(f.calls.length,0);
+    }
 });
 
 test('funding Retry-After and changed credential/body cannot cause duplicate topups',async () => {
@@ -1285,7 +1311,7 @@ test('batch selection uses one platform snapshot and never rereads candidates be
     f.setCards([{...a,status:'FROZEN',balance:50},{...b,status:'ACTIVE',balance:50}]);
     const task=await f.claim();assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),43);
     assert.deepEqual(f.calls.filter(call=>call.operation==='cardDetail').map(call=>call.body),
-        [{card_ids:[42,43],reveal_sensitive:false}]);
+        [{card_id:43,reveal_sensitive:false}]);
     assert.equal(f.calls.filter(call=>call.operation==='createCard').length,0);
 });
 

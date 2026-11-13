@@ -7,8 +7,8 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
     async function hasPendingPreparation(task, options) {
         const funding = await runQuery(`SELECT funding_key FROM orbitcard_card_fundings WHERE job_key=?
             AND state IN ('prepared','submitting','pending','unknown') FOR UPDATE`, [task.job_key], options);
-        const issue = task.orbitcard_issue_key ? await runQuery(`SELECT issue_key FROM orbitcard_card_issues WHERE issue_key=?
-            AND state IN ('prepared','submitting','pending','unknown') FOR UPDATE`, [task.orbitcard_issue_key], options) : [];
+        const issue = await runQuery(`SELECT issue_key FROM orbitcard_card_issues WHERE (job_key=? OR issue_key=?)
+            AND state IN ('prepared','submitting','pending','unknown') FOR UPDATE`, [task.job_key, task.orbitcard_issue_key || null], options);
         return Boolean(funding.length || issue.length);
     }
 
@@ -32,6 +32,26 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
         const [card] = await runQuery('SELECT * FROM orbitcard_managed_cards WHERE scope=? AND card_id=? FOR UPDATE',
             [funding.scope, cardId], options);
         return Boolean(card && card.active_job === task.job_key);
+    }
+
+    async function canReleaseCardReview(task, options) {
+        const issues = await runQuery('SELECT * FROM orbitcard_card_issues WHERE job_key=? OR issue_key=? FOR UPDATE',
+            [task.job_key, task.orbitcard_issue_key || null], options);
+        const [issue] = issues;
+        if (issues.length !== 1 || !['ready','failed'].includes(issue.state) || issue.job_key !== task.job_key
+            || (task.orbitcard_issue_key && issue.issue_key !== task.orbitcard_issue_key)
+            || issue.scope !== cardScope(task.orbitcard_base_url) || issue.plan_type !== planFor(task.orbitcard_plan_type)
+            || (task.orbitcard_api_key_hash && issue.credential_hash !== task.orbitcard_api_key_hash)
+            || (issue.state === 'ready' && (!Number.isSafeInteger(Number(issue.card_id)) || Number(issue.card_id) < 1))) return false;
+        const [funding] = await runQuery('SELECT * FROM orbitcard_card_fundings WHERE job_key=? FOR UPDATE', [task.job_key], options);
+        if (funding && !await canReleaseFundingReview(task, options)) return false;
+        if (task.orbitcard_card_id != null) {
+            if (issue.card_id != null && Number(issue.card_id) !== Number(task.orbitcard_card_id)) return false;
+            const [card] = await runQuery('SELECT * FROM orbitcard_managed_cards WHERE scope=? AND card_id=? FOR UPDATE',
+                [issue.scope, task.orbitcard_card_id], options);
+            if (!card || card.active_job !== task.job_key) return false;
+        }
+        return true;
     }
 
     async function createOrbitcardTask({ cdk, planType, email, baseUrl, apiKeyHash = null }) {
@@ -113,19 +133,32 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
             if (task.orbitcard_state === 'success' && orbitcardState !== 'success') return { applied: false, status: 'success' };
             if (task.orbitcard_state === 'support_locked') return { applied: false, status: 'failed' };
             if (['failed', 'rejected'].includes(task.orbitcard_state)) return { applied: false, status: task.status };
-            const reviewRelease = task.orbitcard_state === 'funding_review' && orbitcardState === 'rejected';
-            const reviewStop = task.orbitcard_state === 'funding_review' && orbitcardState === 'funding_pending';
-            if (task.orbitcard_state === 'funding_review') {
-                if ((!reviewRelease && !reviewStop) || expectedState !== 'funding_review'
-                    || expectedClientOrderNo !== task.orbitcard_client_order_no || code?.manual_redeemed_at) {
+            const reviewingFunding = ['funding_review','funding_pending'].includes(task.orbitcard_state);
+            const reviewRelease = reviewingFunding && orbitcardState === 'rejected';
+            const reviewStop = reviewingFunding && orbitcardState === 'funding_pending';
+            const reviewStart = orbitcardState === 'funding_review'
+                && ['preparing','prepared','funding_waiting'].includes(task.orbitcard_state);
+            const issueRelease = task.orbitcard_state === 'card_pending' && orbitcardState === 'rejected';
+            if (issueRelease && (expectedState !== 'card_pending' || expectedClientOrderNo !== task.orbitcard_client_order_no
+                || task.gpt_api_order_id || !await canReleaseCardReview(task, options))) return { applied: false, status: task.status };
+            if (reviewingFunding) {
+                if ((!reviewRelease && !reviewStop) || expectedState !== task.orbitcard_state
+                    || expectedClientOrderNo !== task.orbitcard_client_order_no || task.gpt_api_order_id) {
                     return { applied: false, status: task.status };
                 }
                 if (reviewRelease && !await canReleaseFundingReview(task, options)) return { applied: false, status: task.status };
                 if (reviewStop) status = 'manual';
             }
             const paymentState = orbitcardState;
+            if ((reviewRelease || issueRelease) && (code?.manual_redeemed_at || Number(task.orbitcard_retry_attempt_no || 1) > 1)) {
+                orbitcardState = 'support_locked';
+                status = 'failed';
+                message = code?.manual_redeemed_at
+                    ? '原资金操作已完成核对，支付卡占用已释放；CDK 已人工核销，不再自动支付'
+                    : '原资金操作已完成核对，支付卡占用已释放；历史重试任务的 CDK 保持售后锁定';
+            }
             const manual = requiresManualHandling(task);
-            if (manual && !reviewRelease && !reviewStop) {
+            if (manual && !reviewRelease && !reviewStop && !reviewStart && !issueRelease) {
                 // Handoff is durable: a pending query cannot put the task back in the payment loop.
                 if (!['submitting', 'pending', 'manual'].includes(task.orbitcard_state)
                     || !['pending', 'manual', 'success', 'failed', 'rejected'].includes(orbitcardState)) {
@@ -141,7 +174,7 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
                     message = '已转人工处理，自动支付已停止；仅核对原订单结果，勿重复充值';
                 }
             }
-            if (['preparing','prepared','funding_waiting','funding_review'].includes(task.orbitcard_state) && ['failed','rejected'].includes(orbitcardState)) {
+            if (['preparing','prepared','funding_waiting','funding_review','funding_pending','card_pending'].includes(task.orbitcard_state) && ['failed','rejected'].includes(paymentState)) {
                 // Recheck inside the transaction: a recovery snapshot can predate
                 // a funding/issuance intent committed by a worker losing its lock.
                 if (await hasPendingPreparation(task, options)) return { applied: false, status: task.status };

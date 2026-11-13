@@ -237,10 +237,11 @@ test('authorization IDs added after the card snapshot do not cause a false count
     assert.equal(result.result.selection.cards[0].authorization_count,1);
     assert.equal(f.state.rows[0].authorization_count,0);assert.deepEqual(f.writes,[]);
 });
-test('successful local order waits until a new platform authorization is observable',async()=>{
+test('an idle card awaiting authorization stays excluded while preflight permits an on-demand replacement',async()=>{
     const f=fixture();f.state.rows[0].authorization_pending_count=1;
     const waiting=await f.service.preflight({stage:'cards',plan_type:'plus'});
-    assert.equal(waiting.passed,false);assert.equal(waiting.result.selection.action,'wait');assert.equal(waiting.result.selection.cards[0].authorization_pending,true);
+    assert.equal(waiting.passed,true);assert.equal(waiting.result.selection.action,'open');assert.equal(waiting.result.selection.cards[0].authorization_pending,true);
+    assert.equal(waiting.result.selection.card_id,null);assert.equal(waiting.result.selection.skipped[0].reason,'authorization_pending');
     f.state.transactions.set(42,[authorization('new')]);
     const ready=await f.service.preflight({stage:'cards',plan_type:'plus'});
     assert.equal(ready.passed,true);assert.equal(ready.result.selection.action,'pay');assert.equal(ready.result.selection.cards[0].authorization_pending,false);

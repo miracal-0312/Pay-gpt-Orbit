@@ -47,6 +47,20 @@ test('read-only confirmation with no original order number never sends funding',
     assert.deepEqual(f.calls,[]);
 });
 
+test('cleanup stops only a verified unsent funding intent without issuing any provider request',async()=>{
+    for(const state of ['prepared','submitting','unknown','pending']) {
+        const f=fixture();Object.assign(f.funding,{state,order_no:null});Object.assign(f.saved,f.funding);
+        await assert.rejects(f.confirm({readOnly:true,releaseOnly:true}),CardPreparationError);
+        assert.equal(f.saved.state,state==='prepared'?'failed':state);
+        assert.deepEqual(f.calls,[]);
+    }
+    for(const mismatch of ['scope','credential_hash','request_body']) {
+        const f=fixture();Object.assign(f.funding,{state:'prepared',order_no:null,[mismatch]:'invalid'});Object.assign(f.saved,f.funding);
+        await assert.rejects(f.confirm({readOnly:true,releaseOnly:true}),CardPreparationError);
+        assert.equal(f.saved.state,'prepared');assert.deepEqual(f.calls,[]);
+    }
+});
+
 test('known processing funding leaves a resumable wait and honors the provider retry interval',async()=>{
     const f=fixture({request:async()=>({success:true,status:200,retryAfterMs:90000,
         data:{card_id:42,type:'recharge',list:[{order_no:'ORIGINAL',amount:'16.00',status:'processing'}],total:1}})});

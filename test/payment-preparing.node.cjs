@@ -107,17 +107,43 @@ test('funding review releases only a confirmed ready or failed original funding 
 });
 
 test('funding review rejects release when original funding or card ownership no longer matches',async()=>{
-    for(const mismatch of ['scope','plan','credential','card','reservation','manual-redemption']) {
+    for(const mismatch of ['scope','plan','credential','card','reservation']) {
         const f=await setup({review:true});await f.methods.updateFunding('fund-original',{state:'ready'});
         if(mismatch==='scope') f.db.fundings[0].scope='other-platform';
         if(mismatch==='plan') f.db.fundings[0].plan_type='pro100';
         if(mismatch==='credential') f.db.fundings[0].credential_hash='different-account';
         if(mismatch==='card') f.db.fundings[0].card_id=99;
         if(mismatch==='reservation') f.db.cards[0].active_job='another-job';
-        if(mismatch==='manual-redemption') f.db.cdks[0].manual_redeemed_at='2026-11-10';
         assert.equal((await f.change('rejected',{status:'retry'})).applied,false,mismatch);
         assert.equal(f.db.tasks[0].orbitcard_state,'funding_review');assert.ok(f.db.cdks[0].used_at);
     }
+});
+
+test('confirmed funding releases its card after manual redemption while the CDK remains redeemed',async()=>{
+    for(const state of ['funding_review','funding_pending']) for(const fundingState of ['ready','failed']) {
+        const f=await setup({review:true});
+        if(state==='funding_pending') assert.equal((await f.change(state,{status:'manual'})).applied,true);
+        f.db.cdks[0].manual_redeemed_at='2026-11-13';
+        await f.methods.updateFunding('fund-original',{state:fundingState});
+        assert.equal((await f.change('rejected',{status:'retry'})).applied,true);
+        assert.equal(f.db.cards[0].active_job,null);
+        assert.equal(f.db.uses[0].state,'released');
+        assert.ok(f.db.cdks[0].used_at);
+        assert.equal(f.db.cdks[0].manual_redeemed_at,'2026-11-13');
+        assert.equal(f.db.tasks[0].orbitcard_state,'support_locked');
+        assert.match(f.db.tasks[0].message,/已人工核销/);
+        assert.equal(await f.store.createOrbitcardTask({cdk:f.db.cdks[0].cdk_code,planType:'plus',baseUrl:f.base}),null);
+    }
+});
+
+test('manual redemption cannot release unresolved funding or bypass release rollback',async()=>{
+    const f=await setup({review:true});f.db.cdks[0].manual_redeemed_at='done';
+    assert.equal((await f.change('rejected')).applied,false);
+    assert.equal(f.db.cards[0].active_job,f.task.jobKey);
+    await f.methods.updateFunding('fund-original',{state:'ready'});f.db.failRelease=true;
+    await assert.rejects(f.change('rejected'),/injected card release/);
+    assert.equal(f.db.tasks[0].orbitcard_state,'funding_review');assert.ok(f.db.cdks[0].used_at);
+    assert.equal(f.db.cards[0].active_job,f.task.jobKey);
 });
 
 test('funding review release rolls back when card release fails',async()=>{

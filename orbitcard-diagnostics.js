@@ -126,7 +126,8 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
                     throw error;
                 }
             }
-            const relevant = saved.filter(row => readable.some(card => card.card_id === Number(row.card_id))
+            const relevant = saved.filter(row => readable.some(card => card.card_id === Number(row.card_id)
+                && !['DELETED','CANCELLED','FROZEN'].includes(card.provider_status))
                 && poolPolicy.eligible(row) && !row.active_job);
             const detailed = await cards.cardDetailsInBatches(cfg, relevant.map(row => Number(row.card_id)), { allowPartial: true });
             if (relevant.length && !detailed.length) throw new CardPreparationError('批量卡片详情全部缺失，停止选卡，请联系售后');

@@ -17,9 +17,9 @@ function fixture({confirm,waitMs=FUNDING_WAIT_MS,sleepHook,initialDelay=FUNDING_
     const clone=value=>value==null?value:structuredClone(value);
     const store={...require('./helpers/payment-locks.cjs')(),getGptApiConfig:async()=>cfg,getMaxConcurrentActivations:async()=>5,
         assertPaymentAllowed:async()=>{if(!order || !['preparing','funding_waiting','prepared','submitting','pending'].includes(order.state))throw new PaymentStoppedError('stopped');},
-        assertFundingReconciliationAllowed:async()=>{if(!order || !['funding_waiting','funding_review'].includes(order.state))throw new PaymentStoppedError('stopped');},
+        assertFundingReconciliationAllowed:async()=>{if(!order || !['funding_waiting','funding_review','funding_pending'].includes(order.state))throw new PaymentStoppedError('stopped');},
         getManualOrder:async()=>clone(order),listManualOrders:async()=>order?[clone(order)]:[],
-        listRecoverableManualOrders:async()=>order?[clone(order)]:[],
+        listRecoverableManualOrders:async()=>order?[clone(order)]:[],noteManualQueryAttempt:async()=>{},
         prepareManualOrder:async input=>{
             order={request_id:input.requestId,client_order_no:`manual-${input.requestId}`,scope:cardScope(input.baseUrl),
                 api_key_hash:input.apiKeyHash,plan_type:input.planType,plan_name:input.planName,target_email:input.targetEmail,
@@ -30,8 +30,8 @@ function fixture({confirm,waitMs=FUNDING_WAIT_MS,sleepHook,initialDelay=FUNDING_
         markManualPrepared:async(_id,key,card)=>{assert.equal(order.state,'funding_waiting');assert.equal(key,order.client_order_no);assert.equal(card,42);order.state='prepared';return clone(order);},
         claimManualSubmission:async()=>{if(order.state!=='prepared')return false;order.state='submitting';return true;},
         settleManualOrder:async(_id,change)=>{Object.assign(order,change);return clone(order);},
-        releaseManualFunding:async(_id,key,message)=>{if(!['funding_waiting','funding_review'].includes(order.state)||!['ready','failed'].includes(fundingState))return null;order.state='failed';order.message=message;order.released=true;return clone(order);},
-        pauseManualPreparation:async()=>{if(['preparing','funding_waiting','funding_review'].includes(order.state))order.state='support_locked';},
+        releaseManualFunding:async(_id,key,message)=>{if(!['funding_waiting','funding_review','funding_pending'].includes(order.state)||!['ready','failed'].includes(fundingState))return null;order.state='failed';order.message=message;order.released=true;return clone(order);},
+        pauseManualPreparation:async()=>{if(['preparing','funding_waiting','funding_review','funding_pending'].includes(order.state))order.state='funding_pending';},
         failManualPreparation:async()=>{throw new Error('must retain existing funding');}
     };
     const provider={...providerHelpers,fetchPlans:async()=>({success:true,plans:[{type:'gpt-plus',name:'Plus'}]}),
@@ -141,17 +141,17 @@ test('insufficient account balance fails immediately and releases the prepared c
     assert.equal(f.activeJobs.size,0);assert.deepEqual(f.waits,[]);assert.deepEqual(f.calls,[]);
 });
 
-test('administrator recovery selects funding waits and reviews after five seconds',async()=>{
+test('administrator recovery selects funding waits, reviews and preparation incidents after five seconds',async()=>{
     let query;const store=createStore({runQuery:async sql=>{query=sql;return [];}});
     await store.listRecoverableManualOrders();
-    assert.match(query,/state IN \('funding_waiting','funding_review'\).*INTERVAL 5 SECOND/);
+    assert.match(query,/state IN \('funding_waiting','funding_review','funding_pending','card_pending'\).*INTERVAL 5 SECOND/);
 });
 
-test('confirmed funding failure releases preparation while mismatched funding remains locked for support',async()=>{
+test('confirmed funding failure releases preparation while mismatched funding remains locked for reconciliation',async()=>{
     for(const failed of [true,false]) {
         let f;f=fixture({confirm:async()=>{if(failed){f.setFunding('failed');throw new CardPreparationError('funding failed');}throw new FundingPendingError('wrong identity');}});
         await f.service.create(f.input);await until(()=>f.activeJobs.size===0);
-        assert.equal(f.order.state,failed?'failed':'support_locked');assert.equal(Boolean(f.order.released),failed);
+        assert.equal(f.order.state,failed?'failed':'funding_pending');assert.equal(Boolean(f.order.released),failed);
         assert.equal(f.calls.filter(c=>c.operation==='createSubscription').length,0);
     }
 });
@@ -193,4 +193,86 @@ test('a restarted funding waiter first becomes review and cannot resume its subs
     f.cardService.confirmFunding=async()=>{assert.equal(f.order.state,'funding_review');f.setFunding('ready');return 42;};
     await createService({...f.options,activeJobs:new Set()}).recover();
     assert.equal(f.order.released,true);assert.equal(f.calls.filter(call=>call.operation==='createSubscription').length,0);
+});
+
+test('administrator funding incidents keep checking the original funding after errors without resubmitting',async()=>{
+    const f=fixture({waitMs:1});await f.service.create(f.input);await until(()=>f.activeJobs.size===0);
+    f.order.state='funding_pending';
+    let reads=0;
+    f.cardService.confirmFunding=async()=>{
+        reads++;
+        if(reads===1)throw new FundingPendingError('original response identity is incomplete');
+        f.setFunding('ready');return 42;
+    };
+    await f.service.recover();await f.service.refresh(id);
+    assert.equal(reads,1);assert.equal(f.order.state,'funding_pending');assert.equal(f.order.released,undefined);
+    f.advance(59999);await f.service.recover();assert.equal(reads,1);
+    f.advance(1);await f.service.refresh(id);
+    assert.equal(reads,2);assert.equal(f.order.released,true);assert.equal(f.order.state,'failed');
+    assert.equal(f.calls.filter(call=>call.operation==='createSubscription').length,0);
+});
+
+test('manual refresh of a funding incident observes longer original Retry-After',async()=>{
+    const f=fixture({waitMs:1});await f.service.create(f.input);await until(()=>f.activeJobs.size===0);
+    f.order.state='funding_pending';let reads=0;
+    f.cardService.confirmFunding=async()=>{reads++;throw new FundingAwaitingError('original funding pending',90000);};
+    await f.service.refresh(id);await f.service.recover();assert.equal(reads,1);
+    f.advance(89999);await f.service.refresh(id);assert.equal(reads,1);
+    f.advance(1);await f.service.refresh(id);assert.equal(reads,2);
+    assert.equal(f.order.state,'funding_pending');assert.equal(f.order.released,undefined);
+});
+
+test('a full recovery batch rotates cooling funding orders so later orders can reconcile',async()=>{
+    const f=fixture({waitMs:1});await f.service.create(f.input);await until(()=>f.activeJobs.size===0);
+    const rows=Array.from({length:11},(_,index)=>({...structuredClone(f.order),request_id:`queue-${index}`,
+        client_order_no:`manual-queue-${index}`,state:'funding_review',updated_at:f.options.now()-20000+index}));
+    const reads=new Map(),noted=[];
+    f.store.listRecoverableManualOrders=async()=>rows.filter(row=>row.updated_at<=f.options.now()-FUNDING_POLL_MS)
+        .sort((a,b)=>a.updated_at-b.updated_at).slice(0,10).map(row=>structuredClone(row));
+    f.store.getManualOrder=async requestId=>structuredClone(rows.find(row=>row.request_id===requestId));
+    f.store.assertFundingReconciliationAllowed=async()=>{};
+    f.store.noteManualQueryAttempt=async requestId=>{noted.push(requestId);rows.find(row=>row.request_id===requestId).updated_at=f.options.now();};
+    f.cardService.confirmFunding=async(_cfg,jobKey)=>{
+        reads.set(jobKey,(reads.get(jobKey)||0)+1);throw new FundingAwaitingError('processing',90000);
+    };
+    await f.service.recover();
+    assert.equal(reads.size,10);assert.equal(reads.has('manual-queue-10'),false);
+    f.advance(FUNDING_POLL_MS);await f.service.recover();
+    assert.equal(reads.get('manual-queue-10'),1,'the eleventh order must get a turn before earlier Retry-After expires');
+    assert.ok([...reads.values()].every(count=>count===1),'rotation must not bypass per-order Retry-After');
+    assert.equal(noted.length,20,'cooldown skips must still rotate the bounded queue');
+    assert.equal(f.calls.filter(call=>call.operation==='createSubscription').length,0);
+});
+
+test('an exceptional preparation recovery and failed queue timestamp cannot abort later orders',async()=>{
+    const f=fixture({waitMs:1});await f.service.create(f.input);await until(()=>f.activeJobs.size===0);
+    const first={...structuredClone(f.order),request_id:'broken',client_order_no:'manual-broken',state:'card_pending'};
+    const second={...structuredClone(f.order),request_id:'later',client_order_no:'manual-later',state:'funding_review'};
+    const active={...structuredClone(f.order),request_id:'active',client_order_no:'manual-active',state:'prepared'};
+    const rows=[first,second,active],noted=[];let reads=0;
+    f.store.listRecoverableManualOrders=async()=>rows;
+    f.store.getManualOrder=async requestId=>structuredClone(rows.find(row=>row.request_id===requestId));
+    f.store.assertFundingReconciliationAllowed=async()=>{};
+    f.store.failManualPreparation=async()=>{throw new Error('database unavailable');};
+    f.store.pauseManualPreparation=async()=>{throw new Error('database unavailable');};
+    f.store.noteManualQueryAttempt=async requestId=>{noted.push(requestId);if(requestId==='broken')throw new Error('timestamp write unavailable');};
+    f.cardService.confirmFunding=async()=>{reads++;throw new FundingAwaitingError('pending');};
+    f.activeJobs.add(active.client_order_no);
+    await f.service.recover();
+    assert.equal(reads,1);assert.deepEqual(noted,['broken','later']);
+    assert.equal(f.calls.filter(call=>call.operation==='createSubscription').length,0);
+});
+
+test('recovery queue rotation leaves preparation deadlines and final results untouched',async()=>{
+    const rows=['preparing','prepared','pending','funding_pending','success','failed'].map(state=>({request_id:state,state,updated_at:1}));
+    const store=createStore({runExecute:async(sql,[requestId])=>{
+        assert.match(sql,/SET updated_at = CURRENT_TIMESTAMP WHERE request_id = \?/);
+        const states=/state IN \(([^)]+)\)/.exec(sql)[1].split(',').map(value=>value.trim().replaceAll("'",''));
+        const row=rows.find(item=>item.request_id===requestId);
+        if(states.includes(row.state))row.updated_at=100;
+    }});
+    for(const row of rows)await store.noteManualQueryAttempt(row.request_id);
+    assert.deepEqual(rows.map(row=>[row.state,row.updated_at]),[
+        ['preparing',1],['prepared',1],['pending',100],['funding_pending',100],['success',1],['failed',1]
+    ]);
 });

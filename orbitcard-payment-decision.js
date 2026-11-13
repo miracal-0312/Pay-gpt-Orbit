@@ -12,22 +12,34 @@ function decideCards({ saved, listed, detailed, products, jobKey, planType, pric
     for (const row of saved) {
         const id = Number(row.card_id), owned = row.active_job === jobKey;
         if (!live.has(id)) { skipped.push({ card_id: id, reason: 'missing_from_platform_list' }); continue; }
+        // An unresolved owner still blocks a replacement, including when the
+        // platform has frozen its card or its quota is already exhausted.
+        if (row.active_job && !owned) { waiting.push({ card_id: id, reason: 'busy' }); continue; }
         if (live.get(id).provider_status === 'DELETED') {
             if (owned) throw new CardPreparationError('已预占卡片已注销，请核对原订单');
             skipped.push({ card_id: id, reason: 'inactive', status: 'DELETED' }); continue;
         }
+        const detail = details.get(id);
+        const status = detail?.provider_status || live.get(id).provider_status;
+        if (['CANCELLED', 'FROZEN', 'DELETED'].includes(status)) {
+            if (owned) throw new CardPreparationError('已预占卡片状态异常，请核对原补款及管理员订单');
+            skipped.push({ card_id: id, reason: 'inactive', status }); continue;
+        }
+        if (status !== 'ACTIVE') { waiting.push({ card_id: id, reason: 'status_unconfirmed' }); continue; }
         if (row.authorization_count == null) { waiting.push({ card_id: id, reason: 'authorizations_unconfirmed' }); continue; }
         const used = Number(row.authorization_count);
         if (!Number.isSafeInteger(used) || used < 0) throw new CardPreparationError('成功消费授权次数无效，请重新同步交易');
-        if (poolPolicy.awaitingAuthorization(row) && used < poolPolicy.MAX_USES && !row.retirement_key) {
-            waiting.push({ card_id: id, reason: 'authorization_pending' }); continue;
-        }
         if (poolPolicy.coolingDown(row, now) && used < poolPolicy.MAX_USES && !row.retirement_key) {
             waiting.push({ card_id: id, reason: 'cooldown', reuse_after_ms: row.reuse_after_ms }); continue;
         }
+        if (poolPolicy.awaitingAuthorization(row) && used < poolPolicy.MAX_USES && !row.retirement_key) {
+            if (owned) throw new CardPreparationError('已预占卡片仍在等待授权同步，请核对原订单');
+            // Keep this card ineligible until its provider authorization arrives.
+            // Once its owner is released and cooldown has ended, this local
+            // restriction must not prevent a different order using a new card.
+            skipped.push({ card_id: id, reason: 'authorization_pending' }); continue;
+        }
         if (!poolPolicy.eligible(row, now)) { skipped.push({ card_id: id, reason: 'limit_reached', successful_uses: used, limit: poolPolicy.MAX_USES }); continue; }
-        if (row.active_job && !owned) { waiting.push({ card_id: id, reason: 'busy' }); continue; }
-        const detail = details.get(id);
         if (!detail) {
             if (owned) throw new CardPreparationError('已预占卡片的实时详情缺失，请核对原补款及管理员订单');
             skipped.push({ card_id: id, reason: 'invalid_detail' }); continue;

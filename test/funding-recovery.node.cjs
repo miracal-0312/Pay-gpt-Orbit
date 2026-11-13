@@ -90,7 +90,7 @@ test('a persisted funding retry_at prevents a restarted worker from querying too
 });
 
 test('manual handoff and active in-memory funding workers are never resumed by recovery', async () => {
-    for (const state of ['funding_waiting', 'funding_review', 'funding_pending', 'card_pending', 'support_locked']) {
+    for (const state of ['funding_waiting', 'funding_review', 'card_pending', 'support_locked']) {
         const active = ['funding_waiting', 'funding_review'].includes(state);
         const f = await setup({ taskState: active ? state : 'funding_waiting' }); let checks = 0;
         if (active) f.activeJobs.add(f.task.jobKey);
@@ -139,7 +139,7 @@ test('preparing and legacy prepared recovery only promote a known pending origin
             assert.equal(f.db.tasks[0].status, 'manual'); assert.equal(checks, 0);
             assert.ok(f.db.cdks[0].used_at); assert.equal(f.db.cards[0].active_job, f.task.jobKey);
             f.advance(FUNDING_POLL_MS); await r.refreshTask(await f.current());
-            assert.equal(checks, expected === 'funding_review' ? 1 : 0);
+            assert.equal(checks, orderNo ? 1 : 0);
         }
     }
 });
@@ -190,4 +190,49 @@ test('a callback cannot release funds without a persisted ready result and match
         assert.equal(f.db.tasks[0].orbitcard_state, 'funding_pending');
         assert.ok(f.db.cdks[0].used_at); assert.equal(f.db.cards[0].active_job, f.task.jobKey);
     }
+});
+
+test('funding_pending keeps querying only the original funding and releases after valid evidence arrives', async () => {
+    const f = await setup();
+    Object.assign(f.db.tasks[0], { status: 'manual', orbitcard_state: 'funding_pending' });
+    let checks = 0;
+    const r = f.recovery(async task => {
+        checks++;
+        assert.equal(task.orbitcard_state, 'funding_pending');
+        await f.store.assertFundingReconciliationAllowed(task.job_key);
+        await assert.rejects(f.store.assertPaymentAllowed(task.job_key), PaymentStoppedError);
+        if (checks === 1) throw new CardPreparationError('mismatching provider response');
+        await f.methods.updateFunding('fund-original', { state: 'ready' });
+        return 42;
+    });
+    assert.equal((await r.refreshTask(await f.current())).waitMs, 60000);
+    assert.equal(f.db.cards[0].active_job, f.task.jobKey);
+    f.advance(59999); await r.refreshTask(await f.current()); assert.equal(checks, 1);
+    f.advance(1); assert.equal((await r.refreshTask(await f.current())).applied, true);
+    assert.equal(checks, 2); assert.equal(f.db.cards[0].active_job, null);
+    assert.equal(f.db.cdks[0].used_at, null); assert.equal(f.db.tasks[0].orbitcard_state, 'rejected');
+});
+
+test('missing funding order identity never triggers confirmation or releases reserved resources', async () => {
+    const f = await setup({ orderNo: '', fundingState: 'unknown' });
+    const r = f.recovery(async () => assert.fail('must not replay an unidentifiable debit'));
+    for (let i = 0; i < 3; i++) {
+        await r.refreshTask(await f.current()); f.advance(60000);
+        assert.equal(f.db.cards[0].active_job, f.task.jobKey); assert.ok(f.db.cdks[0].used_at);
+    }
+    assert.equal(f.db.tasks[0].orbitcard_state, 'funding_pending');
+});
+
+test('a manually redeemed detached funding worker can reconcile and release only its payment card', async () => {
+    const f = await setup({ taskState: 'funding_waiting' }); f.db.cdks[0].manual_redeemed_at = 'done';
+    const r = f.recovery(async task => {
+        await f.store.assertFundingReconciliationAllowed(task.job_key);
+        await f.methods.updateFunding('fund-original', { state: 'ready' }); return 42;
+    });
+    assert.equal((await r.refreshTask(await f.current())).applied, true);
+    assert.equal(f.db.tasks[0].orbitcard_state, 'funding_review');
+    f.advance(5000); assert.equal((await r.refreshTask(await f.current())).applied, true);
+    assert.equal(f.db.cards[0].active_job, null); assert.ok(f.db.cdks[0].used_at);
+    assert.equal(f.db.cdks[0].manual_redeemed_at, 'done');
+    assert.equal(f.db.tasks[0].orbitcard_state, 'support_locked');
 });

@@ -64,6 +64,13 @@ module.exports = function createFundingService({ api, cardsApi, audit, now, asse
         if (!body || Object.keys(body).length!==2 || JSON.stringify(body)!==funding.request_body || body.card_id!==Number(funding.card_id)
             || body.amount!==Number(funding.amount).toFixed(2)) throw new FundingPendingError('原补款参数不一致，禁止更换金额或幂等键重充');
         if (funding.state==='failed') throw new CardPreparationError('平台已确认原补款失败');
+        if (options.readOnly && options.releaseOnly && funding.state==='prepared' && !funding.order_no) {
+            // The remote-write marker was never committed. Stop this original
+            // intent without sending money; the owner will release it atomically.
+            await assertReconciliationAllowed(cfg, funding.job_key);
+            await locked.updateFunding(funding.funding_key,{state:'failed',message:'原补款在提交前中断，未发送资金请求'});
+            throw new CardPreparationError('原补款未提交，准备任务可以安全结束');
+        }
         if (options.readOnly && !funding.order_no) throw new FundingPendingError('原补款缺少平台订单号，无法只读确认；保留原记录，请人工核对');
         if (Number(funding.retry_at || 0)>now()) {
             const ErrorType = funding.order_no && ['pending','submitting','ready'].includes(funding.state) ? FundingAwaitingError : FundingPendingError;

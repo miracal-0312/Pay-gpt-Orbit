@@ -24,7 +24,13 @@ module.exports = function createPaymentAutomation({ runQuery }) {
         const allowed = activeOwner
             && (manual ? ['preparing', 'prepared', 'funding_waiting', 'submitting', 'pending'].includes(owner.state)
                 : !requiresManualHandling(owner) && ['preparing', 'prepared', 'funding_waiting', 'submitting', 'pending'].includes(owner.orbitcard_state));
-        return { allowed, canReconcileFunding: activeOwner && state === 'funding_review', state, keys: manual ? manualLockKeys(owner.request_id, owner.cdk_code)
+        // Stopping new payments must not strand an already submitted debit.
+        // Reconciliation only reads the original funding; settlement separately
+        // preserves a manually redeemed CDK while releasing its payment card.
+        const canReconcileFunding = (!owner.cdk_code || Boolean(code))
+            && ['funding_waiting', 'funding_review', 'funding_pending'].includes(state);
+        const canReconcileIssue = (!owner.cdk_code || Boolean(code)) && state === 'card_pending';
+        return { allowed, canReconcileFunding, canReconcileIssue, state, keys: manual ? manualLockKeys(owner.request_id, owner.cdk_code)
             : owner.cdk_code ? [cdkLockKey(owner.cdk_code)] : [] };
     }
     async function assertPaymentAllowed(jobKey) {
@@ -38,7 +44,13 @@ module.exports = function createPaymentAutomation({ runQuery }) {
             throw new PaymentStoppedError('原补款已停止自动对账或任务已结束，请人工核对');
         }
     }
-    return { paymentOwner, assertPaymentAllowed, assertFundingReconciliationAllowed };
+    async function assertIssueReconciliationAllowed(jobKey) {
+        const owner = await paymentOwner(jobKey);
+        if (!owner.allowed && !owner.canReconcileIssue) {
+            throw new PaymentStoppedError('原开卡申请已停止对账或任务已结束，请人工核对');
+        }
+    }
+    return { paymentOwner, assertPaymentAllowed, assertFundingReconciliationAllowed, assertIssueReconciliationAllowed };
 };
 module.exports.requiresManualHandling = requiresManualHandling;
 module.exports.PaymentStoppedError = PaymentStoppedError;

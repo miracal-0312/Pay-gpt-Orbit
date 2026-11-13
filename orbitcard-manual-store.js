@@ -16,9 +16,16 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
     async function listRecoverableManualOrders() {
         return runQuery(`SELECT * FROM orbitcard_admin_orders WHERE
             (state IN ('submitting','pending','manual') AND updated_at <= DATE_SUB(NOW(), INTERVAL 15 SECOND))
-            OR (state IN ('funding_waiting','funding_review') AND updated_at <= DATE_SUB(NOW(), INTERVAL ${FUNDING_POLL_MS / 1000} SECOND))
-            OR (state = 'prepared' AND updated_at <= DATE_SUB(NOW(), INTERVAL 2 MINUTE))
+            OR (state IN ('funding_waiting','funding_review','funding_pending','card_pending') AND updated_at <= DATE_SUB(NOW(), INTERVAL ${FUNDING_POLL_MS / 1000} SECOND))
+            OR (state IN ('preparing','prepared') AND updated_at <= DATE_SUB(NOW(), INTERVAL 2 MINUTE))
             ORDER BY updated_at ASC LIMIT 10`);
+    }
+
+    async function noteManualQueryAttempt(requestId) {
+        // Rotate waiting rows without restarting the two-minute preparation
+        // timeout or touching a terminal result reached by another worker.
+        await runExecute(`UPDATE orbitcard_admin_orders SET updated_at = CURRENT_TIMESTAMP WHERE request_id = ?
+            AND state IN ('submitting','pending','manual','funding_waiting','funding_review','funding_pending','card_pending')`, [requestId]);
     }
 
     async function prepareManualOrder(input) {
@@ -36,7 +43,7 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
             }
             const pending = await runQuery(`SELECT request_id FROM orbitcard_admin_orders
                 WHERE scope = ? AND target_email = ? AND plan_type = ?
-                AND state IN ('preparing','prepared','funding_waiting','funding_review','submitting','pending','manual') LIMIT 1 FOR UPDATE`,
+                AND state IN ('preparing','prepared','funding_waiting','funding_review','funding_pending','card_pending','submitting','pending','manual') LIMIT 1 FOR UPDATE`,
             [scope, input.targetEmail, input.planType], options);
             if (pending.length) throw new Error('此账号与套餐已有待确认管理员订单，请先核对原单');
             if (input.mode === 'fulfillment') {
@@ -93,7 +100,7 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
         return withTransaction(async connection => {
             const options = { connection };
             const [order] = await runQuery('SELECT * FROM orbitcard_admin_orders WHERE request_id = ? FOR UPDATE', [requestId], options);
-            if (!order || order.client_order_no !== jobKey || order.state !== 'preparing') return null;
+            if (!order || order.client_order_no !== jobKey || !['preparing','card_pending'].includes(order.state)) return null;
             const issues = await runQuery('SELECT * FROM orbitcard_card_issues WHERE job_key = ? OR issue_key = ? FOR UPDATE',
                 [jobKey, order.issue_key || null], options);
             const fundings = await runQuery('SELECT * FROM orbitcard_card_fundings WHERE job_key = ? FOR UPDATE', [jobKey], options);
@@ -125,7 +132,7 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
             if (order.cdk_code) {
                 await runExecute('UPDATE cdk_codes SET used_at = NULL WHERE cdk_code = ? AND manual_redeemed_at IS NULL', [order.cdk_code], options);
             }
-            await runExecute("UPDATE orbitcard_admin_orders SET state = 'failed', message = ? WHERE request_id = ? AND state = 'preparing'",
+            await runExecute("UPDATE orbitcard_admin_orders SET state = 'failed', message = ? WHERE request_id = ? AND state IN ('preparing','card_pending')",
                 [String(message || '').slice(0,255), requestId], options);
             return getManualOrder(requestId, options);
         });
@@ -136,9 +143,20 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
     }
 
     async function pauseManualPreparation(requestId, jobKey, message) {
-        await runExecute(`UPDATE orbitcard_admin_orders SET state = 'support_locked', message = ?
-            WHERE request_id = ? AND client_order_no = ? AND state IN ('preparing','funding_waiting','funding_review')`,
-        [String(message || '').slice(0, 255), requestId, jobKey]);
+        return withTransaction(async connection => {
+            const options = { connection };
+            const [order] = await runQuery('SELECT * FROM orbitcard_admin_orders WHERE request_id = ? FOR UPDATE', [requestId], options);
+            if (!order || order.client_order_no !== jobKey
+                || !['preparing','card_pending','funding_waiting','funding_review','funding_pending'].includes(order.state)) return null;
+            const fundings = await runQuery('SELECT * FROM orbitcard_card_fundings WHERE job_key = ? FOR UPDATE', [jobKey], options);
+            // A handoff stops new payments but retains a path for original money
+            // reconciliation. Do not turn preparation incidents into final support orders.
+            const state = fundings.length || ['funding_waiting','funding_review','funding_pending'].includes(order.state)
+                ? 'funding_pending' : order.issue_key ? 'card_pending' : 'support_locked';
+            await runExecute('UPDATE orbitcard_admin_orders SET state = ?, message = ? WHERE request_id = ?',
+                [state, String(message || '').slice(0, 255), requestId], options);
+            return getManualOrder(requestId, options);
+        });
     }
 
     async function markManualPrepared(requestId, jobKey, cardId) {
@@ -180,20 +198,24 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
         return withTransaction(async connection => {
             const options={connection};
             const [order]=await runQuery('SELECT * FROM orbitcard_admin_orders WHERE request_id = ? FOR UPDATE',[requestId],options);
-            if(!order || order.client_order_no!==jobKey || !['funding_waiting','funding_review'].includes(order.state)) return null;
-            const [funding]=await runQuery('SELECT * FROM orbitcard_card_fundings WHERE job_key = ? FOR UPDATE',[jobKey],options);
-            if(!funding || !['ready','failed'].includes(funding.state) || funding.scope!==order.scope
+            if(!order || order.client_order_no!==jobKey || !['funding_waiting','funding_review','funding_pending'].includes(order.state)) return null;
+            const fundings=await runQuery('SELECT * FROM orbitcard_card_fundings WHERE job_key = ? FOR UPDATE',[jobKey],options);
+            const [funding]=fundings;
+            if(fundings.length!==1 || !['ready','failed'].includes(funding.state) || funding.scope!==order.scope
                 || Number(funding.card_id)!==Number(order.card_id) || funding.credential_hash!==order.api_key_hash
                 || funding.plan_type!==planFor(order.plan_type)) return null;
-            if(order.issue_key) {
-                const [issue]=await runQuery('SELECT * FROM orbitcard_card_issues WHERE issue_key = ? FOR UPDATE',[order.issue_key],options);
-                if(!issue || !['ready','failed'].includes(issue.state) || issue.job_key!==jobKey
+            const issues=await runQuery('SELECT * FROM orbitcard_card_issues WHERE job_key = ? OR issue_key = ? FOR UPDATE',
+                [jobKey,order.issue_key || null],options);
+            if(issues.length>1 || (order.issue_key && !issues.length)) return null;
+            for(const issue of issues) {
+                if(!['ready','failed'].includes(issue.state) || issue.job_key!==jobKey
                     || issue.scope!==order.scope || issue.credential_hash!==order.api_key_hash
+                    || (order.issue_key && issue.issue_key!==order.issue_key)
                     || issue.plan_type!==planFor(order.plan_type) || Number(issue.card_id)!==Number(order.card_id)) return null;
             }
             if(order.cdk_code) {
                 const [code]=await runQuery('SELECT * FROM cdk_codes WHERE cdk_code = ? FOR UPDATE',[order.cdk_code],options);
-                if(!code || code.manual_redeemed_at) return null;
+                if(!code) return null;
             }
             const [card]=await runQuery('SELECT * FROM orbitcard_managed_cards WHERE scope = ? AND card_id = ? FOR UPDATE',
                 [order.scope,order.card_id],options);
@@ -201,7 +223,7 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
             await runExecute('UPDATE orbitcard_managed_cards SET active_job = NULL WHERE scope = ? AND card_id = ? AND active_job = ?',
                 [order.scope,order.card_id,jobKey],options);
             if(order.cdk_code) await runExecute('UPDATE cdk_codes SET used_at = NULL WHERE cdk_code = ? AND manual_redeemed_at IS NULL',[order.cdk_code],options);
-            await runExecute("UPDATE orbitcard_admin_orders SET state = 'failed', message = ? WHERE request_id = ? AND state IN ('funding_waiting','funding_review')",
+            await runExecute("UPDATE orbitcard_admin_orders SET state = 'failed', message = ? WHERE request_id = ? AND state IN ('funding_waiting','funding_review','funding_pending')",
                 [String(message || '').slice(0,255),requestId],options);
             return getManualOrder(requestId,options);
         });
@@ -288,7 +310,7 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
         });
     }
 
-    return { getManualOrder, listManualOrders, listRecoverableManualOrders,
+    return { getManualOrder, listManualOrders, listRecoverableManualOrders, noteManualQueryAttempt,
         prepareManualOrder, reserveManualCard, attachManualIssue, blockManualBalance,
         failManualPreparation, pauseManualPreparation, markManualPrepared, waitManualFunding, reviewManualFunding, releaseManualFunding,
         claimManualSubmission, abandonPreparedManualOrder, settleManualOrder };

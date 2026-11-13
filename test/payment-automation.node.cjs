@@ -96,7 +96,7 @@ test('subscription guard runs immediately before the write and blocks handoff af
     assert.equal(writes, 0);
 });
 
-test('funding review permits only original-funding reconciliation and never payment or a stopped owner',async()=>{
+test('funding reconciliation survives manual redemption without enabling another payment',async()=>{
     for(const manual of [false,true]) {
         let state='funding_review',redeemed=false;
         const jobKey=manual?'manual-review':'job-review';
@@ -107,11 +107,31 @@ test('funding review permits only original-funding reconciliation and never paym
         await store.assertFundingReconciliationAllowed(jobKey);
         await assert.rejects(store.assertPaymentAllowed(jobKey),factory.PaymentStoppedError);
         redeemed=true;
-        await assert.rejects(store.assertFundingReconciliationAllowed(jobKey),factory.PaymentStoppedError);
-        redeemed=false;
-        for(state of ['funding_pending','support_locked','manual','success','rejected']) {
+        await store.assertFundingReconciliationAllowed(jobKey);
+        await assert.rejects(store.assertPaymentAllowed(jobKey),factory.PaymentStoppedError);
+        state='funding_pending';
+        await store.assertFundingReconciliationAllowed(jobKey);
+        await assert.rejects(store.assertPaymentAllowed(jobKey),factory.PaymentStoppedError);
+        for(state of ['support_locked','manual','success','rejected']) {
             await assert.rejects(store.assertFundingReconciliationAllowed(jobKey),factory.PaymentStoppedError);
             await assert.rejects(store.assertPaymentAllowed(jobKey),factory.PaymentStoppedError);
         }
+    }
+});
+
+test('a failed or stale preparation settlement never logs an unconfirmed CDK release', async () => {
+    for (const throws of [false, true]) {
+        const f = fixture(), task = await f.claim(), logs = [];
+        const core = require('../payment-service')({ store: { ...f.store, settleOrbitcardTask: async (key, input) => {
+            if (input.orbitcardState !== 'rejected') return f.store.settleOrbitcardTask(key, input);
+            if (throws) throw new Error('database unavailable');
+            return { applied: false, status: 'running' };
+        } }, cardService: { allocate: async () => { throw new (require('../orbitcard-card-policy').CardPreparationError)('card busy'); } },
+        worker: { run: async () => assert.fail('must not submit') }, activeJobs: new Set(), activeChallenges: new Map(),
+        audit() {}, broadcast() {}, log: (...args) => logs.push(args), notify: async () => {} });
+        await core.run({ task: { ...task, apiConfig: {} }, planType: 'plus', session: {} });
+        assert.ok(f.db.cdks[0].used_at);
+        assert.match(logs.at(-1)[1], /结算结果尚未确认/);
+        assert.doesNotMatch(logs.at(-1)[1], /CDK 已释放/);
     }
 });

@@ -136,18 +136,20 @@ module.exports = function createPaymentService({ store, cardService, worker, act
                 : error instanceof CardPreparationError
                     ? `${error.message}；本次会员充值未提交，CDK 已释放` : 'Orbitcard 提交前异常，请检查配置或查询原订单';
             // Persist before logging: a logging error must not prevent preservation of order ownership.
+            let recordedMessage = '任务结算结果尚未确认，请查询原订单；勿重复充值';
             try {
                 const nextStatus = submitted ? 'running' : preparationUnknown || cardPending || fundingPending ? 'manual' : 'failed';
                 const result = await store.settleOrbitcardTask(jobKey, { status: nextStatus, progress: 0,
                         message, orbitcardState: submitted ? 'pending' : preparationUnknown ? preparationState : fundingPending ? 'funding_pending' : cardPending ? 'card_pending' : 'rejected',
                         ...(submitted ? {} : { expectedState: preparationState, expectedClientOrderNo: task.orbitcardClientOrderNo }) });
                 if (result.applied) {
+                    recordedMessage = message;
                     broadcast(rootJobKey, { type: 'status', status: nextStatus, message });
                     const latest = await store.getTaskStatus(jobKey);
                     if (latest) await notify(latest).catch(() => {});
                 }
             } catch (_) { /* durable identity remains reserved; recovery only queries this identity */ }
-            log(jobKey, message, 'worker_error');
+            log(jobKey, recordedMessage, 'worker_error');
         } finally { activeChallenges.delete(jobKey); activeJobs.delete(jobKey); }
     }
 

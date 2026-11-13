@@ -172,9 +172,9 @@ test('retry preparation handoff remains stopped after the original funding or is
         assert.ok(f.db.cdks[0].used_at);
         (kind === 'funding' ? f.db.fundings : f.db.issues)[0].state = 'failed';
         await recovery.refreshTask(f.db.tasks[0]);
-        assert.equal(f.db.tasks[0].orbitcard_state, kind === 'funding' ? 'funding_pending' : 'card_pending');
-        assert.equal(f.db.tasks[0].status, 'manual');
-        assert.equal(f.db.cards[0].active_job, task.jobKey);
+        assert.equal(f.db.tasks[0].orbitcard_state, 'support_locked');
+        assert.equal(f.db.tasks[0].status, 'failed');
+        assert.equal(f.db.cards[0].active_job, null);
         assert.ok(f.db.cdks[0].used_at);
     }
 });

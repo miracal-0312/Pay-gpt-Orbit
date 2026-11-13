@@ -198,8 +198,11 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
         await cfg.executionGuard?.assertOwned();
         const released = await store.releaseManualFunding(order.request_id, order.client_order_no,
             '原补款已核对，会员订阅尚未提交；准备任务已释放，请使用最新 Session 和新的请求编号重新提交');
-        if (!released) await store.pauseManualPreparation(order.request_id, order.client_order_no,
-            '原补款出现需要人工核对的异常，自动支付已停止；保留原卡片与资金记录');
+        if (!released) {
+            nextQueryAt.set(order.request_id, now() + 60000);
+            await store.pauseManualPreparation(order.request_id, order.client_order_no,
+                '原补款待核对，自动支付已停止；后台仅核对原资金，确认前保留支付卡与 CDK');
+        }
     }
 
     async function continueFunding(order, cfg, session, retryAfterMs) {
@@ -255,15 +258,16 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
         }
     }
 
-    async function recoverFunding(order) {
+    async function recoverFunding(order, existingGuard = null, knownCfg = null) {
         if ((nextQueryAt.get(order.request_id) || 0) > now()) return;
-        const guard = await store.acquirePaymentLock(manualLockKeys(order.request_id, order.cdk_code));
+        const guard = existingGuard || await store.acquirePaymentLock(manualLockKeys(order.request_id, order.cdk_code));
         if (!guard) return;
         try {
             await guard.assertOwned();
             order = await store.getManualOrder(order.request_id);
-            if (!order || !['funding_waiting','funding_review'].includes(order.state)) return;
-            const cfg = { ...await config(), executionGuard: guard, auditJobKey: order.client_order_no };
+            if (!order || !['funding_waiting','funding_review','funding_pending'].includes(order.state)) return;
+            nextQueryAt.set(order.request_id, now() + FUNDING_POLL_MS);
+            const cfg = { ...(knownCfg || await config()), executionGuard: guard, auditJobKey: order.client_order_no };
             if (!matches(order, { cfg, planType: order.plan_type, targetEmail: order.target_email })) {
                 throw new ManualOrderError('补款平台或 API Key 与原管理员订单不一致，请恢复原配置后核对',409);
             }
@@ -286,7 +290,22 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
                 }
                 await finishFundingError(order, cfg, error);
             }
-        } finally { await guard.release(); }
+        } finally { if (!existingGuard) await guard.release(); }
+    }
+
+    async function recoverPreparation(order, guard) {
+        if ((nextQueryAt.get(order.request_id) || 0) > now()) return;
+        nextQueryAt.set(order.request_id, now() + 60000);
+        await guard.assertOwned();
+        try {
+            const released = await store.failManualPreparation(order.request_id, order.client_order_no,
+                '原支付准备记录已核对，会员订阅未提交；准备任务已释放，请使用最新 Session 和新请求编号重新提交');
+            if (released) record(released, 'manual_preparation_released', '原支付准备记录已核对，释放未提交任务');
+        } catch (_) {
+            await guard.assertOwned();
+            await store.pauseManualPreparation(order.request_id, order.client_order_no,
+                '原开卡或补款尚待核对，自动支付已停止；确认原资金结果后释放准备任务');
+        }
     }
 
     async function submit(order, cfg, session) {
@@ -335,6 +354,14 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
         try {
             const order = await store.getManualOrder(requestId);
             if (!order) throw new ManualOrderError('管理员订单不存在', 404);
+            if (['funding_waiting','funding_review','funding_pending'].includes(order.state)) {
+                await recoverFunding(order, guard || knownCfg?.executionGuard, knownCfg);
+                return get(requestId);
+            }
+            if (order.state === 'card_pending') {
+                await recoverPreparation(order, guard || knownCfg?.executionGuard);
+                return get(requestId);
+            }
             if (!['submitting', 'pending', 'manual'].includes(order.state)) return publicOrder(order);
             const cfg = { ...(knownCfg || await config()), executionGuard: guard || knownCfg?.executionGuard };
             const hash = crypto.createHash('sha256').update(String(cfg.api_key || '')).digest('hex');
@@ -377,21 +404,38 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
         try {
             for (const order of await store.listRecoverableManualOrders()) {
                 if (activeJobs.has(order.client_order_no) || inFlight.has(order.request_id)) continue;
-                if (['funding_waiting','funding_review'].includes(order.state)) {
-                    await recoverFunding(order).catch(() => {});
-                    continue;
+                try {
+                    if (['funding_waiting','funding_review','funding_pending'].includes(order.state)) {
+                        await recoverFunding(order);
+                        continue;
+                    }
+                    if (['preparing','card_pending'].includes(order.state)) {
+                        const guard = await store.acquirePaymentLock(manualLockKeys(order.request_id, order.cdk_code));
+                        if (!guard) continue;
+                        try {
+                            await guard.assertOwned();
+                            const current = await store.getManualOrder(order.request_id);
+                            if (current && ['preparing','card_pending'].includes(current.state)) await recoverPreparation(current, guard);
+                        } finally { await guard.release(); }
+                        continue;
+                    }
+                    if (order.state === 'prepared') {
+                        const guard = await store.acquirePaymentLock(manualLockKeys(order.request_id, order.cdk_code));
+                        if (!guard) continue;
+                        try {
+                            await guard.assertOwned();
+                            const released = await store.abandonPreparedManualOrder(order.request_id);
+                            if (released) record(released, 'manual_order_prepared_abandoned', '管理员订单提交前中断，已释放 CDK 与卡片');
+                        } finally { await guard.release(); }
+                        continue;
+                    }
+                    await refresh(order.request_id);
+                } catch (_) {
+                    // One unavailable order must not prevent the rest of this
+                    // bounded batch from reconciling their original payments.
+                } finally {
+                    try { await store.noteManualQueryAttempt(order.request_id); } catch (_) { /* retry on the next pass */ }
                 }
-                if (order.state === 'prepared') {
-                    const guard = await store.acquirePaymentLock(manualLockKeys(order.request_id, order.cdk_code));
-                    if (!guard) continue;
-                    try {
-                        await guard.assertOwned();
-                        const released = await store.abandonPreparedManualOrder(order.request_id).catch(() => null);
-                        if (released) record(released, 'manual_order_prepared_abandoned', '管理员订单提交前中断，已释放 CDK 与卡片');
-                    } finally { await guard.release(); }
-                    continue;
-                }
-                await refresh(order.request_id).catch(() => {});
             }
         } finally { recovering = false; }
     }

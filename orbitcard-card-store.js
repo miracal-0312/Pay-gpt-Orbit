@@ -238,8 +238,12 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
     }
 
     async function getCardIssueForTask(jobKey) {
-        const rows = await runQuery(`SELECT i.* FROM orbitcard_card_issues i JOIN task_logs t ON t.orbitcard_issue_key=i.issue_key
-            WHERE t.job_key=? LIMIT 1`, [jobKey]);
+        // The issue intent can commit before its key is attached to the task.
+        // Include that durable owner link so a crash cannot hide an unresolved issue.
+        const rows = await runQuery(`SELECT i.* FROM orbitcard_card_issues i JOIN task_logs t
+            ON (i.job_key=t.job_key OR i.issue_key=t.orbitcard_issue_key)
+            WHERE t.job_key=? LIMIT 2`, [jobKey]);
+        if (rows.length > 1) throw new CardPreparationError('原任务关联多笔开卡申请，请人工核对，不能自动释放');
         return rows[0] || null;
     }
     async function getCardFundingForTask(jobKey) {
