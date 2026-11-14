@@ -22,7 +22,6 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
             authorization_pending: card.authorization_pending_count != null
                 && (card.authorization_count == null || Number(card.authorization_count) < Number(card.authorization_pending_count)),
             retiring: Boolean(card.retirement_key),
-            cooling_down: false, reuse_after_ms: 0,
             provider_status: card.provider_status, product_code: card.product_code, last4: card.last4,
             balance: card.balance, currency: card.currency, source: card.source, updated_at: card.updated_at
         }));
@@ -55,7 +54,7 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
         let application=null,applicationError=null;
         try {application=cardsApi.createCardBody(cardsApi.chooseOpeningProduct(products,cfg));}
         catch (error) {if(!(error instanceof CardPreparationError))throw error;applicationError=error.message;}
-        res.json({ success: true, products, automatic_application:application, application_error:applicationError });
+        res.json({ success: true, products, manual_application:application, application_error:applicationError });
     }));
     app.get('/api/admin/orbitcard/payment-regions', handler(async (req, res) => {
         const cfg=await config(), regions={};

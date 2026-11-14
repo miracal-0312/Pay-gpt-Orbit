@@ -8,11 +8,11 @@
 
 消费授权按 scope、card_id、transaction_id 持久去重；重复同步和重启不重复增加，后续清算不会将已记录的授权抹掉。首次接入前平台已经不再保留的 Authorization 无法凭 Settlement 推算补回，历史统计仅覆盖接口可见及本项目曾保存的成功授权。本项目订阅确认成功只释放任务占用，不直接加次数；若新授权尚未出现在平台记录中，该卡等待授权同步后再分配。失败或单独核销 CDK 不直接增加授权次数。
 
-自助与管理员订阅的固定 5 分钟卡片冷却已取消。订阅确认成功或已提交后明确失败时，事务释放本次卡片，不再设置复用截止时间。选卡、只读预检、并发模拟与数据库最终预占均不因历史 `reuse_after_ms` 拒绝卡片。释放后仍须满足成功授权次数低于配置上限、待授权同步已完成、ACTIVE、USD、资料与余额有效、无其他任务占用及未决资金操作；符合条件的卡可再次分配。
+自助与管理员订阅的固定卡片冷却代码已移除。订阅确认成功或已提交后明确失败时，事务释放本次卡片，不再设置复用截止时间；选卡、预检、并发模拟和最终预占均不读写 `reuse_after_ms`。释放后仍须满足成功授权次数低于配置上限、待授权同步已完成、ACTIVE、USD、资料及余额有效、无其他任务占用和未决资金操作，符合条件即可再次分配。
 
 卡片已释放任务占用后，若新增成功授权仍未同步，只继续排除该卡；有其他合格现有卡时继续选择，不清除授权门槛、伪造次数或提前复用旧卡。已知冻结的空闲卡也从候选中排除。现有候选卡仅因占用暂不可用时，可使用下述共享等待位；库存为空或没有合格候选卡时按原准备失败规则处理。任何订单都不会自动开卡，未知状态和未决资金仍按原规则对账。
 
-旧数据库可能仍保留 `orbitcard_managed_cards.reuse_after_ms` 列及其历史时间值，当前流程不再将其作为复用限制，无需等待旧时间到期。取消固定冷却不需要新增字段或环境变量。原 `balance` 仍是平台快照，不作为独立本地资金账本。
+新建表与启动补列不再创建 `orbitcard_managed_cards.reuse_after_ms`。旧数据库已有该列及历史值不主动 DROP，但运行流程不再读写，旧时间不会阻塞复用；本次清理无需新增字段或环境变量。卡片管理 API 同时移除 `cooling_down` 与 `reuse_after_ms`。原 `balance` 仍是平台快照，不是独立本地资金账本。
 
 达到配置上限后停止分配，卡片没有本地任务占用时执行 deleteCard。ACTIVE 和冻结的 CANCELLED 卡均直接申请删除，无需解冻。平台仍有未关闭授权或处理中资金订单时可能拒绝删除；结果未知时保留原删卡身份，只通过 cardDetail 查询恢复，不再次提交删除，也不凭列表缺失或 404 推断删除成功。未确认删除不补位，退款金额只记录平台返回的真实证据，不从余额快照估算。
 
@@ -79,7 +79,7 @@ docker compose exec -T app node scripts/inspect-card-transactions.cjs 19531519
 
 API 约定见 [平台协议](Orbitcard-Open-API-V1.md) 和 [订阅协议](orbitcard-subscription-api-v1.md)。HTTP 429 使用账户级限流等待和 Retry-After；权限不足、未知返回值和资金不足会停止相关动作，保留日志供核对。
 
-产品接口按当前 `data.list` 读取产品、库存和最低金额。后台返回 `products`、`automatic_application` 与 `application_error`，不再生成 `products[].plans`；套餐 USD 配置仅用于真实代充的资金准备。
+产品接口按当前 `data.list` 读取产品、库存和最低金额。后台返回 `products`、`manual_application` 和 `application_error`；`manual_application` 仅预览管理员手动申请的产品及固定首充参数。旧 `automatic_application` 与 `products[].plans` 不再输出；套餐 USD 配置只用于实际代充准备资金。只读预检维护摘要不再保留 `capacity_limit`、`auto_refill`、`open_count`、`opening_amount`，并发统计不再返回 `summary.opening`；现有卡选择、补款、等待和退役提示继续提供。
 
 ## 本项目管理 API
 

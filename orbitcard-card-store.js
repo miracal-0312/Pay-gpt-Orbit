@@ -4,7 +4,7 @@ const { CardPreparationError } = require('./orbitcard-card-policy');
 
 const { cardScope, planFor, settlementState } = require('./orbitcard-card-policy');
 
-module.exports = function createCardStore({ runQuery, runExecute, withTransaction, openLockConnection, now = Date.now }) {
+module.exports = function createCardStore({ runQuery, runExecute, withTransaction, openLockConnection }) {
     function methods(baseUrl, connection = null) {
         const scope = cardScope(baseUrl), options = connection ? { connection } : {};
         const query = (sql, args = []) => runQuery(sql, args, options);
@@ -84,7 +84,7 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
             const rows = await query('SELECT * FROM orbitcard_card_issues WHERE scope=? AND job_key=? ORDER BY created_at DESC LIMIT 1', [scope, jobKey]);
             return rows[0] || null;
         }
-        async function reserveCard(cardId, jobKey, planType, limit = poolPolicy.MAX_USES) {
+        async function reserveCard(cardId, jobKey, planType, limit = poolPolicy.DEFAULT_MAX_AUTHORIZATIONS) {
             limit = poolPolicy.validateLimit(limit);
             const plan = planFor(planType);
             return transaction(async tx => {
@@ -100,11 +100,11 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
                 const uses = await runQuery('SELECT * FROM orbitcard_card_uses WHERE job_key=? FOR UPDATE', [jobKey], opts);
                 if (uses[0]) {
                     if (uses[0].state === 'reserved' && Number(uses[0].card_id) === Number(cardId) && card?.active_job === jobKey)
-                        return card.provider_status === 'ACTIVE' && poolPolicy.eligible(card, now(), limit) ? card : null;
+                        return card.provider_status === 'ACTIVE' && poolPolicy.eligible(card, limit) ? card : null;
                     throw new CardPreparationError('本任务已绑定卡片，不允许更换支付卡');
                 }
                 if (!card || card.active_job || card.provider_status !== 'ACTIVE'
-                    || !poolPolicy.eligible(card, now(), limit)) return null;
+                    || !poolPolicy.eligible(card, limit)) return null;
                 await runExecute('INSERT INTO orbitcard_card_uses (job_key,scope,card_id,plan_type,state,authorization_baseline) VALUES (?,?,?,?,\'reserved\',?)', [jobKey,scope,cardId,plan,Number(card.authorization_count)], opts);
                 await runExecute('UPDATE orbitcard_managed_cards SET active_job=? WHERE scope=? AND card_id=?', [jobKey,scope,cardId], opts);
                 await runExecute('UPDATE task_logs SET orbitcard_card_id=? WHERE job_key=?', [cardId,jobKey], opts);
@@ -116,10 +116,10 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
                 AND state IN ('prepared','submitting','pending','unknown') ORDER BY created_at LIMIT 1`, [scope,planFor(planType)]);
             return rows[0] || null;
         }
-        async function createIssue(issue) {
+        async function createManualIssue({ issue_key, plan_type, product_code, amount, credential_hash, request_body }) {
             await execute(`INSERT INTO orbitcard_card_issues (issue_key,scope,job_key,plan_type,product_code,amount,credential_hash,request_body,state)
-                VALUES (?,?,?,?,?,?,?,?,'prepared')`, [issue.issue_key,scope,issue.job_key || null,issue.plan_type,issue.product_code,issue.amount,issue.credential_hash,issue.request_body]);
-            return { ...issue, scope, state: 'prepared' };
+                VALUES (?,?,NULL,?,?,?,?,?,'prepared')`, [issue_key,scope,plan_type,product_code,amount,credential_hash,request_body]);
+            return { issue_key, scope, job_key: null, plan_type, product_code, amount, credential_hash, request_body, state: 'prepared' };
         }
         async function updateIssue(key, { state, order_no, card_id, message, provider_status, completed, fee_snapshot, retry_at }) {
             await execute(`UPDATE orbitcard_card_issues SET state=?,order_no=COALESCE(NULLIF(?,''),order_no),
@@ -141,17 +141,6 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
             });
         }
         async function listIssues() { return query('SELECT * FROM orbitcard_card_issues WHERE scope=? ORDER BY created_at DESC LIMIT 100', [scope]); }
-        async function attachIssue(jobKey, issueKey) {
-            const result = await execute(`UPDATE task_logs SET orbitcard_issue_key=? WHERE job_key=? AND orbitcard_state IN ('preparing','prepared')
-                AND (orbitcard_issue_key IS NULL OR orbitcard_issue_key=?)`, [issueKey,jobKey,issueKey]);
-            if (!result.affectedRows) throw new CardPreparationError('任务已变更，不能关联新的开卡申请');
-        }
-        async function blockBalance(jobKey, required, message) {
-            if (!jobKey) return;
-            const result = await execute(`UPDATE task_logs SET orbitcard_state='balance_blocked',status='failed',
-                orbitcard_required_balance=?,message=? WHERE job_key=? AND orbitcard_state='prepared'`, [required,message,jobKey]);
-            if (!result.affectedRows) throw new CardPreparationError('任务已变更，不能覆盖原订单的余额状态');
-        }
         async function fundingForJob(jobKey) {
             const rows = await query('SELECT * FROM orbitcard_card_fundings WHERE scope=? AND job_key=? LIMIT 1', [scope,jobKey]);
             return rows[0] || null;
@@ -192,8 +181,8 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
             return query(`SELECT * FROM orbitcard_card_fundings WHERE scope=?${pending ? " AND state IN ('prepared','submitting','pending','unknown')" : ''}
                 ORDER BY updated_at ${pending ? 'ASC' : 'DESC'} LIMIT 100`, [scope]);
         }
-        return { retireCard, markRetirementSubmitted, confirmRetirement, syncCards, listCards, listAuthorizations, saveAuthorizations, reserveCard, pendingIssue, createIssue, updateIssue, completeIssue, listIssues, attachIssue, issueForJob,
-            blockBalance, fundingForJob, createFunding, updateFunding, deferFunding, listFundings };
+        return { retireCard, markRetirementSubmitted, confirmRetirement, syncCards, listCards, listAuthorizations, saveAuthorizations, reserveCard, pendingIssue, createManualIssue, updateIssue, completeIssue, listIssues, issueForJob,
+            fundingForJob, createFunding, updateFunding, deferFunding, listFundings };
     }
 
     async function withCardAllocationLock(baseUrl, fn) {

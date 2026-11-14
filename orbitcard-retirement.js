@@ -20,14 +20,14 @@ module.exports = function createRetirement({ api, cardsApi }) {
             }
         }
         if (row.retirement_key) validateKey(row.retirement_key);
-        if (!listed && !row.retirement_key) throw new CardPreparationError('卡片不在平台列表中且缺少原删卡意图，已停止补卡');
+        if (!listed && !row.retirement_key) throw new CardPreparationError('卡片不在平台列表中且缺少原删卡意图，请人工核对');
         const intent = await locked.retireCard(cardId, row.retirement_key || `${prefix}${crypto.randomUUID()}`);
         const key = intent.retirement_key;
         validateKey(key);
 
         async function confirm(deleted) {
             if (cardsApi.positiveId(deleted?.card_id) !== cardId || deleted?.provider_status !== 'DELETED') {
-                throw new CardPreparationError('卡片删除仍未确认，已保留原删卡意图并暂停补卡');
+                throw new CardPreparationError('卡片删除仍未确认，已保留原删卡意图');
             }
             const summary = { ...card, ...deleted, card_id: cardId, provider_status: 'DELETED' };
             await locked.confirmRetirement(cardId, key, summary);
@@ -38,14 +38,14 @@ module.exports = function createRetirement({ api, cardsApi }) {
                 return await confirm(await cardsApi.cardDetail(cfg, cardId));
             } catch (error) {
                 if (error instanceof CardPreparationError) throw error;
-                throw new CardPreparationError('卡片删除结果查询失败，已保留原删卡意图；稍后只读查询确认，暂停补卡');
+                throw new CardPreparationError('卡片删除结果查询失败，已保留原删卡意图；稍后只读查询确认');
             }
         }
         // Legacy keys have no state and may already have been sent. A missing
         // list item is also not proof of deletion; require an explicit detail.
         if (!listed || intent.retirement_state !== 'prepared') return recover();
         if (!['ACTIVE', 'CANCELLED'].includes(card.provider_status)) {
-            throw new CardPreparationError('卡片当前状态不允许发起删除，已暂停补卡');
+            throw new CardPreparationError('卡片当前状态不允许发起删除，已暂停退役');
         }
         if (!await locked.markRetirementSubmitted(cardId, key)) return recover();
 
@@ -53,11 +53,11 @@ module.exports = function createRetirement({ api, cardsApi }) {
         try {
             result = await api.request(cfg, 'deleteCard', { card_id: cardId }, key);
         } catch {
-            throw new CardPreparationError('卡片删除结果未知，已保留原删卡意图；后续只读查询确认，暂停补卡');
+            throw new CardPreparationError('卡片删除结果未知，已保留原删卡意图；后续只读查询确认');
         }
         if (!result?.success || cardsApi.positiveId(result.data?.card_id) !== cardId
             || result.data?.status !== 'DELETED') {
-            throw new CardPreparationError('卡片删除仍未确认，已保留原删卡意图；后续只读查询确认，暂停补卡');
+            throw new CardPreparationError('卡片删除仍未确认，已保留原删卡意图；后续只读查询确认');
         }
         // A DELETED status alone does not prove the amount refunded. Preserve the
         // last observed balance unless cardDetail later reports a new balance.

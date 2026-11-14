@@ -35,7 +35,7 @@ module.exports = function createPaymentAutomation({ runQuery }) {
     }
     async function assertPaymentAllowed(jobKey) {
         if (!(await paymentOwner(jobKey)).allowed) {
-            throw new PaymentStoppedError('任务已转人工处理或已结束，自动开卡、补款和订阅充值已停止');
+            throw new PaymentStoppedError('任务已转人工处理或已结束，补款和订阅充值已停止');
         }
     }
     async function assertFundingReconciliationAllowed(jobKey) {

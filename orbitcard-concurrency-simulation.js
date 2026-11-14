@@ -58,7 +58,7 @@ async function simulateSelection({ snapshot, count, available, planType, priceFo
         initial_contention: initialCard ? { card_id: initialCard, tasks: count } : null,
         summary: { assigned: assigned.length, pay: tasks.filter(row => row.action === 'pay').length,
             fund: tasks.filter(row => row.action === 'fund').length, waiting: tasks.filter(row => row.action === 'wait').length,
-            blocked: tasks.filter(row => row.action === 'blocked').length, opening: tasks.filter(row => row.action === 'open').length,
+            blocked: tasks.filter(row => row.action === 'blocked').length,
             duplicate_assignments: assigned.length - new Set(assigned.map(row => row.card_id)).size },
         budget: { available: money.decimal(available), reserved: money.decimal(available - remaining),
             remaining: money.decimal(remaining), fees_included: false }, tasks };

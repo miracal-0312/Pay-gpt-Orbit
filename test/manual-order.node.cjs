@@ -598,8 +598,6 @@ function storeFixture({ enqueueRedemption } = {}) {
         }
         else if (q.startsWith('UPDATE orbitcard_admin_orders SET card_id = ?')) {
             const row = db.orders.find(o => o.request_id === p[3]); row.card_id = p[0]; row.authorization_baseline = p[1]; row.message = p[2];
-        } else if (q.startsWith('UPDATE orbitcard_admin_orders SET issue_key = ?')) {
-            const row = db.orders.find(o => o.request_id === p[2]); row.issue_key = p[0]; row.message = p[1];
         } else if (q.startsWith("UPDATE orbitcard_admin_orders SET state = 'prepared'")) {
             const row = db.orders.find(o => o.request_id === p[1]);
             if(!row || !['preparing','funding_waiting'].includes(row.state) || row.client_order_no!==p[2] || row.card_id!==p[3])return {affectedRows:0};
@@ -614,9 +612,6 @@ function storeFixture({ enqueueRedemption } = {}) {
         else if (q.startsWith('UPDATE orbitcard_managed_cards SET authorization_pending_count=')) {
             if (db.card.scope !== p[1] || db.card.card_id !== p[2]) return { affectedRows: 0 };
             db.card.authorization_pending_count = Math.max(db.card.authorization_pending_count || 0, p[0]);
-        } else if (q.startsWith('UPDATE orbitcard_managed_cards SET reuse_after_ms=')) {
-            if (db.card.scope !== p[1] || db.card.card_id !== p[2] || db.failCooldown) return { affectedRows: 0 };
-            db.card.reuse_after_ms = Math.max(db.card.reuse_after_ms || 0, p[0]);
         } else if (q.startsWith('UPDATE orbitcard_managed_cards SET active_job = ?')) {
             db.card.active_job = p[0];
         } else if (q.startsWith("UPDATE orbitcard_admin_orders SET state = 'submitting'")) {
@@ -653,7 +648,7 @@ function storeFixture({ enqueueRedemption } = {}) {
         return result;
     };
     return { db, advance: ms => { clock += ms; }, now: () => clock,
-        store: createStore({ runQuery, runExecute, withTransaction, enqueueRedemption, now: () => clock }) };
+        store: createStore({ runQuery, runExecute, withTransaction, enqueueRedemption }) };
 }
 
 async function prepareOrder(store, input) {
@@ -782,7 +777,7 @@ test('funding incident cannot release mismatched, incomplete or unresolved prepa
 test('card preparation handoff releases only final original issuance and never resumes subscription',async()=>{
     for(const outcome of ['pending','ready','failed']) {
         const {db,store}=storeFixture();const order=await store.prepareManualOrder(manualInput(id));
-        await store.attachManualIssue(id,order.client_order_no,'issue-original');
+        db.orders[0].issue_key = 'issue-original';
         db.issues.push({issue_key:'issue-original',scope:order.scope,job_key:order.client_order_no,
             credential_hash:order.api_key_hash,plan_type:'plus',card_id:outcome==='ready'?12:null,state:outcome});
         await store.pauseManualPreparation(id,order.client_order_no,'await original issue');
@@ -1166,7 +1161,6 @@ test('administrator settlement never writes the retired cooldown column', async 
     const { db, store } = storeFixture();
     await prepareOrder(store, manualInput(id));
     await store.claimManualSubmission(id);
-    db.failCooldown = true;
     await store.settleManualOrder(id, { state: 'success', message: 'confirmed' });
     assert.equal(db.orders[0].state, 'success');
     assert.equal(db.card.active_job, null);
@@ -1279,7 +1273,7 @@ test('insufficient funds after a confirmed card issue releases the original card
     for(const fundingState of [null,'ready','failed']) {
         const {db,store}=storeFixture();const order=await store.prepareManualOrder(manualInput(id));
         await store.reserveManualCard(id,12,order.client_order_no,'gpt-plus');
-        await store.attachManualIssue(id,order.client_order_no,'issue-original');
+        db.orders[0].issue_key = 'issue-original';
         const identity={scope:order.scope,job_key:order.client_order_no,credential_hash:order.api_key_hash,plan_type:'plus',card_id:12};
         db.issues.push({...identity,issue_key:'issue-original',state:'ready'});
         if(fundingState)db.fundings.push({...identity,funding_key:'funding-original',state:fundingState});
@@ -1291,7 +1285,7 @@ test('insufficient funds after a confirmed card issue releases the original card
 
 test('a confirmed failed card issue without a card releases the CDK',async()=>{
     const {db,store}=storeFixture();const order=await store.prepareManualOrder(manualInput(id));
-    await store.attachManualIssue(id,order.client_order_no,'issue-failed');
+    db.orders[0].issue_key = 'issue-failed';
     db.issues.push({issue_key:'issue-failed',scope:order.scope,job_key:order.client_order_no,
         credential_hash:order.api_key_hash,plan_type:'plus',card_id:null,state:'failed'});
     await store.failManualPreparation(id,order.client_order_no,'原开卡已失败');
@@ -1306,7 +1300,7 @@ test('unresolved or mismatched funding and issue records prevent preparation rel
         await store.reserveManualCard(id,12,order.client_order_no,'gpt-plus');
         const identity={scope:order.scope,job_key:order.client_order_no,credential_hash:order.api_key_hash,plan_type:'plus',card_id:12,state:'ready'};
         if(kind==='issue') {
-            await store.attachManualIssue(id,order.client_order_no,'issue-original');
+            db.orders[0].issue_key = 'issue-original';
             db.issues.push({...identity,issue_key:'issue-original',...mutation});
         } else db.fundings.push({...identity,funding_key:'funding-original',...mutation});
         await assert.rejects(store.failManualPreparation(id,order.client_order_no,'账户余额不足'),/不能自动释放/);
@@ -1320,7 +1314,7 @@ test('missing, foreign, or unlinked pending issue records cannot unlock an admin
         await store.reserveManualCard(id,12,order.client_order_no,'gpt-plus');
         const issue={issue_key:'issue-original',scope:order.scope,job_key:order.client_order_no,
             credential_hash:order.api_key_hash,plan_type:'plus',card_id:12,state:'ready'};
-        if(scenario!=='unlinked-pending')await store.attachManualIssue(id,order.client_order_no,issue.issue_key);
+        if(scenario!=='unlinked-pending')db.orders[0].issue_key = issue.issue_key;
         if(scenario!=='missing')db.issues.push({...issue,...(scenario==='foreign-job'?{job_key:'manual-other'}:{}),
             ...(scenario==='unlinked-pending'?{state:'pending'}:{})});
         if(scenario==='duplicate')db.issues.push({...issue,issue_key:'issue-second'});

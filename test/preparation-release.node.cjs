@@ -5,9 +5,9 @@ const fixture = require('./helpers/card-db.cjs');
 
 async function setup(state = 'ready') {
     const f = fixture(), task = await f.claim(), methods = f.store.cardMethods(f.base);
-    const issue = await methods.createIssue({ issue_key: 'issue-original', job_key: task.jobKey, plan_type: 'plus',
+    const issue = await f.seedHistoricalIssue({ issue_key: 'issue-original', job_key: task.jobKey, plan_type: 'plus',
         product_code: 'p1', amount: '20.00', credential_hash: 'original-key', request_body: '{}' });
-    await methods.attachIssue(task.jobKey, issue.issue_key);
+    f.db.tasks.find(row => row.job_key === task.jobKey).orbitcard_issue_key = issue.issue_key;
     await methods.updateIssue(issue.issue_key, { state, card_id: state === 'ready' ? 42 : null, order_no: 'ISSUE-ORIGINAL' });
     await f.store.settleOrbitcardTask(task.jobKey, { status: 'manual', orbitcardState: 'card_pending', message: 'pending' });
     const release = () => f.store.settleOrbitcardTask(task.jobKey, { status: 'retry', orbitcardState: 'rejected',
@@ -47,8 +47,8 @@ test('card review cannot release a missing, unresolved or foreign original issue
 test('card review retains a reserved card when original funding is unresolved', async () => {
     const f = fixture(), task = await f.claim(), methods = f.store.cardMethods(f.base);
     await f.addCard(); await methods.reserveCard(42, task.jobKey, 'plus');
-    await methods.createIssue({ issue_key: 'i', job_key: task.jobKey, plan_type: 'plus', product_code: 'p1', amount: '20.00', credential_hash: 'key', request_body: '{}' });
-    await methods.attachIssue(task.jobKey, 'i'); await methods.updateIssue('i', { state: 'ready', card_id: 42 });
+    await f.seedHistoricalIssue({ issue_key: 'i', job_key: task.jobKey, plan_type: 'plus', product_code: 'p1', amount: '20.00', credential_hash: 'key', request_body: '{}' });
+    f.db.tasks.find(row => row.job_key === task.jobKey).orbitcard_issue_key = 'i'; await methods.updateIssue('i', { state: 'ready', card_id: 42 });
     await methods.createFunding({ funding_key: 'f', job_key: task.jobKey, plan_type: 'plus', card_id: 42,
         credential_hash: 'key', request_body: '{"card_id":42,"amount":"1.00"}', amount: '1.00', target_balance: '21.00' });
     await f.store.settleOrbitcardTask(task.jobKey, { status: 'manual', orbitcardState: 'card_pending' });

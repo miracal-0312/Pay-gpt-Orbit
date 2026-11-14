@@ -47,11 +47,11 @@ test('preparing cannot become prepared without a ready owned card or skip direct
     assert.equal((await f.change('submitting')).applied,true);
 });
 
-test('preparing permits original issue linkage and funding while their intent states remain prepared',async()=>{
+test('historical issue linkage and original funding must finish before preparation can advance',async()=>{
     const f=await setup({card:true});
-    const issue=await f.methods.createIssue({issue_key:'issue-original',job_key:f.task.jobKey,plan_type:'plus',product_code:'p1',
+    const issue=await f.seedHistoricalIssue({issue_key:'issue-original',job_key:f.task.jobKey,plan_type:'plus',product_code:'p1',
         amount:'20.00',credential_hash:f.credential,request_body:'{"product_code":"p1","amount":"20.00","quantity":1}'});
-    await f.methods.attachIssue(f.task.jobKey,issue.issue_key);
+    f.db.tasks.find(row => row.job_key === f.task.jobKey).orbitcard_issue_key = issue.issue_key;
     assert.equal(f.db.issues[0].state,'prepared');
     assert.equal((await f.change('prepared')).applied,false);
     await f.methods.updateIssue(issue.issue_key,{state:'ready',card_id:42});

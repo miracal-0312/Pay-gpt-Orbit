@@ -131,7 +131,7 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
             const snapshotNow = Date.now();
             const relevant = saved.filter(row => readable.some(card => card.card_id === Number(row.card_id)
                 && !['DELETED','CANCELLED','FROZEN'].includes(card.provider_status))
-                && poolPolicy.eligible(row, snapshotNow, poolPolicy.authorizationLimit(cfg)) && !row.active_job);
+                && poolPolicy.eligible(row, poolPolicy.authorizationLimit(cfg)) && !row.active_job);
             const detailed = await cards.cardDetailsInBatches(cfg, relevant.map(row => Number(row.card_id)), { allowPartial: true });
             if (relevant.length && !detailed.length) throw new CardPreparationError('批量卡片详情全部缺失，停止选卡，请联系售后');
             for (const card of detailed) {
@@ -150,7 +150,7 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
         }
         async function selection() {
             const snapshot = await selectionSnapshot();
-            const { saved, listed: readable, products } = snapshot;
+            const { saved, listed: readable } = snapshot;
             const decision = decideCards({ ...snapshot, jobKey: traceId, planType: plan,
                 maxAuthorizations: poolPolicy.authorizationLimit(cfg),
                 priceFor: (_product, type) => planPrice(cfg, type) });
@@ -167,9 +167,8 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
             if (cfg.enabled) {
                 const retiring = saved.filter(row => !row.active_job && Number(row.authorization_count) >= poolPolicy.authorizationLimit(cfg)
                     && readable.some(card => card.card_id === Number(row.card_id)));
-                result.selection.maintenance = { capacity_limit:null, auto_refill:false, current_size:readable.length,
-                    retire_card_ids:retiring.map(row => Number(row.card_id)), open_count:0,
-                    opening_amount:'0.00', funding_amount:money.cents(funding),
+                result.selection.maintenance = { current_size:readable.length,
+                    retire_card_ids:retiring.map(row => Number(row.card_id)), funding_amount:money.cents(funding),
                     required_balance:money.cents(required), fees_included:false, snapshot_only:true };
             }
             if (available < required) {
@@ -194,7 +193,7 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
         const actions = stage === 'full' ? ['plans','balance','regions','cards']
             : ['cards','concurrency'].includes(stage) ? ['plans','balance',stage] : [stage];
         const handlers = { plans, balance, regions, cards: selection, concurrency };
-        const titles = { plans: '核对卡台已开放套餐', balance: '读取账户可用余额', regions: '核对本套餐默认支付地区', cards: '读取实时卡片和成功消费授权记录，模拟选卡、补款或开卡决策',
+        const titles = { plans: '核对卡台已开放套餐', balance: '读取账户可用余额', regions: '核对本套餐默认支付地区', cards: '读取实时卡片和成功消费授权记录，模拟选卡与补款决策',
             concurrency: `读取实时快照，模拟 ${concurrentTasks} 个任务同时进入选卡` };
         for (const name of actions) if (!await step(name, titles[name], handlers[name])) break;
         return finish();

@@ -33,13 +33,12 @@ test('local refresh labels cached balances and does not show green live ACTIVE',
     assert.match(f.$('cardSyncState').textContent,/不会调用平台/);
 });
 
-test('historical cooldown fields do not mark a card as unavailable in the UI',async()=>{
+test('an idle card below its configured authorization limit remains available',async()=>{
     const f=setup(()=>{});
-    f.card.cooling_down=true;
-    f.card.reuse_after_ms=300000;
     f.card.authorization_count=2;
     await f.api.loadCards();
-    assert.doesNotMatch(f.$('cardRows').innerHTML,/冷却|300000|暂不分配/);
+    assert.match(f.$('cardRows').innerHTML,/空闲/);
+    assert.doesNotMatch(f.$('cardRows').innerHTML,/暂不分配|停止分配/);
     assert.match(f.$('cardRows').innerHTML,/平台成功消费授权自动累计/);
 });
 
@@ -122,6 +121,18 @@ test('manual usage editor is removed',()=>{
     const source=fs.readFileSync(path.join(__dirname,'../public/admin.js'),'utf8');
     assert.doesNotMatch(fs.readFileSync(path.join(__dirname,'../public/admin.html'),'utf8'),/cardHistoryState/);
     assert.doesNotMatch(source,/async function saveCardUsage|data-bind-card|data-update-card-usage|cardHistoryState|data-open-card-history|data-manage-card-history/);
+});
+
+test('manual card application preview displays the proposed parameters without submitting an application',async()=>{
+    const source=fs.readFileSync(path.join(__dirname,'../public/admin.js'),'utf8');
+    const line=source.split(/\r?\n/).find(line=>line.startsWith("$('loadProducts').onclick"));
+    const nodes={loadProducts:{},products:{textContent:''}},calls=[];
+    const data={manual_application:{product_code:'shared',quantity:1,amount:'20.00'},
+        application_error:null,products:[{product_code:'shared'}]};
+    new Function('$','perform','request',line)(id=>nodes[id],action=>action(),async url=>{calls.push(url);return data;});
+    await nodes.loadProducts.onclick();
+    assert.deepEqual(calls,['/api/admin/orbitcard/products']);
+    assert.deepEqual(JSON.parse(nodes.products.textContent),data);
 });
 
 test('shared-pool card application submits no plan and refreshes original records after an uncertain result',async()=>{

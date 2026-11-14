@@ -21,6 +21,16 @@ const cfg={enabled:true,base_url:'https://orbitcard.test',api_key:'fixture',
     orbitcard_max_authorizations:7,
     orbitcard_plan_prices:{plus:'20.00',pro100:'100.00',pro200:'200.00',pro500:'500.00'}};
 
+test('manual application persistence cannot create an order-bound automatic opening intent',async()=>{
+    const f=fixture(),task=await f.claim(),methods=f.store.cardMethods(f.base);
+    const issue=await methods.createManualIssue({issue_key:'manual-only',job_key:task.jobKey,plan_type:'plus',
+        product_code:'p1',amount:'20.00',credential_hash:'manual-credential',
+        request_body:JSON.stringify({product_code:'p1',amount:'20.00',quantity:1})});
+    assert.equal(issue.job_key,null);assert.equal(f.db.issues[0].job_key,null);
+    assert.equal(f.db.tasks[0].orbitcard_issue_key,undefined);
+    assert.equal(await methods.issueForJob(task.jobKey),null);
+});
+
 test('card is serialized and seven provider authorizations exhaust it without counting local results twice',async () => {
     const f=fixture(); await f.addCard(); const m=f.store.cardMethods(f.base);
     for (let n=0;n<7;n++) {
@@ -240,7 +250,7 @@ test('original funded and opened cards cannot resume after removal even when det
         f.setCards([{...card,status:'ACTIVE',balance:kind==='funded'?5:50}]);
         if(kind==='opened') {
             const methods=f.store.cardMethods(cfg.base_url);
-            await methods.createIssue({issue_key:'removed-ready',job_key:task.jobKey,plan_type:'plus',product_code:'p1',amount:'20.00',
+            await f.seedHistoricalIssue({issue_key:'removed-ready',job_key:task.jobKey,plan_type:'plus',product_code:'p1',amount:'20.00',
                 credential_hash:require('node:crypto').createHash('sha256').update(cfg.api_key).digest('hex'),request_body:'{}'});
             await methods.completeIssue({issue_key:'removed-ready'},card);
         }
@@ -348,7 +358,7 @@ test('plan-free manual opening resumes one historical Pro intent with its origin
         }
     });
     const methods=f.store.cardMethods(f.base);
-    await methods.createIssue({issue_key:'card-historical-manual',job_key:null,plan_type:'pro200',product_code:'p1',amount:'20.00',
+    await f.seedHistoricalIssue({issue_key:'card-historical-manual',job_key:null,plan_type:'pro200',product_code:'p1',amount:'20.00',
         credential_hash:require('node:crypto').createHash('sha256').update(cfg.api_key).digest('hex'),request_body:JSON.stringify(original)});
     await methods.updateIssue('card-historical-manual',{state:'pending',order_no:'OPEN-HISTORICAL',retry_at:0});
     assert.equal((await f.service.apply(cfg)).card_id,77);
@@ -360,7 +370,7 @@ test('plan-free manual opening resumes one historical Pro intent with its origin
 test('plan-free manual opening never creates a new card around owned or multiple pending intents',async () => {
     for (const plans of [[['pro200','another-order']],[['plus',null],['pro500',null]]]) {
         const f=serviceFixture(),methods=f.store.cardMethods(f.base);
-        for (const [plan,job] of plans) await methods.createIssue({issue_key:`pending-${plan}`,job_key:job,plan_type:plan,
+        for (const [plan,job] of plans) await f.seedHistoricalIssue({issue_key:`pending-${plan}`,job_key:job,plan_type:plan,
             product_code:'p1',amount:'20.00',credential_hash:'fixture',request_body:JSON.stringify({product_code:'p1',amount:'20.00',quantity:1})});
         await assert.rejects(f.service.apply(cfg),require('../orbitcard-card-policy').CardPreparationError);
         assert.equal(f.db.issues.length,plans.length);
@@ -374,7 +384,7 @@ test('admin product query previews generated opening fields without writing an o
     register(app,{store:{getGptApiConfig:async()=>cfg},cardService:{},requireSecondaryAuth:(req,res,next)=>next(),audit(){}});
     const server=app.listen(0,'127.0.0.1');await once(server,'listening');t.after(async()=>{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));});
     const data=await (await fetch(`http://127.0.0.1:${server.address().port}/api/admin/orbitcard/products`)).json();
-    assert.deepEqual(data.automatic_application,{product_code:'p1',amount:'20.00',quantity:1});assert.equal(data.application_error,null);
+    assert.deepEqual(data.manual_application,{product_code:'p1',amount:'20.00',quantity:1});assert.equal(data.application_error,null);
     assert.ok(data.products.every(product=>!Object.hasOwn(product,'prices') && !Object.hasOwn(product,'plans')));
     assert.deepEqual(f.calls.map(c=>c.operation),['getProductCode']);assert.ok(!JSON.stringify(data).includes('api_key'));
 });
@@ -476,13 +486,12 @@ test('card list still accepts legacy arrays and consistent pagination without to
     assert.deepEqual(paged.calls.map(call=>call.body.page),[1,2]);
 });
 
-test('missing configured prices cannot fall back to product prices, another plan or retired manual budgets',() => {
+test('manual opening uses the fixed deposit independently of membership price metadata',() => {
     const f=serviceFixture();
     const rows=f.api.normalizeProducts({list:[{...product,gpt_plan_prices:[{id:'pro',price:'100.00',currency:'USD'}]}]});
     const partial={...cfg,orbitcard_plan_prices:{plus:'20.00'}};
-    assert.equal(f.api.chooseProduct(rows,'plus',partial).amount,'20.00');
-    assert.throws(() => f.api.chooseProduct(rows,'pro100',partial));
-    assert.throws(() => f.api.chooseProduct(rows,'pro100',{...partial,orbitcard_price_pro100:'100'}));
+    assert.equal(f.api.chooseOpeningProduct(rows,partial).amount,'20.00');
+    assert.equal(f.api.chooseOpeningProduct(rows,{...cfg,orbitcard_plan_prices:{}}).amount,'20.00');
     assert.equal(Object.hasOwn(rows[0],'prices'),false);
 });
 
@@ -493,9 +502,9 @@ test('configured USD payment prices remain decimal strings and do not come from 
     const configured={...cfg,orbitcard_plan_prices:{plus:'15.54000001',pro100:'100.50',pro200:'200.00',pro500:'500.00'}};
     const units=require('../orbitcard-money').units;
     for(const plan of ['plus','pro100','pro200','pro500']) {
-        const selected=f.api.chooseProduct(rows,plan,configured);
-        assert.equal(typeof selected.price,'string');
-        assert.equal(units(selected.price),units(configured.orbitcard_plan_prices[plan]));
+        const price=require('../orbitcard-config').planPrice(configured,plan);
+        assert.equal(typeof price,'string');
+        assert.equal(units(price),units(configured.orbitcard_plan_prices[plan]));
     }
     assert.equal(rows[0].min_retained_balance,'1.00000001');
     assert.equal(Object.hasOwn(rows[0],'prices'),false);
@@ -607,7 +616,7 @@ test('only available account funds satisfy an actual topup deficit; total and fr
 test('legacy balance-blocked tasks still release for a fresh Session once account funds recover',async () => {
     const f=serviceFixture(),task=await f.claim();f.setAccount(0);
     await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'));
-    await f.store.cardMethods(f.base).blockBalance(task.jobKey,'20.00000000','legacy balance wait');
+    Object.assign(f.db.tasks[0],{orbitcard_state:'balance_blocked',status:'failed',orbitcard_required_balance:'20.00000000',message:'legacy balance wait'});
     assert.equal(f.db.tasks[0].orbitcard_state,'balance_blocked');
     assert.equal(f.db.tasks[0].orbitcard_required_balance,'20.00000000');
     const preparedCalls=f.calls.length;
@@ -688,7 +697,7 @@ test('account shortage raises a preparation error without writing a balance hold
 
 test('fixed 20 USD issue never silently raises the amount to satisfy a higher product minimum',() => {
     const f=serviceFixture(),rows=f.api.normalizeProducts({list:[{...product,min_initial_amount:25}]});
-    assert.throws(() => f.api.chooseProduct(rows,'plus',cfg),/20 USD/);
+    assert.throws(() => f.api.chooseOpeningProduct(rows,cfg),/20 USD/);
 });
 
 test('unavailable cards cannot trigger automatic opening',async()=>{
@@ -1146,7 +1155,7 @@ test('a transient failure reading preparation records cannot release CDK or the 
 
 test('prepared issuance recovery does not send a remote write after a crash',async () => {
     const f=serviceFixture();
-    await f.store.cardMethods(f.base).createIssue({issue_key:'card-original',plan_type:'plus',product_code:'p1',amount:'85.00',credential_hash:'irrelevant',request_body:'{}'});
+    await f.seedHistoricalIssue({issue_key:'card-original',plan_type:'plus',product_code:'p1',amount:'85.00',credential_hash:'irrelevant',request_body:'{}'});
     await f.service.recover(cfg); assert.equal(f.db.issues[0].state,'failed'); assert.equal(f.calls.length,0);
 });
 
@@ -1439,7 +1448,7 @@ test('a historical pending application without a card ID requires reconciliation
 test('recovery cannot resend historical automatic opening without an acknowledged platform order',async()=>{
     for(const state of ['submitting','pending','unknown']) {
         const f=serviceFixture(),task=await f.claim(),methods=f.store.cardMethods(cfg.base_url);
-        await methods.createIssue({issue_key:'historical-unacknowledged',job_key:task.jobKey,plan_type:'plus',product_code:'p1',amount:'20.00',
+        await f.seedHistoricalIssue({issue_key:'historical-unacknowledged',job_key:task.jobKey,plan_type:'plus',product_code:'p1',amount:'20.00',
             credential_hash:crypto.createHash('sha256').update(cfg.api_key).digest('hex'),
             request_body:JSON.stringify({product_code:'p1',amount:'20.00',quantity:1})});
         await methods.updateIssue('historical-unacknowledged',{state,retry_at:0});
@@ -1473,7 +1482,7 @@ test('a ready original opening resumes its own card without applying account thr
     await assert.rejects(f.service.allocate({...cfg,orbitcard_max_initial_amount:'1'},task.jobKey,'plus'),/自动开卡已禁用/);
     const card=await f.addCard(42);f.setCards([{...card,status:'ACTIVE',balance:50}]);
     const methods=f.store.cardMethods(cfg.base_url);
-    await methods.createIssue({issue_key:'original-ready',job_key:task.jobKey,plan_type:'plus',product_code:'p1',amount:'20.00',
+    await f.seedHistoricalIssue({issue_key:'original-ready',job_key:task.jobKey,plan_type:'plus',product_code:'p1',amount:'20.00',
         credential_hash:require('node:crypto').createHash('sha256').update(cfg.api_key).digest('hex'),
         request_body:JSON.stringify({product_code:'p1',amount:'20.00',quantity:1})});
     await methods.completeIssue({issue_key:'original-ready'},card);f.setAccount(0);

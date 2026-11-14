@@ -22,7 +22,7 @@ function setup(fetchResult) {
 }
 
 function simulation() {
-    return { task_count: 10, waiting_limit: 1, summary: { assigned: 1, pay: 1, fund: 0, waiting: 1, blocked: 8, opening: 0, duplicate_assignments: 0 },
+    return { task_count: 10, waiting_limit: 1, summary: { assigned: 1, pay: 1, fund: 0, waiting: 1, blocked: 8, duplicate_assignments: 0 },
         initial_contention: { card_id: 42, tasks: 10 }, budget: { available: '100.00', reserved: '0.00', remaining: '100.00' },
         tasks: [{ task: 1, initial_card_id: 42, card_id: 42, action: 'pay', funding_amount: '0.00', reason: 'reserved_in_simulation' },
             { task: 2, initial_card_id: 42, card_id: null, action: 'wait', funding_amount: '0.00', reason: 'busy' },

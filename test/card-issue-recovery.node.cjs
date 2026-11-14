@@ -21,9 +21,9 @@ async function setup({ state = 'pending', orderNo = 'OPEN-ORIGINAL', response, a
     const f = fixture({ now: () => clock }), task = await f.claim(), calls = [];
     const methods = f.store.cardMethods(f.base);
     const body = { product_code: 'p1', amount: '20.00', quantity: 1 };
-    await methods.createIssue({ issue_key: 'original-key', job_key: task.jobKey, plan_type: 'plus', product_code: 'p1',
+    await f.seedHistoricalIssue({ issue_key: 'original-key', job_key: task.jobKey, plan_type: 'plus', product_code: 'p1',
         amount: '20.00', credential_hash: crypto.createHash('sha256').update(cfg.api_key).digest('hex'), request_body: JSON.stringify(body) });
-    if (attach) await methods.attachIssue(task.jobKey, 'original-key');
+    if (attach) f.db.tasks.find(row => row.job_key === task.jobKey).orbitcard_issue_key = 'original-key';
     await methods.updateIssue('original-key', { state, order_no: orderNo });
     Object.assign(f.db.tasks[0], { status: 'manual', orbitcard_state: 'card_pending' });
     const api = { request: async (config, operation, requestBody, key) => {

@@ -65,3 +65,21 @@ test('admin configuration returns and saves the authorization limit using the sa
     assert.equal((await invoke('POST',{orbitcard_max_authorizations:-2})).statusCode,400);
     assert.equal((await invoke('GET')).body.config.orbitcard_max_authorizations,9);
 });
+
+test('card snapshots expose the configured limit without obsolete cooldown fields from an older database', async () => {
+    const {core}=database(), routes=new Map();
+    await core.saveGptApiConfig({orbitcard_max_authorizations:9});
+    const oldCard={card_id:42,authorization_count:3,provider_status:'ACTIVE',reuse_after_ms:Date.now()+300000};
+    const app={get:(url,...handlers)=>routes.set(url,handlers.at(-1)),post(){}};
+    require('../orbitcard-card-http')(app,{store:{...core,cardMethods:()=>({
+        listCards:async()=>[oldCard],listIssues:async()=>[],listFundings:async()=>[]
+    })},cardService:{},requireSecondaryAuth(){}});
+    const res={set(){},json(value){this.body=value;},status(){return this;}};
+    await routes.get('/api/admin/orbitcard/cards')({},res);
+    assert.equal(res.body.success,true);
+    assert.equal(res.body.cards[0].authorization_limit,9);
+    assert.equal(res.body.cards[0].authorization_count,3);
+    assert.equal(Object.hasOwn(res.body.cards[0],'cooling_down'),false);
+    assert.equal(Object.hasOwn(res.body.cards[0],'reuse_after_ms'),false);
+    assert.equal(oldCard.reuse_after_ms > Date.now(),true);
+});

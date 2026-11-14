@@ -65,7 +65,7 @@ test('concurrent preflight assigns distinct cards and admits just one waiting ta
     assert.equal(result.passed, true); assert.equal(result.ready, false);
     assert.deepEqual(result.steps.map(row => row.step), ['config', 'plans', 'balance', 'concurrency']);
     const sim = result.result.concurrency;
-    assert.deepEqual(sim.summary, { assigned: 3, pay: 1, fund: 2, waiting: 1, blocked: 6, opening: 0, duplicate_assignments: 0 });
+    assert.deepEqual(sim.summary, { assigned: 3, pay: 1, fund: 2, waiting: 1, blocked: 6, duplicate_assignments: 0 });
     assert.equal(sim.waiting_limit, 1);
     assert.ok(sim.tasks.slice(4).every(row => row.reason === 'queue_full'));
     assert.deepEqual(sim.tasks.slice(0, 3).map(row => row.card_id), [42, 44, 43]);
@@ -118,7 +118,7 @@ test('concurrent selection shares the funding budget instead of spending the sam
 test('concurrent empty-pool simulation blocks all tasks without planning any opening', async () => {
     const f=managedPool(0);
     const sim=(await f.service.preflight({stage:'concurrency',plan_type:'plus',concurrent_tasks:10})).result.concurrency;
-    assert.equal(sim.summary.opening,0);assert.equal(sim.summary.blocked,10);assert.equal(sim.summary.assigned,0);
+    assert.equal(sim.summary.blocked,10);assert.equal(sim.summary.assigned,0);
     assert.equal(sim.budget.reserved,'0.00000000');
     assert.ok(sim.tasks.every(row=>row.reason==='automatic_opening_disabled'&&row.card_id===null));assert.deepEqual(f.writes,[]);
 });
@@ -214,9 +214,8 @@ test('enabled preflight budgets only the selected deficit regardless of pool siz
         const enough=await f.service.preflight({stage:'cards',plan_type:'plus'});
         assert.equal(enough.passed,true);
         const maintenance=enough.result.selection.maintenance;
-        assert.equal(maintenance.capacity_limit,null);assert.equal(maintenance.auto_refill,false);
-        assert.equal(maintenance.current_size,count);assert.equal(maintenance.open_count,0);
-        assert.equal(maintenance.opening_amount,'0.00');assert.equal(maintenance.required_balance,required);
+        assert.deepEqual(maintenance,{current_size:count,retire_card_ids:[],funding_amount:required,
+            required_balance:required,fees_included:false,snapshot_only:true});
         if(Number(required)>0) {
             f.state.available='13.99';
             const short=await f.service.preflight({stage:'cards',plan_type:'plus'});
@@ -232,7 +231,6 @@ test('enabled preflight requires no replacement funds when another card can pay'
     const ready=await f.service.preflight({stage:'cards',plan_type:'plus'});
     assert.equal(ready.passed,true);assert.equal(ready.result.selection.action,'pay');
     assert.deepEqual(ready.result.selection.maintenance.retire_card_ids,[42]);
-    assert.equal(ready.result.selection.maintenance.open_count,0);
     assert.equal(ready.result.selection.maintenance.required_balance,'0.00');
     assert.equal(ready.result.selection.card_id,43);assert.deepEqual(f.state.rows,before);assert.deepEqual(f.writes,[]);
 });
@@ -266,7 +264,6 @@ test('preflight confirms an unknown deletion readonly before skipping its unavai
     const result=await f.service.preflight({stage:'cards',plan_type:'plus'});
     assert.equal(result.passed,true);assert.equal(result.result.selection.card_id,43);
     assert.equal(result.result.selection.maintenance.current_size,4);
-    assert.equal(result.result.selection.maintenance.open_count,0);
     assert.equal(result.result.selection.maintenance.required_balance,'0.00');
     assert.ok(f.calls.some(([op,,body])=>op==='cardDetail'&&body?.card_id===42));
     assert.ok(!f.calls.some(([op,,body])=>op==='cardTransaction'&&body.card_id===42));

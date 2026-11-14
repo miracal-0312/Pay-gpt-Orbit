@@ -642,7 +642,7 @@ $('refreshCardIds').onclick = () => perform(loadCardIdPreview);
 $('loadCards').onclick = () => perform(loadCards);
 $('loadTransactions').onclick = () => perform(loadCardTransactions);
 $('syncCards').onclick = () => perform(synchronizeCards);
-$('loadProducts').onclick = () => perform(async () => { const data = await request('/api/admin/orbitcard/products'); $('products').textContent = JSON.stringify({ automatic_application:data.automatic_application, application_error:data.application_error, products:data.products }, null, 2); });
+$('loadProducts').onclick = () => perform(async () => { const data = await request('/api/admin/orbitcard/products'); $('products').textContent = JSON.stringify({ manual_application:data.manual_application, application_error:data.application_error, products:data.products }, null, 2); });
 $('refreshIssues').onclick = () => perform(async () => { notice((await request('/api/admin/orbitcard/issues/refresh', {})).message, 'success'); await loadCards(); });
 form('applyCardForm', async () => { try { notice((await request('/api/admin/orbitcard/cards/apply', {})).message, 'success'); } finally { await loadCards(); } });
 form('configForm', async () => { const result = await request('/api/admin/config', { max_concurrent_activations: Number($('maxConcurrent').value), maintenance_mode: $('maintenance').checked }); notice(result.message, 'success'); });

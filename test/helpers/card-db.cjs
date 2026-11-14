@@ -72,12 +72,6 @@ module.exports = function fixture({ enqueueRedemption, now: externalNow } = {}) 
             card.authorization_pending_count = Math.max(card.authorization_pending_count || 0, p[0]);
             return {affectedRows:1};
         }
-        if (q.startsWith('UPDATE orbitcard_managed_cards SET reuse_after_ms=')) {
-            const card = db.cards.find(c => c.scope === p[1] && c.card_id === Number(p[2]));
-            if (!card) return {affectedRows:0};
-            card.reuse_after_ms = Math.max(card.reuse_after_ms || 0, p[0]);
-            return {affectedRows:1};
-        }
         if (q.startsWith('UPDATE orbitcard_managed_cards SET retirement_key=')) {
             const card = db.cards.find(c => c.scope === p[1] && c.card_id === p[2]);
             if (!card || card.active_job || card.retirement_key) return {affectedRows:0};
@@ -101,9 +95,6 @@ module.exports = function fixture({ enqueueRedemption, now: externalNow } = {}) 
         } else if(q.startsWith('UPDATE orbitcard_card_fundings SET state=')) {
             const funding=db.fundings.find(f => f.funding_key===p[6] && f.scope===p[7]);
             if(!['ready','failed'].includes(funding.state)) Object.assign(funding,{state:p[0],order_no:p[1] || funding.order_no,provider_status:p[2] ?? funding.provider_status,fee_snapshot:p[3] ?? funding.fee_snapshot,retry_at:Math.max(Number(funding.retry_at || 0),p[4] || 0),message:p[5]});
-        } else if(q.startsWith("UPDATE task_logs SET orbitcard_state='balance_blocked'")) {
-            const task=db.tasks.find(t => t.job_key===p[2]);if(task?.orbitcard_state!=='prepared') return {affectedRows:0};
-            Object.assign(task,{orbitcard_state:'balance_blocked',status:'failed',orbitcard_required_balance:p[0],message:p[1]});
         } else if (q.startsWith('INSERT INTO orbitcard_managed_cards')) {
             let card = db.cards.find(c => c.scope === p[0] && c.card_id === p[1]);
             if (!card) { card = { scope:p[0],card_id:p[1],authorization_count:null,authorizations_checked_at:null,authorization_pending_count:null,retirement_key:null,retirement_state:null,active_job:null,source:'imported' }; db.cards.push(card); }
@@ -111,7 +102,8 @@ module.exports = function fixture({ enqueueRedemption, now: externalNow } = {}) 
         } else if (q.startsWith('INSERT INTO orbitcard_card_uses')) {
             assert.ok(!db.uses.some(u => u.job_key === p[0])); db.uses.push({ job_key:p[0],scope:p[1],card_id:p[2],plan_type:p[3],state:'reserved',authorization_baseline:p[4] });
         } else if (q.startsWith('INSERT INTO orbitcard_card_issues')) {
-            assert.ok(!db.issues.some(i => i.issue_key === p[0])); db.issues.push({ issue_key:p[0],scope:p[1],job_key:p[2],plan_type:p[3],product_code:p[4],amount:p[5],credential_hash:p[6],request_body:p[7],state:'prepared',retry_at:0 });
+            assert.match(q,/VALUES \(\?,\?,NULL,/);
+            assert.ok(!db.issues.some(i => i.issue_key === p[0])); db.issues.push({ issue_key:p[0],scope:p[1],job_key:null,plan_type:p[2],product_code:p[3],amount:p[4],credential_hash:p[5],request_body:p[6],state:'prepared',retry_at:0 });
         } else if (q.startsWith('UPDATE orbitcard_managed_cards SET active_job=NULL')) {
             if (db.failRelease) throw new Error('injected card release failure');
             const card=db.cards.find(c=>c.scope===p[0] && c.card_id===p[1]);
@@ -127,8 +119,6 @@ module.exports = function fixture({ enqueueRedemption, now: externalNow } = {}) 
         } else if (q.startsWith('UPDATE orbitcard_card_issues SET state=')) {
             const issue=db.issues.find(i => i.issue_key === p[8] && i.scope === p[9]);
             if (!['ready','failed'].includes(issue.state)) Object.assign(issue,{state:p[0],order_no:p[1] || issue.order_no,card_id:p[2] || issue.card_id,message:p[3],provider_status:p[4] ?? issue.provider_status,completed:p[5] ?? issue.completed,fee_snapshot:p[6] ?? issue.fee_snapshot,retry_at:p[7] ?? issue.retry_at});
-        } else if (q.startsWith('UPDATE task_logs SET orbitcard_issue_key')) {
-            const task=db.tasks.find(t => t.job_key===p[1]); if(!['preparing','prepared'].includes(task?.orbitcard_state) || (task.orbitcard_issue_key && task.orbitcard_issue_key!==p[0])) return {affectedRows:0};task.orbitcard_issue_key=p[0];
         } else if (q.startsWith('UPDATE task_logs SET orbitcard_card_id')) {
             db.tasks.find(t => t.job_key === p[1]).orbitcard_card_id=p[0];
         } else if (q.startsWith('UPDATE task_logs SET orbitcard_client_order_no')) {
@@ -156,7 +146,7 @@ module.exports = function fixture({ enqueueRedemption, now: externalNow } = {}) 
         else throw new Error(`Unexpected test execute: ${q}`);
         return { affectedRows:1 };
     }
-    const cardStore=cardFactory({runQuery,runExecute,withTransaction,now,getPool() { throw new Error('Unexpected real connection'); }});
+    const cardStore=cardFactory({runQuery,runExecute,withTransaction,getPool() { throw new Error('Unexpected real connection'); }});
     const cdkStore=cdkFactory({runQuery,runExecute,withTransaction,settleCardUse:cardStore.settleCardUse,enqueueRedemption,
         createTaskLog: async input => { const task={ id:++sequence,job_key:`job-${sequence}`,cdk_code:input.cdkCode,status:'running',progress:3 }; db.tasks.push(task); return {jobKey:task.job_key}; } });
     const automation=require('../../payment-automation')({runQuery});
@@ -178,7 +168,13 @@ module.exports = function fixture({ enqueueRedemption, now: externalNow } = {}) 
         if(confirmed) await methods.saveAuthorizations(id,Array.from({length:used},(_,i)=>String(i)));
         return card;
     }
+    function seedHistoricalIssue(issue) {
+        assert.ok(!db.issues.some(row => row.issue_key === issue.issue_key));
+        const row = { scope: cardScope(BASE), job_key: null, state: 'prepared', retry_at: 0, ...issue };
+        db.issues.push(row);
+        return structuredClone(row);
+    }
     const settle=(task,state) => cdkStore.settleOrbitcardTask(task.jobKey,{status:state==='success'?'success':['failed','rejected'].includes(state)?'failed':state==='manual'?'manual':'running',orbitcardState:state,progress:90,message:state,
         ...(state==='submitting'?{expectedState:'prepared',expectedClientOrderNo:task.orbitcardClientOrderNo}:{})});
-    return {db,store,claim,addCard,settle,now,advance:(ms=300000)=>{clock+=ms;},base:BASE,scope:cardScope(BASE)};
+    return {db,store,claim,addCard,seedHistoricalIssue,settle,now,advance:(ms=300000)=>{clock+=ms;},base:BASE,scope:cardScope(BASE)};
 };

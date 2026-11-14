@@ -4,7 +4,7 @@ const poolPolicy = require('./orbitcard-pool');
 const { cardScope, planFor, FUNDING_POLL_MS } = require('./orbitcard-card-policy');
 const { MAX_PAYMENT_ATTEMPTS, confirmedFailure, manualHistory } = require('./payment-retry-policy');
 
-module.exports = function createManualStore({ runQuery, runExecute, withTransaction, enqueueRedemption = async () => {}, now = Date.now }) {
+module.exports = function createManualStore({ runQuery, runExecute, withTransaction, enqueueRedemption = async () => {} }) {
     async function getManualOrder(requestId, options) {
         const rows = await runQuery('SELECT * FROM orbitcard_admin_orders WHERE request_id = ? LIMIT 1', [requestId], options);
         return rows[0] || null;
@@ -66,7 +66,7 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
         });
     }
 
-    async function reserveManualCard(requestId, cardId, jobKey, planType, limit = poolPolicy.MAX_USES) {
+    async function reserveManualCard(requestId, cardId, jobKey, planType, limit = poolPolicy.DEFAULT_MAX_AUTHORIZATIONS) {
         limit = poolPolicy.validateLimit(limit);
         return withTransaction(async connection => {
             const options = { connection };
@@ -81,22 +81,14 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
             const [card] = await runQuery('SELECT * FROM orbitcard_managed_cards WHERE scope = ? AND card_id = ? FOR UPDATE',
                 [order.scope, cardId], options);
             if (!card || card.provider_status !== 'ACTIVE' || card.currency !== 'USD') return null;
-            if (Number(order.card_id) === Number(cardId) && card.active_job === jobKey) return poolPolicy.eligible(card, now(), limit) ? card : null;
-            if (card.active_job || !poolPolicy.eligible(card, now(), limit)) return null;
+            if (Number(order.card_id) === Number(cardId) && card.active_job === jobKey) return poolPolicy.eligible(card, limit) ? card : null;
+            if (card.active_job || !poolPolicy.eligible(card, limit)) return null;
             await runExecute('UPDATE orbitcard_managed_cards SET active_job = ? WHERE scope = ? AND card_id = ?',
                 [jobKey, order.scope, cardId], options);
             await runExecute('UPDATE orbitcard_admin_orders SET card_id = ?, authorization_baseline = ?, message = ? WHERE request_id = ? AND state = \'preparing\'',
                 [cardId, Number(card.authorization_count), '支付卡已预占，正在核对或补足卡内资金', requestId], options);
             return { ...card, active_job: jobKey };
         });
-    }
-
-    async function attachManualIssue(requestId, jobKey, issueKey) {
-        const result = await runExecute(`UPDATE orbitcard_admin_orders SET issue_key = ?, message = ?
-            WHERE request_id = ? AND client_order_no = ? AND state = 'preparing'
-            AND (issue_key IS NULL OR issue_key = ?)`,
-        [issueKey, '正在确认原开卡申请', requestId, jobKey, issueKey]);
-        if (result.affectedRows !== 1) throw new Error('管理员订单已变更，不能关联开卡申请');
     }
 
     async function failManualPreparation(requestId, jobKey, message) {
@@ -142,10 +134,6 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
                 ['support_locked', '换卡重试准备失败，CDK 保持锁定；' + String(message || '').slice(0, 180), requestId], options);
             return getManualOrder(requestId, options);
         });
-    }
-
-    async function blockManualBalance(requestId, jobKey, _required, message) {
-        await failManualPreparation(requestId, jobKey, message);
     }
 
     async function pauseManualPreparation(requestId, jobKey, message) {
@@ -362,7 +350,7 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
     }
 
     return { getManualOrder, listManualOrders, listRecoverableManualOrders, noteManualQueryAttempt,
-        prepareManualOrder, reserveManualCard, attachManualIssue, blockManualBalance,
+        prepareManualOrder, reserveManualCard,
         failManualPreparation, pauseManualPreparation, markManualPrepared, noteManualWaiting, waitManualFunding, reviewManualFunding, releaseManualFunding,
         claimManualSubmission, abandonPreparedManualOrder, settleManualOrder, startManualRetry };
 };

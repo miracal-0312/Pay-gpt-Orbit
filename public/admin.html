@@ -38,7 +38,7 @@
 <form id="manualForm" class="stack manual-form">
 <p class="config-note">人工交付会真实扣款，成功后核销 CDK。无需 CDK 的测试请前往 <button type="button" class="secondary" data-open-diagnostic="payment">支付预检与测试</button>。</p>
 <div class="manual-grid"><label>开通套餐<select id="manualPlan" required><option value="">请先读取卡台套餐</option></select></label><label>原请求编号（仅继续准备时填写）<input id="manualRetryId" placeholder="首次提交自动生成；恢复原单时填写原编号" autocomplete="off"></label></div>
-<div id="manualCdkControls" class="manual-cdk-controls"><label>交付 CDK<input id="manualCdk" required maxlength="32" autocomplete="off" placeholder="输入匹配此套餐的未使用 CDK"></label><small>请在 CDK 管理页生成同套餐的自助 CDK。确认开通成功后标记为已核销；失败换卡期间保留占用，重试耗尽后进入人工处理。</small></div>
+<div class="manual-cdk-controls"><label>交付 CDK<input id="manualCdk" required maxlength="32" autocomplete="off" placeholder="输入匹配此套餐的未使用 CDK"></label><small>请在 CDK 管理页生成同套餐的自助 CDK。确认开通成功后标记为已核销；失败换卡期间保留占用，重试耗尽后进入人工处理。</small></div>
 <p id="manualCatalogState" class="muted" role="status">打开本页后读取卡台套餐；支付前才实时读取卡片。</p>
 <label>Session JSON 文件（可选）<input id="manualSessionFile" type="file" accept=".json,application/json,text/plain"></label>
 <label>目标账号完整 Session JSON<textarea id="manualSession" spellcheck="false" autocomplete="off" placeholder="上传 JSON 文件后自动填入，也可直接粘贴完整 Session JSON" required></textarea></label>

@@ -41,7 +41,7 @@ async function setup(counts=[0,0,0,0,0],overrides={}) {
     return {...f,service,calls,remote,ledger,advance(ms=120000){clock+=ms;}};
 }
 test('only confirmed authorization counts below the default four are eligible',()=>{
-    assert.equal(policy.MAX_USES,4);
+    assert.equal(policy.DEFAULT_MAX_AUTHORIZATIONS,4);
     assert.equal(policy.eligible({authorization_count:3}),true);
     for(const authorization_count of [4,7,8,null,undefined,-1,1.5,NaN,Infinity])
         assert.equal(policy.eligible({authorization_count}),false);
@@ -56,10 +56,10 @@ test('the authorization limit defaults to four and accepts any positive safe int
     assert.equal(policy.validateLimit(Number.MAX_SAFE_INTEGER),Number.MAX_SAFE_INTEGER);
     for(const value of [0,-1,1.5,NaN,Infinity,Number.MAX_SAFE_INTEGER+1,'',null,true,{},[]])
         assert.throws(()=>policy.validateLimit(value),/正安全整数/);
-    assert.equal(policy.eligible({authorization_count:8},Date.now(),9),true);
-    assert.equal(policy.eligible({authorization_count:8},Date.now(),8),false);
-    assert.equal(policy.eligible({authorization_count:8,authorization_pending_count:9},Date.now(),20),false);
-    assert.equal(policy.eligible({authorization_count:0,retirement_key:'original-delete'},Date.now(),20),false);
+    assert.equal(policy.eligible({authorization_count:8},9),true);
+    assert.equal(policy.eligible({authorization_count:8},8),false);
+    assert.equal(policy.eligible({authorization_count:8,authorization_pending_count:9},20),false);
+    assert.equal(policy.eligible({authorization_count:0,retirement_key:'original-delete'},20),false);
 });
 
 test('configured authorization limits govern selection and transaction reservation without a fixed seven-use cap',async()=>{
@@ -288,7 +288,7 @@ test('seven successful authorizations without amounts retire once without openin
     const oldCard=f.db.cards.find(card=>card.card_id===42);
     assert.equal(oldCard.authorization_count,6);
     assert.equal(oldCard.provider_status,'ACTIVE');
-    assert.equal(policy.eligible(oldCard,Date.now(),7),true);
+    assert.equal(policy.eligible(oldCard,7),true);
     assert.equal(f.calls.filter(c=>['deleteCard','createCard'].includes(c.operation)).length,0);
     f.ledger.get(42).push(withoutAmount(6));
     await f.service.synchronize(cfg);

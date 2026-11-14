@@ -156,9 +156,9 @@ test('retry preparation handoff remains stopped after the original funding or is
                 credential_hash: 'test', request_body: '{}', amount: '1.00', target_balance: '21.00' });
             f.db.fundings[0].state = 'unknown';
         } else {
-            await methods.createIssue({ issue_key: 'issue-retry', job_key: task.jobKey, plan_type: 'plus',
+            await f.seedHistoricalIssue({ issue_key: 'issue-retry', job_key: task.jobKey, plan_type: 'plus',
                 product_code: 'p1', amount: '20.00', credential_hash: 'test', request_body: '{}' });
-            await methods.attachIssue(task.jobKey, 'issue-retry');
+            f.db.tasks.find(row => row.job_key === task.jobKey).orbitcard_issue_key = 'issue-retry';
             f.db.issues[0].state = 'unknown';
         }
         // The transaction must also protect callers holding a stale preparation snapshot.

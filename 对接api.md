@@ -16,7 +16,7 @@
 
 订阅调用需要 `subscriptions:read`、`subscriptions:create` 权限，余额查询另需 `account:read`。卡池还需 `cards:create`、`cards:read`、`cards:manage`、`products:read`、`cards:fund`；交易对账另需 `transactions:read`，不需要敏感卡资料。连接测试只查询套餐和余额，不创建订阅或开卡。卡片协议见 [Open API](Orbitcard-Open-API-V1.md)。
 
-管理员手动申请时，服务端组装 `{product_code,amount:"20.00",quantity:1}`；产品码来自最新 `getProductCode` 的 `data.list`，不额外提交身份资料或卡号。产品查询的 `automatic_application` 字段仅是只读参数预览，不代表允许订单自动开卡；不再附带 `products[].plans`。手动申请不要求会员价格，CDK 代充需已配置套餐 USD 金额。历史自动申请仅在有平台 order_no 时按原平台、API Key、正文和幂等键核对；无订单号的未知申请不重发，prepared 未发送意图关闭为失败。详见 [开卡参数](ORBITCARD-CARDS.md#次数与卡池规则)。
+管理员手动申请时，服务端组装 `{product_code,amount:"20.00",quantity:1}`；产品码来自最新 `getProductCode` 的 `data.list`，不额外提交身份资料或卡号。产品查询返回 `manual_application` 作为手动申请参数预览，以及 `application_error`；旧 `automatic_application` 与 `products[].plans` 已移除。手动申请不要求会员价格，CDK 代充需已配置套餐 USD 金额。历史自动申请仅在有平台 order_no 时按原平台、API Key、正文和幂等键核对；无订单号的未知申请不重发，prepared 未发送意图关闭为失败。详见 [开卡参数](ORBITCARD-CARDS.md#次数与卡池规则)。
 
 项目向平台发送 `POST /api/open/v1/<operation>`，使用 HMAC-SHA256-V1 对精确请求字节、主机、路径、时间戳、随机数及幂等键签名，不使用旧充值 Bearer 协议。
 
@@ -46,7 +46,7 @@
 
 任务受理返回 `provider=orbitcard` 和 `jobKey`；自助受理及查单中的 `queued` 布尔值标记当前是否排队，卡片准备时也可能进入等待，应持续查询原任务。已有历史未结算任务可能返回 `provider=history`，必须人工核对，不恢复本地支付。接单停用或配置缺失返回 503；并发名额满时可受理唯一共享等待任务，等待位已满才拒绝新增等待。已有请求优先恢复原任务。
 
-用户兑换、管理员 `test` 和人工交付共用最多 1 个等待位，覆盖并发名额满及现有候选卡占用。等待沿用 `preparing` 状态与 `message`，保持原 CDK、管理员 `request_id` 和本次尝试身份，不生成新支付身份、不自动开卡或并行占用同卡。最长等待 30 分钟，卡片释放且授权同步、当前配置的授权次数上限、状态、余额及无未决资金等全部条件满足后自动继续，不受历史 reuse_after_ms 限制。Session 只在工作流内存中，按自身到期时间及等待截止检查，独立于管理员失败续试的 15 分钟缓存。等待超时、Session 到期或停机后，首笔未付款且无未决资金可安全释放，支付重试 CDK 保持售后锁定；重启复用原 `preparing` 恢复规则。
+用户兑换、管理员 `test` 和人工交付共用最多 1 个等待位，覆盖并发名额满及现有候选卡占用。等待沿用 `preparing` 状态与 `message`，保持原 CDK、管理员 `request_id` 和本次尝试身份，不生成新支付身份、不自动开卡或并行占用同卡。最长等待 30 分钟，卡片释放且授权同步、当前配置的授权次数上限、状态、余额及无未决资金等全部条件满足后自动继续，不读取历史 `reuse_after_ms` 值。Session 只在工作流内存中，按自身到期时间及等待截止检查，独立于管理员失败续试的 15 分钟缓存。等待超时、Session 到期或停机后，首笔未付款且无未决资金可安全释放，支付重试 CDK 保持售后锁定；重启复用原 `preparing` 恢复规则。
 
 新增等待被同步拒绝时返回 HTTP 429，正文含 `error_code: "PAYMENT_QUEUE_FULL"`、`retry_after_seconds: 600`，并提供 `Retry-After: 600`。客户端对该错误展示“当前支付卡繁忙，等待队列已满，请 10 分钟后再下单。”弹窗；其他 API 限流仍按原错误处理。已受理任务的查询也可能带排队终止反馈，应先读取原状态和 `message`，不能按超时重复付款。
 
@@ -72,6 +72,8 @@
 
 `POST /api/admin/orbitcard/cards/apply` 使用空 Body `{}`，为共享卡池申请一张卡，不再选择关联套餐。携带旧 `plan_type` 或其他自定义参数会返回 400。已有唯一手动申请时继续确认原请求；多笔申请或其他订单绑定的申请先通过 `POST /api/admin/orbitcard/issues/refresh` 恢复，不会换 key 新开卡。
 
-`GET /api/admin/orbitcard/cards` 同时返回脱敏的 `cards`、`issues`、`fundings`；`POST /api/admin/orbitcard/issues/refresh` 确认原开卡及补款，不创建新身份。提供平台卡片同步、申请卡与原申请确认接口；历史次数绑定和手动修改接口已删除，见 [卡片管理 API](ORBITCARD-CARDS.md#本项目管理-api)。旧本地 Stripe 卡池、代理、账单地址、验证码求解、浏览器池、Session 导出、支付链接生成、本地账单及开卡 Webhook 接口均已移除，不提供充值回退路径。
+`GET /api/admin/orbitcard/cards` 返回脱敏的 `cards`、`issues`、`fundings`；卡片条目不再包含 `cooling_down` 和 `reuse_after_ms`。新建表与启动迁移不再补建 `reuse_after_ms`，历史已有列不主动 DROP，运行流程不再读写。只读预检维护摘要移除 `capacity_limit`、`auto_refill`、`open_count`、`opening_amount`，并发模拟移除 `summary.opening`，客户端应移除这些停用字段的依赖。
+
+`POST /api/admin/orbitcard/issues/refresh` 核对原开卡及补款，不创建新身份。平台卡片同步、管理员手动申请及原申请核对继续保留；历史次数绑定和手动修改接口已删除，见 [卡片管理 API](ORBITCARD-CARDS.md#本项目管理-api)。旧本地 Stripe 卡池、代理、账单地址、验证码求解、浏览器池、Session 导出、支付链接生成、本地账单及开卡 Webhook 接口已移除，不提供充值回退路径。
 
 选卡和同步使用 `cardDetail({card_ids:[...],reveal_sensitive:false})`，每批最多 20 张；缺项跳过对应卡，不在选中后逐张复核。成功授权按交易 ID 去重，达到配置上限时停止分配，空闲时删卡，不补位；成功后新授权未同步也不得复用该卡。只用现有合格卡，缺卡不自动开卡；候选卡占用可使用共享等待位，未知状态和未决资金继续按原规则对账。换卡在纯选卡与最终事务预占中均排除已用卡。原开卡、补款和未确认订阅始终沿用原身份与参数，只有订阅明确失败且满足额度、账号及资金条件才允许下一次尝试。补款提交前及确认后核对卡片资金。`getSubscriptionPlans` 只确认套餐开放，目录服务费不参与预检或后台展示；`max_service_fee` 交平台校验，实际服务费留作对账。同一 API Key 收到 HTTP 429 后所有 Open API 操作遵守 `Retry-After`。`GET /api/admin/orbitcard/cards/:cardId/transactions?page=1` 更新授权次数并查看脱敏交易，不据此自动核销或退款；需 `transactions:read`。

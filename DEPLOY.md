@@ -67,7 +67,7 @@ docker compose logs -f app
 
 自助沿用已有 retry 字段与子任务保存每次尝试，管理员原 `request_id` 不变、旧失败订单追加到新列 `retry_history MEDIUMTEXT`，由启动自动迁移；次数和已用卡持久化，重启不重置。Session 只留内存，管理员最多保留 15 分钟、64 份，并检查其自身有效期。失效、丢失或重启后保持 `retry_waiting`，要求原 CDK 或原管理员 `request_id`、同账号新 Session 及匹配的原平台/API Key，继续剩余额度。数据库账号需保留 ALTER 权限。
 
-固定 5 分钟卡片冷却已取消：成功或明确失败释放卡片后，不再设置冷却截止时间，历史 `orbitcard_managed_cards.reuse_after_ms` 也不阻塞选卡、预占和等待恢复，无需等待旧时间到期。数据库可保留历史列，无需为本次取消冷却新增字段或环境变量。卡片仍须满足 当前配置的授权次数上限、待授权同步、状态、余额及无未决资金条件，未知订阅仍保留原占用。
+固定卡片冷却代码和字段兼容输出已移除。`mysql-schema.sql` 与启动补列不再创建 `orbitcard_managed_cards.reuse_after_ms`；历史数据库已有列不主动 DROP，运行流程不再读写。卡片管理 API 不再返回 `cooling_down` 或 `reuse_after_ms`，自定义客户端应删除对这两个字段的依赖。卡片仍须满足当前配置的授权次数上限、待授权同步、状态、余额及无未决资金条件，未知订阅保留原占用。手动开卡和原订单资金核对继续保留。
 
 用户兑换、管理员真实测试和人工交付共用 **1 个等待位**，覆盖支付并发已满及现有候选卡占用。固定 MySQL 命名锁保证等待位唯一，队满弹窗提示 **10 分钟后下单**。等待最多 **30 分钟**，沿用 `preparing` 状态和原 CDK、管理员 `request_id`，只更新等待原因；运行统计以 `waiting_jobs` / `max_waiting_jobs=1` 单列，`active_foreground_jobs` 不包含等待者。上一任务释放卡片后，授权同步、次数、状态、余额和资金条件满足即自动继续，不自动开卡、不并行占用同卡。
 
@@ -99,7 +99,7 @@ docker compose logs --tail=100 app
 
 旧浏览器、验证码、卡池、代理、本地支付链接调试和本地账单接口已移除。当前 Orbitcard 调试与日志统一在新入口；刷新后台缓存，前端资源与镜像一并发布。
 
-手动开卡已统一为共享卡池申请，管理接口 `POST /api/admin/orbitcard/cards/apply` 只接收 `{}`，旧 `plan_type` 参数会被拒绝；未确认的历史申请继续通过原 key 和 Body 恢复。自定义管理客户端需使用 `Authorization: Bearer`，不再把令牌放在 URL；`gpt-api/status` 不再附带 `recent_orders`，订单查询入口保留。产品预览不再返回每产品的 `plans` 字段。无需删除历史订单、卡片数据或迁移记录。
+手动开卡统一为共享卡池申请，`POST /api/admin/orbitcard/cards/apply` 只接收 `{}`，旧 `plan_type` 被拒绝；未确认历史申请按原 key 和 Body 核对。产品预览返回 `manual_application` 和 `application_error`，不再返回旧 `automatic_application` 或 `products[].plans`。只读预检维护摘要删除自动补满和开卡的固定占位字段 `capacity_limit`、`auto_refill`、`open_count`、`opening_amount`；并发模拟统计不再返回始终为零的 `summary.opening`。管理客户端使用 `Authorization: Bearer`，不把令牌放 URL；`gpt-api/status` 不附带 `recent_orders`，订单查询仍保留。无需删除历史订单、卡片或迁移记录。
 
 ## 环境更新与存储
 

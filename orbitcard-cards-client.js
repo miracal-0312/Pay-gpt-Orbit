@@ -4,8 +4,6 @@ const { CardPreparationError, CardDataError } = require('./orbitcard-card-policy
 // API shapes and funding strategy adapted from jiangdengke/KC-PAY-GPT
 // orbitcard-client.js (MIT, Copyright (c) 2026 KC). No sensitive card details needed.
 const api = require('./orbitcard-client');
-const { planFor } = require('./orbitcard-card-policy');
-const { planPrice } = require('./orbitcard-config');
 const money = require('./orbitcard-money');
 
 function nonnegativeInteger(value) {
@@ -189,12 +187,6 @@ async function products(cfg) {
     return rows;
 }
 
-function selection(product, planType, cfg = {}) {
-    const plan = planFor(planType), price = planPrice(cfg, plan);
-    if (!price) return null;
-    const opening=openingSelection(product);
-    return opening ? { ...opening, plan_type:plan, price } : null;
-}
 function openingSelection(product) {
     if (!product || typeof product.product_code!=='string' || !product.product_code.trim() || product.product_code.length>128 || /[\x00-\x1f]/.test(product.product_code)) return null;
     if (product.remaining == null && product.inventory_mode !== 'provider_validated') return null;
@@ -208,19 +200,13 @@ function openingSelection(product) {
     return { product_code: product.product_code,
         amount: amount.toFixed(2), min_retained_balance: product.min_retained_balance };
 }
-function choose(rows, cfg, select) {
+function chooseOpeningProduct(rows, cfg = {}) {
     const candidates = rows.filter(row => !cfg.orbitcard_product_code || row.product_code === cfg.orbitcard_product_code)
-        .map(select).filter(Boolean).sort((a, b) => a.product_code.localeCompare(b.product_code));
+        .map(openingSelection).filter(Boolean).sort((a, b) => a.product_code.localeCompare(b.product_code));
     const selected = candidates[0];
-    if (!selected) throw new CardPreparationError('没有符合条件的开卡产品，请检查库存、后台套餐 USD 支付金额及产品最低首充是否不高于 20 USD');
+    if (!selected) throw new CardPreparationError('没有符合条件的开卡产品，请检查库存及产品最低首充是否不高于 20 USD');
     if (cfg.orbitcard_max_initial_amount && Number(selected.amount) > Number(cfg.orbitcard_max_initial_amount)) throw new CardPreparationError('所需首充超过后台设置的单卡金额上限');
     return selected;
-}
-function chooseProduct(rows, planType, cfg = {}) {
-    return choose(rows,cfg,row => selection(row,planType,cfg));
-}
-function chooseOpeningProduct(rows,cfg = {}) {
-    return choose(rows,cfg,openingSelection);
 }
 function createCardBody(selected) {
     if (!selected || typeof selected.product_code!=='string' || !selected.product_code.trim() || selected.product_code.length>128
@@ -243,5 +229,5 @@ function issueResult(data) {
         retryAfterMs: Number.isFinite(Number(source.retry_after_seconds)) ? Math.max(0, Number(source.retry_after_seconds) * 1000) : 0 };
 }
 
-module.exports = { normalizeCard, positiveId, listCards, cardDetail, cardDetails, cardDetailsInBatches, normalizeProducts, products, chooseProduct,
+module.exports = { normalizeCard, positiveId, listCards, cardDetail, cardDetails, cardDetailsInBatches, normalizeProducts, products,
     chooseOpeningProduct, createCardBody, issueResult };
