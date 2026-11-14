@@ -4,6 +4,7 @@ const TOKEN_KEY = 'plus_admin_token', SECONDARY_KEY = 'plus_admin_secondary_toke
 const cardPlans = { plus: 'Plus', pro100: 'Pro 100', pro200: 'Pro 200', pro500: 'Pro 500' };
 let cdkPlans = {};
 let loginUrl = '/admin-login', selected = 'overview', savedBaseUrl = '';
+let selectedDiagnostic = 'api';
 let cdkPlanFilter = '', cdkLoadSequence = 0, cdkLoadedFilter = null, cdkLoadedCount = 0;
 let cdkExporting = false;
 let cdkEditing = null, cdkStatusSaving = false;
@@ -67,7 +68,7 @@ async function perform(action, success) {
     try { const result = await action(); if (success) notice(success, 'success'); return result; }
     catch (error) { notice(error.message, 'error'); return null; }
 }
-function status(value) { const text = { success: '成功', failed: '失败', rejected: '未受理（已释放）', retry: '待重新提交 Session', running: '处理中', preparing: '准备支付', funding_waiting: '等待补款到账', funding_review: '补款对账工单（后台跟进）', funding_pending: '补款待核对（支付已停止）', card_pending: '原开卡待确认（支付已停止）', prepared: '资金已就绪', submitting: '提交中', manual: '人工处理（支付已停止）', support_locked: '人工售后（支付已停止）', pending: '待确认', unused: '未使用', used: '已使用', redeemed: '已核销', processing: '占用中' }[value] || value; return `<span class="pill ${escapeHtml(value)}">${escapeHtml(text)}</span>`; }
+function status(value) { const text = { success: '成功', failed: '失败', rejected: '未受理（已释放）', retry: '待重新提交 Session', retry_waiting: '等待换卡重试', running: '处理中', preparing: '准备支付', funding_waiting: '等待补款到账', funding_review: '补款对账工单（后台跟进）', funding_pending: '补款待核对（支付已停止）', card_pending: '原开卡待确认（支付已停止）', prepared: '资金已就绪', submitting: '提交中', manual: '人工处理（支付已停止）', support_locked: '人工售后（支付已停止）', pending: '待确认', unused: '未使用', used: '已使用', redeemed: '已核销', processing: '占用中' }[value] || value; return `<span class="pill ${escapeHtml(value)}">${escapeHtml(text)}</span>`; }
 function renderTasks(tasks) {
     $('tasks').innerHTML = tasks.map(task => {
         const order = task.order || {}, fee = order.fee_status ? `${order.service_fee ?? '—'} ${order.currency || 'USDT'} / ${order.fee_status}` : '—';
@@ -172,7 +173,7 @@ async function loadCardIdPreview() {
     try {
         const data = await request('/api/admin/orbitcard/cards/preview');
         const ids = (data.cards || []).map(card => `${card.card_id}${card.status === 'ACTIVE' ? '（可用）' : `（${card.status || '未知状态'}）`}`);
-        $('cardIdPreview').textContent = `平台共 ${data.total} 张卡，可用 ${data.active} 张。${ids.length ? `前 ${ids.length} 张：${ids.join('、')}` : '当前没有卡片，支付时会按规则自动开卡。'}`;
+        $('cardIdPreview').textContent = `平台共 ${data.total} 张卡，可用 ${data.active} 张。${ids.length ? `前 ${ids.length} 张：${ids.join('、')}` : '当前没有卡片，自动开卡已禁用，请手动申请卡片。'}`;
     } catch (error) { $('cardIdPreview').textContent = `卡片 ID 读取失败：${error.message}`; }
 }
 function apiInput() { return { enabled: $('apiEnabled').checked, base_url: $('baseUrl').value.trim(),
@@ -383,20 +384,40 @@ async function loadSecurity() {
     $('setupTotp').disabled = data.totpEnabled;
     $('twofaMode').value = data.login2faMode; $('loginPath').value = data.loginPath; $('panelPath').value = data.panelPath;
 }
+async function loadLoginLogs() {
+    const data = await request('/api/admin/login-logs?limit=100');
+    $('loginLogs').textContent = JSON.stringify(data.logs || [], null, 2);
+}
 async function loadSelected() {
     if (selected === 'overview') await loadOverview();
-    if (selected === 'orbitcard' || (selected === 'diagnostics' && !savedBaseUrl)) await loadApi();
+    if (selected === 'orbitcard' || (selected === 'diagnostics' && ['api','payment'].includes(selectedDiagnostic) && !savedBaseUrl)) await loadApi();
     if (selected === 'cards') await loadCards();
-    if (selected === 'logs') await loadLogs();
+    if (selected === 'diagnostics') {
+        if (selectedDiagnostic === 'runtime') await loadLogs();
+        if (selectedDiagnostic === 'login') await loadLoginLogs();
+        if (selectedDiagnostic === 'trace' && localStorage.getItem(SECONDARY_KEY)) await loadManualOrders();
+    }
     if (selected === 'settings') await Promise.all([loadOverview(), loadSecurity()]);
     if (selected === 'cdks' && localStorage.getItem(SECONDARY_KEY)) { await loadCdkPlans().catch(error => { cdkPlans = {}; notice(`套餐目录读取失败：${error.message}`, 'error'); }); await loadCdks(); }
     if (selected === 'manual' && localStorage.getItem(SECONDARY_KEY)) {
-        await Promise.all([loadManualCatalog(), loadManualOrders()]);
+        await loadManualCatalog();
     }
 }
 function selectView(tab) {
+    if (tab === 'logs') tab = 'diagnostics/runtime';
+    const [view, diagnostic] = tab.split('/');
+    tab = view;
     const button = [...$('tabs').querySelectorAll('[data-tab]')].find(item => item.dataset.tab === tab);
     if (!button) return;
+    if (tab === 'diagnostics') {
+        const sections = ['api','payment','trace','runtime','login'];
+        if (diagnostic) selectedDiagnostic = sections.includes(diagnostic) ? diagnostic : 'api';
+        for (const panel of document.querySelectorAll('[data-diagnostic-panel]')) panel.hidden = panel.dataset.diagnosticPanel !== selectedDiagnostic;
+        for (const item of document.querySelectorAll('[data-diagnostic-tab]')) {
+            const active = item.dataset.diagnosticTab === selectedDiagnostic;
+            item.classList.toggle('active', active); item.setAttribute('aria-pressed', String(active));
+        }
+    }
     autoRefreshStarted = Date.now(); autoRefreshFailures = 0;
     selected = tab;
     for (const section of document.querySelectorAll('.view')) section.hidden = section.id !== selected;
@@ -407,9 +428,14 @@ function selectView(tab) {
     $('viewTitle').textContent = button.textContent.trim();
     $('viewDescription').textContent = button.dataset.description;
     document.title = button.textContent.trim() + ' · YZWAI';
-    history.replaceState(null, '', '#' + selected);
-    perform(loadSelected);
+    history.replaceState(null, '', '#' + selected + (selected === 'diagnostics' ? '/' + selectedDiagnostic : ''));
+    return perform(loadSelected);
 }
+document.addEventListener('click', event => {
+    const button = event.target.closest('[data-diagnostic-tab],[data-open-diagnostic]');
+    if (button) selectView('diagnostics/' + (button.dataset.diagnosticTab || button.dataset.openDiagnostic));
+});
+window.addEventListener('hashchange', () => selectView(location.hash.slice(1) || 'overview'));
 $('tabs').addEventListener('click', event => {
     const button = event.target.closest('[data-tab]'); if (button) selectView(button.dataset.tab);
 });
@@ -439,7 +465,6 @@ form('importForm', async () => {
     const data = await request('/api/admin/cdks/import', { cdks: $('cdkImport').value.split(/[\s,;]+/).filter(Boolean), plan_type: $('planType').value });
     $('cdkImport').value = ''; notice(data.message, 'success'); await loadCdks();
 });
-function manualMode() { return document.querySelector('input[name="manualMode"]:checked')?.value || 'test'; }
 async function loadManualCatalog() {
     $('manualCatalogState').textContent = '正在读取 Orbitcard 套餐…';
     const current = $('manualPlan').value;
@@ -457,15 +482,16 @@ async function loadManualCatalog() {
 function renderManualOrders(orders) {
     $('manualOrderRows').innerHTML = orders.map(order => {
         const outcome = status(order.state);
+        const previousAttempts = (order.attempts || []).map((attempt, index) => `<button type="button" class="secondary" data-debug-trace="${escapeHtml(attempt.client_order_no)}">第 ${index + 1} 次 · 卡 ${escapeHtml(attempt.card_id)} 日志</button>`).join('');
         const captcha = order.captcha?.url ? `<br><a href="${escapeHtml(order.captcha.url)}" target="_blank" rel="noopener noreferrer">打开平台验证链接</a>` : '';
-        const action = `${order.state === 'preparing'
-            ? `<button type="button" class="secondary" data-retry-manual="${escapeHtml(order.request_id)}">继续准备</button>` : ''}${['submitting','pending','manual'].includes(order.state)
+        const action = `${['preparing','retry_waiting'].includes(order.state)
+            ? `<button type="button" class="secondary" data-retry-manual="${escapeHtml(order.request_id)}">${order.state === 'retry_waiting' ? '提交 Session 换卡重试' : '继续准备'}</button>` : ''}${['submitting','pending','manual'].includes(order.state)
             ? `<button type="button" class="secondary" data-refresh-manual="${escapeHtml(order.request_id)}">查询原订单</button>` : ''}
             <button type="button" class="secondary" data-download-manual="${escapeHtml(order.client_order_no)}">下载日志</button> <button type="button" class="secondary" data-debug-trace="${escapeHtml(order.client_order_no)}">链路日志</button>`;
         return `<tr><td>${escapeHtml(new Date(order.created_at).toLocaleString('zh-CN'))}<br>${escapeHtml(order.target_email)}</td>
             <td>${order.mode === 'fulfillment' ? '人工交付' : '测试开通'}<br>${escapeHtml(order.plan_name || order.plan_type)}<br>${order.card_id ? `卡 ${escapeHtml(order.card_id)}` : '待选卡'}${order.cdk_code ? `<br><code>${escapeHtml(order.cdk_code)}</code>` : ''}</td>
             <td><code>${escapeHtml(order.client_order_no)}</code><br><small>请求 ${escapeHtml(order.request_id)}</small>${order.task_no ? `<br><code>${escapeHtml(order.task_no)}</code>` : ''}</td>
-            <td>${outcome}<br>${escapeHtml(order.message || '')}${captcha}</td><td>${action}</td></tr>`;
+            <td>${outcome}<br>第 ${escapeHtml(order.attempt || 1)} / 3 次尝试<br>${escapeHtml(order.message || '')}${captcha}</td><td>${action}<div class="attempt-links">${previousAttempts}</div></td></tr>`;
     }).join('') || '<tr><td colspan="5">暂无管理员订单</td></tr>';
 }
 async function loadManualOrders() {
@@ -473,13 +499,6 @@ async function loadManualOrders() {
     manualOrders = data.orders || [];
     renderManualOrders(manualOrders);
 }
-function updateManualMode() {
-    const fulfillment = manualMode() === 'fulfillment';
-    $('manualCdkControls').hidden = !fulfillment;
-    $('manualCdk').required = fulfillment;
-    if (!fulfillment) $('manualCdk').value = '';
-}
-document.querySelectorAll('input[name="manualMode"]').forEach(input => input.addEventListener('change', updateManualMode));
 $('refreshManualCatalog').onclick = () => perform(loadManualCatalog);
 $('refreshManualOrders').onclick = () => perform(loadManualOrders);
 $('manualSessionFile').addEventListener('change', async event => {
@@ -494,14 +513,16 @@ form('manualForm', async () => {
     const requestId = $('manualRetryId').value.trim() || crypto.randomUUID();
     $('manualRetryId').value = requestId;
     const data = await request('/api/admin/manual/orders', {
-        request_id: requestId, mode: manualMode(), plan_type: $('manualPlan').value,
-        cdk_code: manualMode() === 'fulfillment' ? $('manualCdk').value.trim() : '',
+        request_id: requestId, mode: 'fulfillment', plan_type: $('manualPlan').value,
+        cdk_code: $('manualCdk').value.trim(),
         session: $('manualSession').value, authorized: $('manualAuthorized').checked
     });
     $('manualRetryId').value = '';
     $('manualSession').value = ''; $('manualSessionFile').value = ''; $('manualAuthorized').checked = false;
-    notice(`订单 ${data.order.client_order_no} 已受理；请在下方查询原订单确认结果。`, 'success');
-    await loadManualOrders();
+    notice(`订单 ${data.order.client_order_no} 已受理；请查询原订单确认结果。`, 'success');
+    diagFollow(data.order.client_order_no);
+    await selectView('diagnostics/trace');
+    await diagReadLogs();
 });
 form('apiForm', async () => { const result = await request('/api/admin/gpt-api', apiInput()); notice(result.message, 'success'); await loadApi(); });
 const diagnosticLines = [];
@@ -594,8 +615,8 @@ form('emailForm', async () => { await request('/api/admin/change-email', { email
 form('secondaryForm', async () => { const data = await request('/api/admin/change-secondary-password', { currentPassword: $('oldSecondary').value, newPassword: $('newSecondary').value }); $('oldSecondary').value = ''; $('newSecondary').value = ''; localStorage.removeItem(SECONDARY_KEY); $('unlockState').textContent = '请重新解锁'; notice(data.message, 'success'); });
 form('pathsForm', async () => { const data = await request('/api/admin/security/paths', { loginPath: $('loginPath').value, panelPath: $('panelPath').value }); location.assign(data.panelUrl); });
 form('telegramForm', async () => { const data = await request('/api/admin/telegram', { bot_token: $('botToken').value, admin_chat_id: $('adminChat').value, group_chat_id: $('groupChat').value, notify_admin: $('notifyAdmin').checked, notify_group: $('notifyGroup').checked, on_success: $('onSuccess').checked, on_failure: $('onFailure').checked }); $('botToken').value = ''; notice(data.message, 'success'); await loadOverview(); });
-$('testTelegram').onclick = () => perform(async () => notice((await request('/api/admin/telegram/test', {})).message, 'success'));
-$('loadLoginLogs').onclick = () => perform(async () => { const data = await request('/api/admin/login-logs?limit=100'); $('loginLogs').textContent = JSON.stringify(data.logs, null, 2); });
+$('testTelegram').onclick = () => runDiagnostic('testTelegram', 'telegramTestResult', async () => (await diagnosticFetch('/api/admin/telegram/test', {})).message);
+$('loadLoginLogs').onclick = () => perform(loadLoginLogs);
 $('loadCdks').onclick = () => perform(loadCdks); $('loadLogs').onclick = () => perform(loadLogs);
 $('exportCdks').onclick = () => perform(exportCdks);
 $('cdkStatusForm').addEventListener('submit', event => { event.preventDefault(); perform(saveCdkStatus); });
@@ -651,15 +672,17 @@ document.addEventListener('click', event => {
     const retryManual = event.target.closest('[data-retry-manual]');
     if (retryManual) {
         const order = manualOrders.find(item => item.request_id === retryManual.dataset.retryManual);
-        if (order && order.state === 'preparing') {
-            $('manualRetryId').value = order.request_id;
-            $('manualPlan').value = order.plan_type;
-            const mode = [...document.querySelectorAll('input[name="manualMode"]')].find(input => input.value === order.mode);
-            if (mode) mode.checked = true;
-            updateManualMode();
-            if (order.cdk_code) $('manualCdk').value = order.cdk_code;
-            notice(`已载入原请求 ${order.request_id}；重新上传该账号 Session 后继续，不能创建新的订单。`, 'success');
-            $('manualSession').focus();
+        if (order && ['preparing','retry_waiting'].includes(order.state)) {
+            perform(async () => {
+                if (order.mode === 'test') { await diagResumeOrder(order); return; }
+                await selectView('manual');
+                $('manualRetryId').value = order.request_id;
+                $('manualPlan').value = order.plan_type;
+                $('manualCdk').value = order.cdk_code || '';
+                $('manualSession').value = ''; $('manualSessionFile').value = ''; $('manualAuthorized').checked = false;
+                notice(`已载入原请求 ${order.request_id}；重新上传该账号 Session 后继续，不能创建新的订单。`, 'success');
+                $('manualSession').focus();
+            });
         }
     }
     const download = event.target.closest('[data-download-manual],[data-download-audit]');
@@ -692,7 +715,7 @@ perform(async () => {
     if (initialView && initialView !== 'overview') selectView(initialView);
 });
 setInterval(async () => {
-    if (document.hidden || !['overview','logs'].includes(selected) || autoRefreshBusy || !autoRefreshStarted) return;
+    if (document.hidden || !(selected === 'overview' || (selected === 'diagnostics' && selectedDiagnostic === 'runtime')) || autoRefreshBusy || !autoRefreshStarted) return;
     if (Date.now() - autoRefreshStarted >= 15 * 60 * 1000 || autoRefreshFailures >= 5) {
         autoRefreshStarted = 0;
         notice('自动刷新已暂停，点击刷新按钮可继续。');

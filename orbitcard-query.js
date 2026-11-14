@@ -42,7 +42,7 @@ async function refresh({ cfg, task, persist, onConfirmedFailure }) {
                 orderId: result.orderId, raw: JSON.stringify(result.snapshot)
             });
             require('./runtime-log').push({ jobKey: task.job_key, source: 'orbitcard', event: 'payment_attempt_failed',
-                text: '订阅已明确失败，停止充值，不再自动换卡重试',
+                text: recorded.retry ? '订阅已明确失败，等待最新 Session 换卡重试' : '订阅已明确失败，换卡尝试已结束',
                 data: { attempt: Number(task.orbitcard_retry_attempt_no || 1), card_id: Number(task.orbitcard_card_id),
                     order_id: result.orderId, applied: recorded.applied } });
             return { success: true, applied: recorded.applied };

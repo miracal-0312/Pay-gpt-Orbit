@@ -30,10 +30,11 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
     }
     async function withRecoveryOwner(cfg, entry, action, { issueReconciliation = false } = {}) {
         const owner = await store.paymentOwner(entry.job_key);
-        const originalIssueOnly = !owner.allowed && issueReconciliation && owner.canReconcileIssue;
+        const originalIssueOnly = issueReconciliation && Boolean(entry.job_key)
+            && (owner.allowed || owner.canReconcileIssue);
         if (!owner.allowed && !originalIssueOnly) return false;
-        // A handed-off issue is reconciled only when the provider has already
-        // acknowledged its identity, or the durable marker proves it was unsent.
+        // Automatic opening is disabled, including historical order attempts.
+        // Only reconcile acknowledged applications, or close an unsent marker.
         if (originalIssueOnly && entry.state !== 'prepared' && !entry.order_no) return false;
         // Dedicated funding reconciliation owns these jobs. The legacy card
         // maintenance pass must not lengthen their delay or resend funding.
@@ -119,8 +120,8 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
             if (!row || row.active_job || !retireIds.has(Number(card.card_id))) continue;
             await retireAndRecord(card, row);
         }
-        // Synchronization and retirement never create cards. New cards are
-        // issued only for an order that needs one or an explicit admin request.
+        // Synchronization and retirement never create cards. New cards require
+        // an explicit administrator application.
         return live.filter(card => !removed.has(Number(card.card_id)));
     }
 
@@ -185,6 +186,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
     }
 
     async function issueFor(cfg, locked, planType, jobKey = null, products = null, balanceJobKey = jobKey) {
+        if (jobKey) throw new CardPreparationError('自动开卡已禁用，请管理员手动申请支付卡');
         await assertPaymentAllowed(cfg, jobKey);
         const plan = planFor(planType);
         let issue = await locked.pendingIssue(plan);
@@ -194,21 +196,20 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
         if (!issue) {
             // Refresh before a new issue; an unresolved issue retains its original body and key.
             products = await cardsApi.products(cfg);
-            const selected = jobKey ? cardsApi.chooseProduct(products,plan,cfg) : cardsApi.chooseOpeningProduct(products,cfg);
+            const selected = cardsApi.chooseOpeningProduct(products,cfg);
             const body = cardsApi.createCardBody(selected);
             requireFunds(balanceJobKey,await account(cfg),money.units(body.amount));
             await assertPaymentAllowed(cfg, jobKey);
             issue = await locked.createIssue({ issue_key: `card-${crypto.randomUUID()}`, job_key: jobKey, ...selected,
                 plan_type:plan,
                 credential_hash: credentialHash(cfg), request_body: JSON.stringify(body) });
-            record(jobKey, 'card_issue_prepared', jobKey?'无符合次数条件的支付卡，已保存自动开卡申请':'已保存管理员开卡申请', {
+            record(jobKey, 'card_issue_prepared', '已保存管理员开卡申请', {
                 issue_key: issue.issue_key, plan_type: plan, product_code: issue.product_code, amount: issue.amount, currency: 'USD',parameters:body });
         }
-        if (jobKey) await locked.attachIssue(jobKey, issue.issue_key);
         return {card:await confirmIssue(cfg, locked, issue),products};
     }
 
-    async function reusable(cfg, locked, jobKey, planType, liveCards, products) {
+    async function reusable(cfg, locked, jobKey, planType, liveCards, products, excludedCardIds = []) {
         const plan = planFor(planType), live = new Map(liveCards.map(card => [Number(card.card_id),card]));
         const saved = await locked.listCards();
         const owned=saved.filter(row=>row.active_job===jobKey);
@@ -232,7 +233,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
             throw new CardSelectionError('平台卡片列表非空但批量详情全部缺失，无法确认可用支付卡；请联系人工售后');
         }
         const decision = decideCards({ saved, listed: liveCards, detailed: [...details.values()], products,
-            jobKey, planType, priceFor: (_product, plan) => planPrice(cfg, plan), now: now() });
+            jobKey, planType, priceFor: (_product, plan) => planPrice(cfg, plan), excludedCardIds, now: now() });
         for (const skipped of decision.skipped) record(jobKey, 'card_unavailable', '卡片已从本次支付选择中排除', skipped);
         for (const card of details.values()) await locked.syncCards([card]);
         record(jobKey, 'card_payment_decision', '支付卡准备决策', {
@@ -345,8 +346,8 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
                 const listed = await refreshCards();
                 if (originalIssue.card_id) requireListedCard(listed, originalIssue.card_id);
                 // Finish this job's original issue before looking at unrelated cards.
-                const opened = originalIssue.state === 'ready'
-                    ? await cardsApi.cardDetail(cfg, originalIssue.card_id) : await confirmIssue(cfg, locked, originalIssue);
+                if (originalIssue.state !== 'ready') throw new CardPreparationError('自动开卡已禁用，原开卡申请须先完成对账');
+                const opened = await cardsApi.cardDetail(cfg, originalIssue.card_id);
                 await refreshUsage(cfg, locked, [opened]);
                 const products = await cardsApi.products(cfg);
                 const selected = await reusable(cfg, locked, jobKey, planType, [opened], products);
@@ -362,20 +363,9 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
             // if no other card is usable, so it cannot block a funded card.
             const retiring = new Set((await locked.listCards()).filter(card => card.retirement_key).map(card => Number(card.card_id)));
             await refreshUsage(cfg, locked, listed.filter(card => !retiring.has(Number(card.card_id))));
-            const selected = await reusable(cfg, locked, jobKey, planType, listed, products);
+            const selected = await reusable(cfg, locked, jobKey, planType, listed, products, selection.excludedCardIds || []);
             if (selected) return selected.card_id;
-            // Only an exhausted/unusable pool reaches here. Busy cards and cards
-            // in cooldown stop inside reusable(), without deleting or opening cards.
-            listed = await maintainPool(cfg, locked, listed);
-            for (const plan of PLAN_TYPES) {
-                if (await locked.pendingIssue(plan)) {
-                    throw new CardPreparationError('存在待确认开卡申请，请先核对原申请，不能另开新卡');
-                }
-            }
-            const {card:opened,products:latestProducts} = await issueFor(cfg, locked, planType, jobKey, products);
-            const newSelection = await reusable(cfg,locked,jobKey,planType,[opened],latestProducts);
-            if (!newSelection) throw new CardSelectionError('新卡已开立但当前套餐仍无可用支付卡；CDK 已锁定，请联系人工售后');
-            return newSelection.card_id;
+            throw new CardPreparationError('没有可用的现有支付卡，自动开卡已禁用，请管理员手动申请或补充卡片');
         });
     }
 

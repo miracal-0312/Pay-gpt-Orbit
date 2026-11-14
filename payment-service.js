@@ -4,7 +4,7 @@ const { PaymentStoppedError } = require('./payment-automation');
 const { parseSession } = require('./session-input');
 class FundingContinuationDeferred extends Error {}
 
-// CDK orchestration: submits one payment and owns settlement.
+// CDK orchestration owns settlement and the bounded sequence of payment attempts.
 // HTTP/WebSocket registration stays in server.js.
 module.exports = function createPaymentService({ store, cardService, worker, activeJobs, activeChallenges,
     audit, broadcast, log, notify, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), now = Date.now }) {
@@ -12,6 +12,7 @@ module.exports = function createPaymentService({ store, cardService, worker, act
         const jobKey = task.jobKey;
         const rootJobKey = task.orbitcardRetryRootJobKey || task.jobKey;
         let submitted = false;
+        let confirmedFailure = false;
         let preparationState = task.orbitcardState || 'prepared';
         const setProgress = async (status, progress, message, extra = {}) => {
             await task.apiConfig.executionGuard?.assertOwned();
@@ -34,7 +35,9 @@ module.exports = function createPaymentService({ store, cardService, worker, act
                 return cardId;
             }
             let pending;
-            try { return await ready(await cardService.allocate(task.apiConfig, jobKey, planType)); }
+            try { return await ready(await cardService.allocate(task.apiConfig, jobKey, planType, {
+                excludedCardIds: [task.orbitcardRetryFirstCardId, task.orbitcardRetrySecondCardId].filter(Boolean).map(Number)
+            })); }
             catch (error) { if (!(error instanceof FundingAwaitingError)) throw error; pending = error; }
             await setProgress('running', 10, '正在补款，每 5 秒核对，最多等待 120 秒；足额后继续订阅', {
                 orbitcardState: 'funding_waiting', expectedState: preparationState, expectedClientOrderNo: task.orbitcardClientOrderNo
@@ -71,7 +74,7 @@ module.exports = function createPaymentService({ store, cardService, worker, act
             task.apiConfig = { ...task.apiConfig, auditJobKey: jobKey,
                 paymentGuard: { assertAllowed: () => store.assertPaymentAllowed(jobKey) } };
             await task.apiConfig.paymentGuard.assertAllowed();
-            await worker.run({ cfg: task.apiConfig, planType, session,
+            const result = await worker.run({ cfg: task.apiConfig, planType, session,
                 clientOrderNo: task.orbitcardClientOrderNo, setProgress,
                 selectCard: prepareCard,
                 onSubmission: () => { submitted = true; }, sleep,
@@ -79,14 +82,31 @@ module.exports = function createPaymentService({ store, cardService, worker, act
                     await task.apiConfig.executionGuard?.assertOwned();
                     const recorded = await store.recordOrbitcardPaymentFailure(jobKey, failure);
                     if (!recorded.applied) throw new Error('支付失败记录已被其他执行者处理，保留原订单核对');
-                    try { log(jobKey, `支付已明确失败，不再重试，卡 ID ${failure.cardId}`, 'payment_attempt_failed'); }
+                    confirmedFailure = true;
+                    try { log(jobKey, `支付已明确失败，${recorded.retry ? '准备换卡重试' : '重试已结束'}，卡 ID ${failure.cardId}`, 'payment_attempt_failed'); }
                     catch (_) { /* Failure settlement is already committed. */ }
+                    if (recorded.retry) {
+                        // A restart or expired Session requires fresh credentials;
+                        // the durable failure remains retry_waiting until then.
+                        try { parseSession(session); } catch (_) { return recorded; }
+                        await task.apiConfig.executionGuard?.assertOwned();
+                        const nextTask = await store.claimOrbitcardRetry(jobKey, { email: session.user.email,
+                            baseUrl: task.apiConfig.base_url, apiKeyHash: require('node:crypto').createHash('sha256')
+                                .update(String(task.apiConfig.api_key || '')).digest('hex') });
+                        return { ...recorded, nextTask };
+                    }
                     return recorded;
                 },
                 broadcast: captcha => {
                     if (captcha) activeChallenges.set(jobKey, captcha); else activeChallenges.delete(jobKey);
                     broadcast(rootJobKey, { type: 'orbitcard-captcha', captcha });
                 } });
+            if (result?.nextTask) {
+                activeJobs.delete(jobKey);
+                activeJobs.add(result.nextTask.jobKey);
+                await runWorker({ task: { ...result.nextTask, apiConfig: task.apiConfig }, session, planType });
+                return;
+            }
             const settled = await store.getTaskStatus(jobKey);
             if (settled) await notify(settled).catch(() => log(jobKey, '任务已结算，通知发送失败', 'notification_failed'));
             if (settled?.status === 'success' && settled.orbitcard_card_id) {
@@ -94,6 +114,10 @@ module.exports = function createPaymentService({ store, cardService, worker, act
                     .catch(() => log(jobKey,'订阅已成功，卡片资金只读核对暂不可用，请稍后在后台查询','payment_reconciliation_pending'));
             }
         } catch (error) {
+            if (confirmedFailure) {
+                log(jobKey, '原支付失败已保存，换卡续跑暂不可用；保留次数与原订单，等待最新 Session', 'payment_retry_deferred');
+                return;
+            }
             if (error instanceof FundingContinuationDeferred) {
                 log(jobKey, '原补款交由后台只读对账，订阅尚未提交', 'funding_continuation_deferred');
                 return;
@@ -128,6 +152,13 @@ module.exports = function createPaymentService({ store, cardService, worker, act
                     const funding=await store.getCardFundingForTask(jobKey);
                     fundingPending=Boolean(funding && !['ready','failed'].includes(funding.state));
                 } catch (_) { preparationUnknown = true; }
+            }
+            if (!submitted && !cardPending && !fundingPending && !preparationUnknown && Number(task.orbitcardRetryAttemptNo || 1) > 1) {
+                await store.lockOrbitcardSupport(jobKey, preparationState,
+                    '换卡重试未能完成支付准备，CDK 保持锁定；' + require('./log-safety').sanitize(error.message));
+                const latest = await store.getTaskStatus(jobKey);
+                if (latest) { broadcast(rootJobKey, { type: 'status', status: latest.status, message: latest.message }); await notify(latest).catch(() => {}); }
+                return;
             }
             const message = submitted ? 'Orbitcard 提交结果待确认，后台将按原订单号持续查询；请勿重复充值' : preparationUnknown
                 ? '支付准备记录暂时无法核对，已保留 CDK 与支付卡并停止自动支付；请人工核对原任务' : fundingPending

@@ -49,7 +49,7 @@ async function ensureLegacyColumns() {
             manual_redeemed_at: 'TIMESTAMP NULL', manual_redeemed_by: 'VARCHAR(255) NULL', manual_redemption_reason: 'VARCHAR(255) NULL',
             type: "VARCHAR(16) NOT NULL DEFAULT '自助'", plan_type: "VARCHAR(16) NOT NULL DEFAULT 'plus'", created_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP',
             updated_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP' },
-        orbitcard_admin_orders: { issue_key: 'VARCHAR(80) NULL', authorization_baseline: 'INT UNSIGNED NULL' },
+        orbitcard_admin_orders: { issue_key: 'VARCHAR(80) NULL', authorization_baseline: 'INT UNSIGNED NULL', retry_history: 'MEDIUMTEXT NULL' },
         task_logs: { token_preview: "VARCHAR(64) NOT NULL DEFAULT ''", session_payload: 'MEDIUMTEXT NULL', cdk_code: 'VARCHAR(32) NULL',
             status: "VARCHAR(32) NOT NULL DEFAULT 'running'", message: 'VARCHAR(255) NULL', progress: 'INT NOT NULL DEFAULT 0',
             display_time: "VARCHAR(64) NOT NULL DEFAULT ''",
@@ -117,7 +117,8 @@ async function getTaskStatus(jobKey) {
 
 async function getRunningTaskByCdk(cdk) {
     const rows = await runQuery(`SELECT job_key, status, message, progress, orbitcard_client_order_no, orbitcard_state,
-        orbitcard_retry_root_job_key, orbitcard_retry_attempt_no, orbitcard_retry_first_card_id, orbitcard_retry_second_card_id, orbitcard_api_key_hash, orbitcard_email, orbitcard_base_url
+        orbitcard_retry_root_job_key, orbitcard_retry_attempt_no, orbitcard_retry_first_card_id, orbitcard_retry_second_card_id, orbitcard_api_key_hash, orbitcard_email, orbitcard_base_url,
+        gpt_api_order_id, gpt_api_raw, orbitcard_card_id, orbitcard_plan_type
         FROM task_logs WHERE cdk_code = ? AND (status IN ('running','manual')
         OR orbitcard_state IN ('preparing','prepared','funding_waiting','funding_review','retry_waiting','support_locked','balance_blocked','funding_pending','submitting','pending','manual','success')) ORDER BY id DESC LIMIT 1`, [String(cdk)]);
     return rows[0] || null;

@@ -93,6 +93,7 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
                 if (!task || !['preparing','prepared'].includes(task.orbitcard_state) || cardScope(task.orbitcard_base_url) !== scope || planFor(task.orbitcard_plan_type) !== plan) {
                     throw new CardPreparationError('充值任务已变更，不能预占卡片');
                 }
+                if ([task.orbitcard_retry_first_card_id, task.orbitcard_retry_second_card_id].filter(Boolean).map(Number).includes(Number(cardId))) return null;
                 const cards = await runQuery('SELECT * FROM orbitcard_managed_cards WHERE scope=? AND card_id=? FOR UPDATE', [scope,cardId], opts);
                 const card = cards[0];
                 const uses = await runQuery('SELECT * FROM orbitcard_card_uses WHERE job_key=? FOR UPDATE', [jobKey], opts);

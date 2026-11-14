@@ -254,7 +254,7 @@ test('restart query settles an upstream failure snapshot once and releases the s
         onConfirmedFailure: (original, failure) => f.store.recordOrbitcardPaymentFailure(original.job_key, failure) };
     await Promise.all([query.refresh(input), query.refresh(input)]);
     assert.deepEqual(calls, ['getSubscription']);
-    assert.equal(f.db.tasks[0].orbitcard_state, 'support_locked');
+    assert.equal(f.db.tasks[0].orbitcard_state, 'retry_waiting');
     assert.equal(f.db.cards[0].active_job, null);
     assert.equal(f.db.uses[0].state, 'released');
     assert.equal(f.db.cards[0].authorization_count, 0);

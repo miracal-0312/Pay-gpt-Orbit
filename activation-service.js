@@ -20,11 +20,12 @@ module.exports = function createActivationHandler({ store, ensureStoreReady, act
             if (code?.manual_redeemed_at) return res.status(403).json({ success: false, message: '该卡密已由人工售后核销，不能再次充值' });
             const existing = code && await store.getRunningTaskByCdk(cdk);
 
-            if (existing) return res.json({ success: true,
+            const resumingRetry = existing?.orbitcard_state === 'retry_waiting' && Boolean(existing.gpt_api_order_id);
+            if (existing && !resumingRetry) return res.json({ success: true,
                 jobKey: existing.orbitcard_retry_root_job_key || existing.job_key,
                 provider: existing.orbitcard_client_order_no ? 'orbitcard' : 'history',
                 status: existing.status, message: existing.message || '已恢复原订单，请查询充值结果' });
-            if (!code || code.used_at || code.type !== '自助') return res.status(403).json({ success: false, message: 'CDK 无效、已使用或不支持此类型' });
+            if (!code || (code.used_at && !resumingRetry) || code.type !== '自助') return res.status(403).json({ success: false, message: 'CDK 无效、已使用或不支持此类型' });
             const maintenance = await store.getMaintenanceModeState();
             if (isDraining() || maintenance.enabled) return res.status(503).json({ success: false, message: '系统暂停接单，请稍后再试' });
             const cfg = await store.getGptApiConfig();
@@ -38,8 +39,8 @@ module.exports = function createActivationHandler({ store, ensureStoreReady, act
             if (activeJobs.size >= max) return res.status(429).json({ success: false, message: '当前任务已满，请稍后再试' });
             slot = `accept-${crypto.randomUUID()}`;
             activeJobs.add(slot); // No await between capacity check and reservation.
-            task = await store.createOrbitcardTask({ cdk, planType: code.plan_type || 'plus', email: session.user.email,
-                baseUrl: cfg.base_url, apiKeyHash });
+            task = resumingRetry ? await store.claimOrbitcardRetry(existing.job_key, { email: session.user.email, baseUrl: cfg.base_url, apiKeyHash })
+                : await store.createOrbitcardTask({ cdk, planType: code.plan_type || 'plus', email: session.user.email, baseUrl: cfg.base_url, apiKeyHash });
             if (!task) return res.status(409).json({ success: false, message: 'CDK 已被占用，请查询原订单' });
             activeJobs.delete(slot);
             slot = task.jobKey;

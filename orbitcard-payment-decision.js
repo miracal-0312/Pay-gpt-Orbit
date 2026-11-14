@@ -5,12 +5,13 @@ const money = require('./orbitcard-money');
 const { planFor, CardPreparationError } = require('./orbitcard-card-policy');
 
 // Pure decisions over one platform snapshot. No network requests or persistence.
-function decideCards({ saved, listed, detailed, products, jobKey, planType, priceFor, now = Date.now() }) {
+function decideCards({ saved, listed, detailed, products, jobKey, planType, priceFor, excludedCardIds = [], now = Date.now() }) {
     const plan = planFor(planType), live = new Map(listed.map(card => [Number(card.card_id), card]));
     const details = new Map(detailed.map(card => [Number(card.card_id), card]));
     const candidates = [], skipped = [], waiting = [];
     for (const row of saved) {
         const id = Number(row.card_id), owned = row.active_job === jobKey;
+        if (excludedCardIds.map(Number).includes(id)) { skipped.push({ card_id: id, reason: 'previous_payment_attempt' }); continue; }
         if (!live.has(id)) { skipped.push({ card_id: id, reason: 'missing_from_platform_list' }); continue; }
         // An unresolved owner still blocks a replacement, including when the
         // platform has frozen its card or its quota is already exhausted.
@@ -64,7 +65,7 @@ function decideCards({ saved, listed, detailed, products, jobKey, planType, pric
     }
     candidates.sort((a,b) => (a.row.active_job === jobKey ? -1 : b.row.active_job === jobKey ? 1 : 0)
         || (a.deficit < b.deficit ? -1 : a.deficit > b.deficit ? 1 : a.card.card_id - b.card.card_id));
-    return { action: candidates[0]?.action || (waiting.length ? 'wait' : 'open'), candidates, skipped, waiting };
+    return { action: candidates[0]?.action || (waiting.length ? 'wait' : 'unavailable'), candidates, skipped, waiting };
 }
 
 module.exports = { decideCards };

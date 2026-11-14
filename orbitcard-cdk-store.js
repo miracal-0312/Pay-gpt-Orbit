@@ -2,6 +2,7 @@
 const { requiresManualHandling } = require('./payment-automation');
 const { cardScope, planFor } = require('./orbitcard-card-policy');
 const { terminalUpstreamSnapshot } = require('./orbitcard-client');
+const { MAX_PAYMENT_ATTEMPTS, confirmedFailure } = require('./payment-retry-policy');
 
 // Transaction boundaries keep task creation, order linkage and CDK ownership consistent.
 module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, runExecute, createTaskLog, settleCardUse = async () => {}, enqueueRedemption = async () => {} }) {
@@ -151,6 +152,11 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
                 if (reviewStop) status = 'manual';
             }
             const paymentState = orbitcardState;
+            if (Number(task.orbitcard_retry_attempt_no || 1) > 1 && ['failed','rejected'].includes(orbitcardState)) {
+                orbitcardState = 'support_locked';
+                status = 'failed';
+                message = '换卡重试已停止，CDK 保持售后锁定；' + String(message || '').slice(0, 180);
+            }
             if ((reviewRelease || issueRelease) && (code?.manual_redeemed_at || Number(task.orbitcard_retry_attempt_no || 1) > 1)) {
                 orbitcardState = 'support_locked';
                 status = 'failed';
@@ -233,18 +239,62 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
                 || (failure.card_id != null && Number(failure.card_id) !== card)) {
                 throw new Error('失败订单归属不一致，不能自动重试');
             }
+            const attempt = Number(task.orbitcard_retry_attempt_no || 1);
+            const retry = code?.is_active && !code.manual_redeemed_at && !requiresManualHandling(task)
+                && Number.isSafeInteger(attempt) && attempt < MAX_PAYMENT_ATTEMPTS
+                && confirmedFailure(failure, { clientOrderNo, orderId, cardId: card,
+                    planType: require('./plan-registry').PROVIDER_PLANS[planFor(task.orbitcard_plan_type)], email: task.orbitcard_email });
             await runExecute(`UPDATE task_logs SET status = ?, progress = 99, message = ?, orbitcard_state = ?,
                 gpt_api_order_id = ?, gpt_api_raw = ?, session_payload = NULL WHERE job_key = ?`,
-            ['failed', code?.manual_redeemed_at ? '原平台订单支付失败；卡密已由人工售后核销，不再重试'
-                : require('./log-safety').sanitize(failure.failureMessage || '订阅失败，已停止充值，请联系售后QQ 2244527967处理'),
-            'support_locked', orderId, raw, jobKey], options);
+            [retry ? 'running' : 'failed', retry ? `第 ${attempt} 次充值已明确失败，等待换卡重试（最多 ${MAX_PAYMENT_ATTEMPTS} 次）`
+                : code?.manual_redeemed_at ? '原平台订单支付失败；卡密已由人工售后核销，不再重试'
+                    : require('./log-safety').sanitize(failure.failureMessage || '订阅失败，已停止充值，请联系售后QQ 2244527967处理'),
+            retry ? 'retry_waiting' : 'support_locked', orderId, raw, jobKey], options);
             const uses = await runQuery('SELECT card_id, state FROM orbitcard_card_uses WHERE job_key = ?', [jobKey], options);
             if (Number(uses[0]?.card_id) !== card || uses[0]?.state !== 'reserved') {
                 throw new Error('卡片预占记录不一致，不能自动重试');
             }
             await settleCardUse(jobKey, 'failed', options);
             await runExecute('UPDATE cdk_codes SET used_at = COALESCE(used_at, CURRENT_TIMESTAMP) WHERE cdk_code = ?', [cdk], options);
-            return { applied: true };
+            return { applied: true, retry };
+        });
+    }
+
+    async function claimOrbitcardRetry(jobKey, { email, baseUrl, apiKeyHash }) {
+        const [initial] = await runQuery('SELECT cdk_code FROM task_logs WHERE job_key = ?', [jobKey]);
+        if (!initial) return null;
+        return withTransaction(async connection => {
+            const options = { connection }, cdk = initial.cdk_code;
+            const [code] = await runQuery('SELECT * FROM cdk_codes WHERE cdk_code = ? FOR UPDATE', [cdk], options);
+            const [task] = await runQuery('SELECT * FROM task_logs WHERE job_key = ? FOR UPDATE', [jobKey], options);
+            const [latest] = await runQuery('SELECT job_key FROM task_logs WHERE cdk_code = ? ORDER BY id DESC LIMIT 1', [cdk], options);
+            const attempt = Number(task?.orbitcard_retry_attempt_no || 1);
+            if (!code?.is_active || code.manual_redeemed_at || task?.status !== 'running' || task.orbitcard_state !== 'retry_waiting'
+                || latest?.job_key !== jobKey || !Number.isSafeInteger(attempt) || attempt < 1 || attempt >= MAX_PAYMENT_ATTEMPTS) return null;
+            if (String(task.orbitcard_email).toLowerCase() !== String(email).toLowerCase()
+                || task.orbitcard_base_url !== baseUrl || task.orbitcard_api_key_hash !== apiKeyHash) {
+                throw new Error('重试账号、平台或密钥与原订单不一致');
+            }
+            const failure = JSON.parse(task.gpt_api_raw || '{}');
+            if (!confirmedFailure(failure, { orderId: task.gpt_api_order_id, clientOrderNo: task.orbitcard_client_order_no,
+                cardId: task.orbitcard_card_id, planType: require('./plan-registry').PROVIDER_PLANS[planFor(task.orbitcard_plan_type)], email })) return null;
+            if (await hasPendingPreparation(task, options)) return null;
+            const next = await createTaskLog({ tokenPreview: email, cdkCode: cdk, status: 'running', progress: 3 }, options);
+            const root = task.orbitcard_retry_root_job_key || jobKey;
+            const first = task.orbitcard_retry_first_card_id || task.orbitcard_card_id;
+            const second = attempt === 2 ? task.orbitcard_card_id : task.orbitcard_retry_second_card_id || null;
+            const identity = require('./orbitcard-cdk').clientOrderNo(cdk, next.jobKey);
+            await runExecute(`UPDATE task_logs SET orbitcard_client_order_no = ?, orbitcard_state = 'preparing',
+                orbitcard_plan_type = ?, orbitcard_email = ?, orbitcard_base_url = ?, orbitcard_retry_root_job_key = ?,
+                orbitcard_retry_attempt_no = ?, orbitcard_retry_first_card_id = ?, orbitcard_retry_second_card_id = ?,
+                orbitcard_api_key_hash = ? WHERE job_key = ?`,
+            [identity, task.orbitcard_plan_type, email, baseUrl, root, attempt + 1, first, second, apiKeyHash, next.jobKey], options);
+            await runExecute(`UPDATE task_logs SET status = ?, progress = 99, message = ?, orbitcard_state = ?,
+                gpt_api_order_id = ?, gpt_api_raw = ?, session_payload = NULL WHERE job_key = ?`,
+            ['failed', '本次支付已失败，已创建下一次换卡尝试', 'failed', task.gpt_api_order_id, task.gpt_api_raw, jobKey], options);
+            return { ...next, orbitcardState: 'preparing', orbitcardClientOrderNo: identity,
+                orbitcardRetryRootJobKey: root, orbitcardRetryAttemptNo: attempt + 1,
+                orbitcardRetryFirstCardId: first, orbitcardRetrySecondCardId: second, planType: task.orbitcard_plan_type };
         });
     }
 
@@ -273,5 +323,5 @@ module.exports = function createOrbitcardCdkStore({ withTransaction, runQuery, r
     }
 
     return { createOrbitcardTask, getOrbitcardTaskByCdk, settleOrbitcardTask,
-        recordOrbitcardPaymentFailure, lockOrbitcardSupport };
+        recordOrbitcardPaymentFailure, claimOrbitcardRetry, lockOrbitcardSupport };
 };

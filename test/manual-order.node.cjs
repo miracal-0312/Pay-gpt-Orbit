@@ -69,14 +69,30 @@ function fixture({ unknown = false, pendingAllocation = false, now = Date.now } 
         },
         settleManualOrder: async (id, change) => {
             const row = orders.get(id);
-            if (!['success','failed'].includes(row.state)) Object.assign(row, change);
+            if (change.expectedClientOrderNo && row.client_order_no !== change.expectedClientOrderNo) return row;
+            if (!['success','failed','support_locked'].includes(row.state)) {
+                const retry = change.state === 'failed' && change.retryAllowed && row.state !== 'manual'
+                    && require('../payment-retry-policy').manualHistory(row).length < 2;
+                Object.assign(row, change, { state: retry ? 'retry_waiting' : change.state === 'failed' ? 'support_locked' : change.state });
+                if (change.snapshot) row.snapshot=JSON.stringify(change.snapshot);
+            }
+            return row;
+        },
+        startManualRetry: async (requestId, expected) => {
+            const row=orders.get(requestId);
+            if(row.state!=='retry_waiting' || row.client_order_no!==expected)return null;
+            const history=require('../payment-retry-policy').manualHistory(row);
+            if(history.length>=2)return null;
+            history.push({client_order_no:row.client_order_no,task_no:row.task_no,card_id:row.card_id,snapshot:JSON.parse(row.snapshot)});
+            Object.assign(row,{client_order_no:`manual-${requestId}-attempt-${history.length+1}`,retry_history:JSON.stringify(history),
+                state:'preparing',card_id:0,task_no:null,snapshot:null});
             return row;
         },
     };
     const provider = {
         fetchPlans: async () => ({ success: true, plans }),
-        summary: value => ({ task_no: value?.task_no, client_order_no: value?.client_order_no }),
-        outcome: value => value.upstream_status === 'succeeded' ? 'success' : 'pending',
+        summary: require('../orbitcard-client').summary,
+        outcome: require('../orbitcard-client').outcome,
         captcha: () => null,
         request: async (_cfg, operation, body, key) => {
             auditContexts.push({operation,jobKey:_cfg.auditJobKey});
@@ -158,6 +174,90 @@ test('admin execution ownership remains held after HTTP acceptance until backgro
 
 const session = JSON.stringify({ user: { email: 'buyer@example.com' }, account: {}, accessToken: 'secret-session' });
 const id = '1b056caa-d7a6-4c39-9672-88e9cc5c6577';
+
+test('administrator payments rotate through three existing cards and retain the two earlier failure records',async()=>{
+    process.env.ORBITCARD_API_KEY='key';process.env.ORBITCARD_API_SECRET='secret';
+    let clock=Date.now();const f=fixture({now:()=>clock}),submitted=[];
+    f.cardService.allocate=async(_cfg,_job,_plan,selection)=>{
+        const card=12+submitted.length;
+        assert.ok(!(selection.excludedCardIds||[]).includes(card));
+        return card;
+    };
+    f.provider.request=async(_cfg,operation,body,key)=>{
+        if(operation==='createSubscription') {
+            const result={task_no:`SUB-${submitted.length+1}`,client_order_no:key,plan_type:body.plan_type,card_id:body.card_id,
+                targetEmail:'buyer@example.com',status:'failed',subscription_succeeded:false,query_source:'upstream'};
+            submitted.push(result);return {success:true,data:result};
+        }
+        assert.equal(operation,'getSubscription');
+        return {success:true,data:submitted.find(row=>row.task_no===body.task_no||row.client_order_no===body.client_order_no)};
+    };
+    await f.service.create({requestId:id,planType:'gpt-plus',mode:'test',session,authorized:true});
+    await until(()=>submitted.length===2&&f.activeJobs.size===0);
+    clock+=5000;await f.service.refresh(id);
+    assert.equal(submitted.length,3);
+    clock+=5000;await f.service.refresh(id);
+    assert.equal(f.orders.get(id).state,'support_locked');assert.equal(submitted.length,3);
+    assert.deepEqual(submitted.map(row=>row.card_id),[12,13,14]);
+    assert.equal(new Set(submitted.map(row=>row.client_order_no)).size,3);
+    assert.equal(JSON.parse(f.orders.get(id).retry_history).length,2);
+    assert.ok(!JSON.stringify(f.orders.get(id)).includes('secret-session'));
+});
+
+test('expired administrator retry Session waits for fresh credentials and keeps the attempt identity on preparation resume',async()=>{
+    process.env.ORBITCARD_API_KEY='key';process.env.ORBITCARD_API_SECRET='secret';
+    let clock=Date.now();const f=fixture({unknown:true,now:()=>clock});
+    const input={requestId:id,planType:'gpt-plus',mode:'test',session,authorized:true};
+    await f.service.create(input);await until(()=>f.activeJobs.size===0);
+    const order=f.orders.get(id);
+    Object.assign(order,{state:'retry_waiting',snapshot:JSON.stringify(manualFailure(order))});
+    const before=f.calls.length;
+    clock+=16*60*1000;
+    assert.equal((await f.service.refresh(id)).state,'retry_waiting');
+    assert.equal(f.calls.length,before);
+    assert.equal(require('../payment-retry-policy').manualHistory(order).length,0);
+    // Model a restart after the next identity was persisted but before its card
+    // was allocated. Resubmitting must use that identity for the payment guard.
+    const next=await f.store.startManualRetry(id,order.client_order_no);
+    f.cardService.allocate=async(cfg,key,_plan,selection)=>{
+        assert.equal(key,next.client_order_no);
+        assert.equal(cfg.auditJobKey,key);
+        await cfg.paymentGuard.assertAllowed();
+        assert.deepEqual(selection.excludedCardIds,[12]);
+        return 13;
+    };
+    await f.service.create(input);await until(()=>f.activeJobs.size===0);
+    assert.equal(order.state,'pending');
+    assert.equal(order.client_order_no,`manual-${id}-attempt-2`);
+    assert.equal(require('../payment-retry-policy').manualHistory(order).length,1);
+    assert.equal(f.calls.filter(call=>call.operation==='createSubscription').length,2);
+});
+
+test('simultaneous administrator retries reserve capacity before awaiting durable attempt claims',async()=>{
+    process.env.ORBITCARD_API_KEY='key';process.env.ORBITCARD_API_SECRET='secret';
+    const f=fixture({unknown:true}),second='36aad0bb-5eb7-4771-93f5-1ebd049b29e0';
+    for(const requestId of [id,second]) {
+        await f.service.create({requestId,planType:'gpt-plus',mode:'test',session,authorized:true});
+        await until(()=>f.activeJobs.size===0);
+        const order=f.orders.get(requestId);
+        Object.assign(order,{state:'retry_waiting',snapshot:JSON.stringify(manualFailure(order))});
+    }
+    let enter,release,claims=0;
+    const entered=new Promise(resolve=>{enter=resolve;}),gate=new Promise(resolve=>{release=resolve;});
+    const start=f.store.startManualRetry;
+    f.store.getMaxConcurrentActivations=async()=>1;
+    f.store.startManualRetry=async(...args)=>{claims++;enter();await gate;return start(...args);};
+    const first=f.service.refresh(id);
+    try {
+        await entered;
+        assert.equal((await f.service.refresh(second)).state,'retry_waiting');
+        assert.equal(claims,1);
+    } finally {release();}
+    await first;
+    assert.equal(f.activeJobs.size,0);
+    assert.equal(claims,1);
+    assert.equal(f.calls.filter(call=>call.operation==='createSubscription').length,3);
+});
 
 test('manual payment stages and all upstream preparation calls share one durable trace without Session secrets', async()=>{
     process.env.ORBITCARD_API_KEY='key';process.env.ORBITCARD_API_SECRET='secret';
@@ -347,7 +447,7 @@ function storeFixture({ enqueueRedemption } = {}) {
         if (q.startsWith('SELECT * FROM orbitcard_admin_orders WHERE request_id')) return db.orders.filter(o => o.request_id === p[0]
             && (!q.includes("state = 'prepared'") || o.state === 'prepared')).map(o => structuredClone(o));
         if (q.startsWith('SELECT request_id FROM orbitcard_admin_orders WHERE scope')) return db.orders.filter(o => o.scope === p[0]
-            && o.target_email === p[1] && o.plan_type === p[2] && ['preparing','prepared','funding_waiting','funding_review','funding_pending','card_pending','submitting','pending','manual'].includes(o.state)).map(o => structuredClone(o));
+            && o.target_email === p[1] && o.plan_type === p[2] && ['preparing','prepared','funding_waiting','funding_review','funding_pending','card_pending','submitting','pending','manual','retry_waiting'].includes(o.state)).map(o => structuredClone(o));
         if (q.startsWith('SELECT request_id FROM orbitcard_admin_orders WHERE cdk_code')) return db.orders.filter(o => o.cdk_code === p[0] && o.state === 'success').map(o => structuredClone(o));
         if (q.startsWith('SELECT * FROM cdk_codes') || q.startsWith('SELECT cdk_code FROM cdk_codes')) return db.cdks.filter(c => c.cdk_code === p[0]).map(o => structuredClone(o));
         if (q.startsWith('SELECT job_key FROM task_logs')) return [];
@@ -369,6 +469,10 @@ function storeFixture({ enqueueRedemption } = {}) {
             target_email: p[8], card_id: 0, admin_email: p[9], state: 'preparing',
             task_no: null, snapshot: null, message: p[10], issue_key: null
         });
+        else if (q.startsWith('UPDATE orbitcard_admin_orders SET client_order_no = ?')) {
+            Object.assign(db.orders.find(o=>o.request_id===p[3]),{client_order_no:p[0],retry_history:p[1],state:'preparing',
+                card_id:0,authorization_baseline:null,issue_key:null,task_no:null,snapshot:null,message:p[2]});
+        }
         else if (q.startsWith('UPDATE cdk_codes SET used_at = CURRENT_TIMESTAMP')) db.cdks.find(c => c.cdk_code === p[0]).used_at = 'reserved';
         else if (q.startsWith('UPDATE cdk_codes SET used_at = NULL')) {
             const code = db.cdks.find(c => c.cdk_code === p[0]);
@@ -418,12 +522,17 @@ function storeFixture({ enqueueRedemption } = {}) {
         } else throw new Error(`Unexpected execute ${q}`);
         return { affectedRows: 1 };
     };
-    const withTransaction = async action => {
-        const backup = structuredClone(db);
-        inTransaction = true;
-        try { return await action({ transaction: true }); }
-        catch (error) { Object.assign(db, backup); throw error; }
-        finally { inTransaction = false; }
+    let transactionTail = Promise.resolve();
+    const withTransaction = action => {
+        const result = transactionTail.then(async () => {
+            const backup = structuredClone(db);
+            inTransaction = true;
+            try { return await action({ transaction: true }); }
+            catch (error) { Object.assign(db, backup); throw error; }
+            finally { inTransaction = false; }
+        });
+        transactionTail = result.catch(() => {});
+        return result;
     };
     return { db, advance: ms => { clock += ms; }, now: () => clock,
         store: createStore({ runQuery, runExecute, withTransaction, enqueueRedemption, now: () => clock }) };
@@ -579,6 +688,114 @@ function manualInput(requestId, overrides = {}) {
         acceptedCdkPlans: ['gpt-plus','plus'], ...overrides };
 }
 
+function manualFailure(order, overrides = {}) {
+    return { task_no: `SUB-${order.card_id}`, client_order_no: order.client_order_no,
+        card_id: order.card_id, plan_type: order.plan_type, targetEmail: order.target_email,
+        status: 'failed', subscription_succeeded: false, query_source: 'upstream', ...overrides };
+}
+
+test('durable administrator retry keeps exactly three different cards and rejects duplicate claims and stale results', async () => {
+    const { db, store, now } = storeFixture(), input = manualInput(id);
+    const credentials = { email: input.targetEmail, baseUrl: input.baseUrl, apiKeyHash: input.apiKeyHash };
+    await prepareOrder(store, input);
+    const attempts = [];
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        assert.equal(await store.claimManualSubmission(id), true);
+        const current = await store.getManualOrder(id), snapshot = manualFailure(current);
+        attempts.push({ identity: current.client_order_no, cardId: current.card_id, snapshot });
+        const settled = await store.settleManualOrder(id, { state: 'failed', taskNo: snapshot.task_no,
+            snapshot, retryAllowed: true, expectedClientOrderNo: current.client_order_no });
+        assert.equal(settled.state, attempt < 3 ? 'retry_waiting' : 'support_locked');
+        assert.equal(db.card.active_job, null);
+        assert.equal(db.card.reuse_after_ms, now() + 300000);
+        assert.equal(db.cdks[0].used_at, 'reserved');
+        if (attempt === 3) {
+            assert.equal(await store.startManualRetry(id, current.client_order_no, credentials), null);
+            break;
+        }
+        await assert.rejects(store.prepareManualOrder(manualInput('36aad0bb-5eb7-4771-93f5-1ebd049b29e0')), /待确认管理员订单/);
+        const claims = await Promise.all(Array.from({ length: 8 }, () => store.startManualRetry(id, current.client_order_no, credentials)));
+        const next = claims.filter(Boolean);
+        assert.equal(next.length, 1);
+        assert.equal(JSON.parse(next[0].retry_history).length, attempt);
+        for (const prior of attempts) assert.equal(await store.reserveManualCard(id, prior.cardId, next[0].client_order_no, input.planType), null);
+        Object.assign(db.card, { card_id: 12 + attempt, reuse_after_ms: 0, authorization_pending_count: 0 });
+        assert.ok(await store.reserveManualCard(id, db.card.card_id, next[0].client_order_no, input.planType));
+        await store.markManualPrepared(id, next[0].client_order_no, db.card.card_id);
+        await store.settleManualOrder(id, { state: 'success', taskNo: snapshot.task_no, snapshot,
+            expectedClientOrderNo: current.client_order_no });
+        assert.equal(db.orders[0].state, 'prepared', 'late result from a previous attempt cannot settle its replacement');
+        assert.equal(db.card.active_job, next[0].client_order_no);
+    }
+    assert.equal(new Set(attempts.map(attempt => attempt.identity)).size, 3);
+    const history = JSON.parse(db.orders[0].retry_history);
+    assert.deepEqual(history.map(attempt => attempt.card_id), [12, 13]);
+    assert.deepEqual(history.map(attempt => attempt.snapshot), attempts.slice(0, 2).map(attempt => attempt.snapshot));
+    assert.deepEqual(JSON.parse(db.orders[0].snapshot), attempts[2].snapshot);
+    assert.ok(!JSON.stringify(db).includes('accessToken'));
+});
+
+test('administrator retries require original account credentials, confirmed failure and resolved funding', async () => {
+    const { db, store } = storeFixture(), input = manualInput(id);
+    const credentials = { email: input.targetEmail, baseUrl: input.baseUrl, apiKeyHash: input.apiKeyHash };
+    const prepared = await prepareOrder(store, input);
+    await store.claimManualSubmission(id);
+    await store.settleManualOrder(id, { state: 'pending', message: 'network timeout', expectedClientOrderNo: prepared.client_order_no });
+    assert.equal(await store.startManualRetry(id, prepared.client_order_no, credentials), null);
+    assert.equal(db.card.active_job, prepared.client_order_no);
+    const snapshot = manualFailure(prepared);
+    await store.settleManualOrder(id, { state: 'failed', taskNo: snapshot.task_no,
+        snapshot, retryAllowed: true, expectedClientOrderNo: prepared.client_order_no });
+    const waiting = structuredClone(db.orders[0]);
+    for (const changed of [{ email: 'other@example.com' }, { baseUrl: 'https://other.example.com' }, { apiKeyHash: 'b'.repeat(64) }]) {
+        await assert.rejects(store.startManualRetry(id, prepared.client_order_no, { ...credentials, ...changed }), /不一致/);
+        assert.deepEqual(db.orders[0], waiting);
+    }
+    for (const changed of [{ task_no: 'FOREIGN' }, { client_order_no: 'foreign' }, { card_id: 999 },
+        { plan_type: 'gpt-go' }, { targetEmail: 'other@example.com' }, { request_error: true },
+        { status: 'pending', subscription_succeeded: undefined }]) {
+        db.orders[0].snapshot = JSON.stringify({ ...snapshot, ...changed });
+        assert.equal(await store.startManualRetry(id, prepared.client_order_no, credentials), null);
+        assert.equal(db.orders[0].client_order_no, prepared.client_order_no);
+    }
+    db.orders[0].snapshot = waiting.snapshot;
+    for (const changed of [{ is_active: 0 }, { manual_redeemed_at: '2026-11-10' }]) {
+        const original = structuredClone(db.cdks[0]);
+        Object.assign(db.cdks[0], changed);
+        assert.equal(await store.startManualRetry(id, prepared.client_order_no, credentials), null);
+        Object.assign(db.cdks[0], original); delete db.cdks[0].manual_redeemed_at;
+    }
+    db.fundings.push({ job_key: prepared.client_order_no, state: 'pending' });
+    assert.equal(await store.startManualRetry(id, prepared.client_order_no, credentials), null);
+    db.fundings.length = 0;
+    db.issues.push({ job_key: prepared.client_order_no, state: 'unknown' });
+    assert.equal(await store.startManualRetry(id, prepared.client_order_no, credentials), null);
+    db.issues.length = 0;
+    assert.equal((await store.startManualRetry(id, prepared.client_order_no, credentials)).state, 'preparing');
+});
+
+test('administrator retry does not queue when failed-card release rolls back and preparation failures keep the CDK locked', async () => {
+    const { db, store } = storeFixture(), input = manualInput(id);
+    const prepared = await prepareOrder(store, input);
+    await store.claimManualSubmission(id);
+    const snapshot = manualFailure(prepared);
+    db.failRelease = true;
+    await assert.rejects(store.settleManualOrder(id, { state: 'failed', taskNo: snapshot.task_no,
+        snapshot, retryAllowed: true, expectedClientOrderNo: prepared.client_order_no }), /injected card release failure/);
+    assert.equal(db.orders[0].state, 'submitting');
+    assert.equal(db.card.active_job, prepared.client_order_no);
+    assert.equal(db.card.reuse_after_ms, 0);
+    db.failRelease = false;
+    await store.settleManualOrder(id, { state: 'failed', taskNo: snapshot.task_no,
+        snapshot, retryAllowed: true, expectedClientOrderNo: prepared.client_order_no });
+    const next = await store.startManualRetry(id, prepared.client_order_no,
+        { email: input.targetEmail, baseUrl: input.baseUrl, apiKeyHash: input.apiKeyHash });
+    const stopped = await store.failManualPreparation(id, next.client_order_no, 'no existing cards');
+    assert.equal(stopped.state, 'support_locked');
+    assert.equal(db.cdks[0].used_at, 'reserved');
+    assert.equal(JSON.parse(stopped.retry_history).length, 1);
+});
+
 test('manual fulfillment emits a receipt atomically, while test orders and failures emit none', async () => {
     for (const mode of ['fulfillment', 'test']) {
         const receipts = []; let fail = mode === 'fulfillment';
@@ -691,7 +908,7 @@ test('manual original-order refresh settles terminal upstream snapshots and rele
         const service = createService({ store, provider, now, activeJobs: new Set(), audit: event => events.push(event),
             cardService: { allocate: async () => assert.fail('reconciliation cannot allocate or fund a card') } });
         const result = await service.refresh(id, cfg);
-        assert.equal(result.state, status === 'failed' ? 'support_locked' : 'success');
+        assert.equal(result.state, status === 'failed' ? 'retry_waiting' : 'success');
         assert.equal(db.card.active_job, null);
         assert.equal(db.card.balance, 91);
         assert.equal(db.card.authorization_count, 0);

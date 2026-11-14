@@ -143,8 +143,7 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
         async function concurrency() {
             const snapshot = await selectionSnapshot();
             result.concurrency = await simulateSelection({ snapshot, count: concurrentTasks, available,
-                planType: plan, jobPrefix: traceId, priceFor: (_product, type) => planPrice(cfg, type),
-                openingFor: () => cards.chooseProduct(snapshot.products, plan, cfg) });
+                planType: plan, jobPrefix: traceId, priceFor: (_product, type) => planPrice(cfg, type) });
             delete result.selection;
             return result.concurrency;
         }
@@ -157,32 +156,25 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
             Object.assign(result.selection, { action: decision.action, card_id: selected?.card.card_id || null,
                 candidate_count: decision.candidates.length, skipped: decision.skipped, waiting: decision.waiting });
             let funding = selected ? money.units(money.cents(selected.deficit)) : 0n;
-            let opening;
             if (selected) {
                 result.selection.funding_amount = money.cents(selected.deficit);
-            } else if (decision.action === 'open') {
-                opening = cards.chooseProduct(products, plan, cfg);
-                result.selection.opening = cards.createCardBody(opening);
-                const target = money.units(planPrice(cfg, plan)) + money.units(opening.min_retained_balance);
-                const deficit = target - money.units(opening.amount);
-                funding = deficit > 0n ? money.units(money.cents(deficit)) : 0n;
+            } else if (decision.action === 'unavailable') {
+                throw new CardPreparationError('没有可用的现有支付卡，自动开卡已禁用，请管理员手动申请或补充卡片');
             } else throw new CardPreparationError(decision.waiting.some(card => card.reason === 'cooldown')
                 ? '卡片处于支付后 5 分钟冷却期，实际支付需要等待或使用其他可用卡'
                 : '卡片被占用或消费授权仍待同步，实际支付需要等待处理');
-            const required = selected ? funding : money.units(opening.amount) + funding;
+            const required = funding;
             if (cfg.enabled) {
                 const retiring = saved.filter(row => !row.active_job && Number(row.authorization_count) >= poolPolicy.MAX_USES
                     && readable.some(card => card.card_id === Number(row.card_id)));
-                const openCount = selected ? 0 : 1;
-                const openingAmount = selected ? 0n : money.units(opening.amount);
                 result.selection.maintenance = { capacity_limit:null, auto_refill:false, current_size:readable.length,
-                    retire_card_ids:retiring.map(row => Number(row.card_id)), open_count:openCount,
-                    opening_amount:money.cents(openingAmount), funding_amount:money.cents(funding),
+                    retire_card_ids:retiring.map(row => Number(row.card_id)), open_count:0,
+                    opening_amount:'0.00', funding_amount:money.cents(funding),
                     required_balance:money.cents(required), fees_included:false, snapshot_only:true };
             }
             if (available < required) {
                 result.selection.account_check = 'failed';
-                throw new CardPreparationError('账户可用余额不足以完成本单按需开卡和支付补款；基础预算不含平台额外费用');
+                throw new CardPreparationError('账户可用余额不足以完成本单支付补款；基础预算不含平台额外费用');
             }
             return result.selection;
         }

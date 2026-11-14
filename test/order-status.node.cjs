@@ -146,7 +146,8 @@ test('order editor preserves failed edits, prevents duplicate saves and refreshe
         await new Promise(resolve => { release = resolve; });
         return { message: '已保存' };
     };
-    const api = new Function('$', 'request', 'notice', 'loadOverview', `${source.slice(source.indexOf('let orderEditing ='), source.indexOf("document.addEventListener('click'"))}; return {editOrderStatus,saveOrderStatus};`)(
+    const start = source.indexOf('let orderEditing =');
+    const api = new Function('$', 'request', 'notice', 'loadOverview', `${source.slice(start, source.indexOf("document.addEventListener('click'", start))}; return {editOrderStatus,saveOrderStatus};`)(
         $, request, () => {}, async () => { refreshes++; });
     api.editOrderStatus({ dataset: { editOrder: 'job/1', orderStatus: 'manual' } });
     $('orderEditStatus').value = 'success'; $('orderStatusReason').value = ' 核对完成 ';

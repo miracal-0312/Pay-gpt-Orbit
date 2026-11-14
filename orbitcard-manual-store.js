@@ -2,6 +2,7 @@
 const poolPolicy = require('./orbitcard-pool');
 
 const { cardScope, planFor, FUNDING_POLL_MS } = require('./orbitcard-card-policy');
+const { MAX_PAYMENT_ATTEMPTS, confirmedFailure, manualHistory } = require('./payment-retry-policy');
 
 module.exports = function createManualStore({ runQuery, runExecute, withTransaction, enqueueRedemption = async () => {}, now = Date.now }) {
     async function getManualOrder(requestId, options) {
@@ -43,7 +44,7 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
             }
             const pending = await runQuery(`SELECT request_id FROM orbitcard_admin_orders
                 WHERE scope = ? AND target_email = ? AND plan_type = ?
-                AND state IN ('preparing','prepared','funding_waiting','funding_review','funding_pending','card_pending','submitting','pending','manual') LIMIT 1 FOR UPDATE`,
+                AND state IN ('preparing','prepared','funding_waiting','funding_review','funding_pending','card_pending','submitting','pending','manual','retry_waiting') LIMIT 1 FOR UPDATE`,
             [scope, input.targetEmail, input.planType], options);
             if (pending.length) throw new Error('此账号与套餐已有待确认管理员订单，请先核对原单');
             if (input.mode === 'fulfillment') {
@@ -75,6 +76,7 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
             if (Number(order.card_id) > 0 && Number(order.card_id) !== Number(cardId)) {
                 throw new Error('管理员订单已绑定原支付卡，不能换卡重复补款');
             }
+            if (manualHistory(order).some(attempt => Number(attempt.card_id) === Number(cardId))) return null;
             const [card] = await runQuery('SELECT * FROM orbitcard_managed_cards WHERE scope = ? AND card_id = ? FOR UPDATE',
                 [order.scope, cardId], options);
             if (!card || card.provider_status !== 'ACTIVE' || card.currency !== 'USD') return null;
@@ -129,11 +131,14 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
                 await runExecute('UPDATE orbitcard_managed_cards SET active_job = NULL WHERE scope = ? AND card_id = ? AND active_job = ?',
                     [order.scope, order.card_id, jobKey], options);
             }
-            if (order.cdk_code) {
+            const retry = manualHistory(order).length > 0;
+            if (order.cdk_code && !retry) {
                 await runExecute('UPDATE cdk_codes SET used_at = NULL WHERE cdk_code = ? AND manual_redeemed_at IS NULL', [order.cdk_code], options);
             }
             await runExecute("UPDATE orbitcard_admin_orders SET state = 'failed', message = ? WHERE request_id = ? AND state IN ('preparing','card_pending')",
                 [String(message || '').slice(0,255), requestId], options);
+            if (retry) await runExecute('UPDATE orbitcard_admin_orders SET state = ?, message = ? WHERE request_id = ?',
+                ['support_locked', '换卡重试准备失败，CDK 保持锁定；' + String(message || '').slice(0, 180), requestId], options);
             return getManualOrder(requestId, options);
         });
     }
@@ -222,9 +227,12 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
             if(!card || card.active_job!==jobKey) throw new Error('原补款卡片占用归属已变更，不能释放');
             await runExecute('UPDATE orbitcard_managed_cards SET active_job = NULL WHERE scope = ? AND card_id = ? AND active_job = ?',
                 [order.scope,order.card_id,jobKey],options);
-            if(order.cdk_code) await runExecute('UPDATE cdk_codes SET used_at = NULL WHERE cdk_code = ? AND manual_redeemed_at IS NULL',[order.cdk_code],options);
+            const retry = manualHistory(order).length > 0;
+            if(order.cdk_code && !retry) await runExecute('UPDATE cdk_codes SET used_at = NULL WHERE cdk_code = ? AND manual_redeemed_at IS NULL',[order.cdk_code],options);
             await runExecute("UPDATE orbitcard_admin_orders SET state = 'failed', message = ? WHERE request_id = ? AND state IN ('funding_waiting','funding_review','funding_pending')",
                 [String(message || '').slice(0,255),requestId],options);
+            if (retry) await runExecute('UPDATE orbitcard_admin_orders SET state = ?, message = ? WHERE request_id = ?',
+                ['support_locked', '换卡补款已核对，订阅未继续；CDK 保持售后锁定', requestId], options);
             return getManualOrder(requestId,options);
         });
     }
@@ -244,7 +252,7 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
             if (!order) return null;
             if (order.cdk_code) {
                 await runQuery('SELECT cdk_code FROM cdk_codes WHERE cdk_code = ? FOR UPDATE', [order.cdk_code], options);
-                await runExecute('UPDATE cdk_codes SET used_at = NULL WHERE cdk_code = ? AND manual_redeemed_at IS NULL', [order.cdk_code], options);
+                if (!manualHistory(order).length) await runExecute('UPDATE cdk_codes SET used_at = NULL WHERE cdk_code = ? AND manual_redeemed_at IS NULL', [order.cdk_code], options);
             }
             const [card] = await runQuery('SELECT * FROM orbitcard_managed_cards WHERE scope = ? AND card_id = ? FOR UPDATE',
                 [order.scope, order.card_id], options);
@@ -252,16 +260,19 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
             await runExecute('UPDATE orbitcard_managed_cards SET active_job = NULL WHERE scope = ? AND card_id = ? AND active_job = ?',
                 [order.scope, order.card_id, order.client_order_no], options);
             await runExecute("UPDATE orbitcard_admin_orders SET state = 'failed', message = '提交前中断；未调用平台扣款，CDK 与支付卡已释放' WHERE request_id = ? AND state = 'prepared'", [requestId], options);
+            if (manualHistory(order).length) await runExecute('UPDATE orbitcard_admin_orders SET state = ?, message = ? WHERE request_id = ?',
+                ['support_locked', '换卡重试在提交前中断，CDK 保持售后锁定', requestId], options);
             return getManualOrder(requestId, options);
         });
     }
 
-    async function settleManualOrder(requestId, { state, taskNo = null, snapshot = null, message }) {
+    async function settleManualOrder(requestId, { state, taskNo = null, snapshot = null, message, retryAllowed = false, expectedClientOrderNo }) {
         if (!['pending', 'manual', 'success', 'failed', 'rejected'].includes(state)) throw new Error('无效的管理员订单状态');
         return withTransaction(async connection => {
             const options = { connection };
             const [order] = await runQuery('SELECT * FROM orbitcard_admin_orders WHERE request_id = ? FOR UPDATE', [requestId], options);
             if (!order) throw new Error('管理员订单不存在');
+            if (expectedClientOrderNo && order.client_order_no !== expectedClientOrderNo) return order;
             if (order.task_no && taskNo && order.task_no !== taskNo) throw new Error('平台订单号与原订单不一致');
             if (['success', 'failed', 'rejected', 'support_locked'].includes(order.state)) return order;
             if (!['submitting','pending','manual'].includes(order.state)) return order;
@@ -274,13 +285,21 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
             }
             const safeTaskNo = taskNo || order.task_no || null;
             const supportLocked = state === 'failed';
+            let retry = false;
+            if (supportLocked && retryAllowed && order.state !== 'manual' && manualHistory(order).length + 1 < MAX_PAYMENT_ATTEMPTS
+                && confirmedFailure(snapshot, { clientOrderNo: order.client_order_no, orderId: safeTaskNo,
+                    cardId: order.card_id, planType: order.plan_type, email: order.target_email })) {
+                const [code] = order.cdk_code ? await runQuery('SELECT * FROM cdk_codes WHERE cdk_code = ? FOR UPDATE', [order.cdk_code], options) : [];
+                retry = !order.cdk_code || Boolean(code?.is_active && !code.manual_redeemed_at);
+            }
             if (supportLocked) message = '原订单已确认失败，自动支付已停止；CDK 保持锁定，请人工售后处理';
+            if (retry) message = `充值已明确失败，等待换卡重试；最多 ${MAX_PAYMENT_ATTEMPTS} 次，Session 失效时请按原请求编号重新提交`;
             await runExecute(`UPDATE orbitcard_admin_orders SET state = ?, task_no = COALESCE(task_no, ?),
                 snapshot = ?, message = ? WHERE request_id = ?`,
-            [supportLocked ? 'support_locked' : state, safeTaskNo, snapshot ? JSON.stringify(snapshot) : order.snapshot,
+            [retry ? 'retry_waiting' : supportLocked ? 'support_locked' : state, safeTaskNo, snapshot ? JSON.stringify(snapshot) : order.snapshot,
                 String(message || '').slice(0, 255), requestId], options);
             if (['success', 'failed', 'rejected'].includes(state)) {
-                if (order.cdk_code && state === 'rejected') {
+                if (order.cdk_code && state === 'rejected' && !manualHistory(order).length) {
                     await runQuery('SELECT cdk_code FROM cdk_codes WHERE cdk_code = ? FOR UPDATE', [order.cdk_code], options);
                     await runExecute('UPDATE cdk_codes SET used_at = NULL WHERE cdk_code = ? AND manual_redeemed_at IS NULL', [order.cdk_code], options);
                 }
@@ -310,8 +329,36 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
         });
     }
 
+    async function startManualRetry(requestId, expectedClientOrderNo, { email, baseUrl, apiKeyHash }) {
+        return withTransaction(async connection => {
+            const options = { connection };
+            const [order] = await runQuery('SELECT * FROM orbitcard_admin_orders WHERE request_id = ? FOR UPDATE', [requestId], options);
+            if (!order || order.client_order_no !== expectedClientOrderNo || order.state !== 'retry_waiting') return null;
+            if (order.target_email.toLowerCase() !== email.toLowerCase() || order.scope !== cardScope(baseUrl) || order.api_key_hash !== apiKeyHash) {
+                throw new Error('重试账号、平台或密钥与原订单不一致');
+            }
+            const history = manualHistory(order), snapshot = JSON.parse(order.snapshot || '{}');
+            if (history.length + 1 >= MAX_PAYMENT_ATTEMPTS || !confirmedFailure(snapshot, {
+                clientOrderNo: order.client_order_no, orderId: order.task_no, cardId: order.card_id, planType: order.plan_type, email
+            })) return null;
+            if (order.cdk_code) {
+                const [code] = await runQuery('SELECT * FROM cdk_codes WHERE cdk_code = ? FOR UPDATE', [order.cdk_code], options);
+                if (!code?.is_active || code.manual_redeemed_at) return null;
+            }
+            const fundings = await runQuery('SELECT * FROM orbitcard_card_fundings WHERE job_key = ? FOR UPDATE', [order.client_order_no], options);
+            const issues = await runQuery('SELECT * FROM orbitcard_card_issues WHERE job_key = ? OR issue_key = ? FOR UPDATE', [order.client_order_no, order.issue_key || null], options);
+            if ([...fundings, ...issues].some(intent => !['ready','failed'].includes(intent.state))) return null;
+            history.push({ client_order_no: order.client_order_no, task_no: order.task_no, card_id: Number(order.card_id), snapshot });
+            const identity = `manual-${requestId}-attempt-${history.length + 1}`;
+            await runExecute(`UPDATE orbitcard_admin_orders SET client_order_no = ?, retry_history = ?, state = 'preparing',
+                card_id = 0, authorization_baseline = NULL, issue_key = NULL, task_no = NULL, snapshot = NULL, message = ? WHERE request_id = ?`,
+            [identity, JSON.stringify(history), `正在准备第 ${history.length + 1} 次支付，使用其他现有卡片`, requestId], options);
+            return getManualOrder(requestId, options);
+        });
+    }
+
     return { getManualOrder, listManualOrders, listRecoverableManualOrders, noteManualQueryAttempt,
         prepareManualOrder, reserveManualCard, attachManualIssue, blockManualBalance,
         failManualPreparation, pauseManualPreparation, markManualPrepared, waitManualFunding, reviewManualFunding, releaseManualFunding,
-        claimManualSubmission, abandonPreparedManualOrder, settleManualOrder };
+        claimManualSubmission, abandonPreparedManualOrder, settleManualOrder, startManualRetry };
 };

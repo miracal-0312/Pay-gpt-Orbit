@@ -5,6 +5,7 @@ const DIAG_REQUEST_KEY = 'orbitcard_debug_request_id';
 let diagLogCursor = 0, diagLogKey = '', diagLogLines = [], diagLogSequence = 0, diagReading = false;
 let diagLogChars = 0;
 let diagLogRevision = '';
+let diagFollowCurrentOrder = false;
 const DIAG_LOG_CHAR_LIMIT = 1024 * 1024;
 let diagOrder = null, diagPayBusy = false, diagQueryBusy = false;
 let diagTrackingStarted = 0, diagPollFailures = 0, diagNextPollAt = 0, diagPolling = false, diagPreflightBusy = false;
@@ -13,7 +14,8 @@ function diagSetRequestId(id) {
     $('diagRequestId').value = id;
     try { if (id) sessionStorage.setItem(DIAG_REQUEST_KEY, id); else sessionStorage.removeItem(DIAG_REQUEST_KEY); } catch (_) { /* keep current page identity */ }
 }
-function diagFollow(key) {
+function diagFollow(key, followOrder = false) {
+    diagFollowCurrentOrder = followOrder;
     diagTrackingStarted = Date.now(); diagPollFailures = 0; diagNextPollAt = 0;
     diagLogRevision = '';
     $('diagTraceId').value = key; diagLogSequence++; diagLogKey = key; diagLogCursor = 0; diagLogLines = []; diagLogChars = 0;
@@ -50,12 +52,12 @@ function diagShowConcurrency(simulation) {
     if (!simulation) return;
     const summary = simulation.summary;
     const contention = simulation.initial_contention;
-    $('diagConcurrencySummary').textContent = `${simulation.task_count} 个任务：分配现有卡 ${summary.assigned} 个（直接支付 ${summary.pay}、需补款 ${summary.fund}），等待 ${summary.waiting} 个，预算或开卡条件不满足 ${summary.blocked} 个，需开卡评估 ${summary.opening} 个。模型内重复分配 ${summary.duplicate_assignments} 次。${contention ? `初始有 ${contention.tasks} 个任务同时首选卡 ${contention.card_id}，分配时会重新检查占用。` : ''}`;
-    $('diagConcurrencyBudget').textContent = `账户快照 ${simulation.budget.available} USD；模拟预留预算 ${simulation.budget.reserved} USD；剩余 ${simulation.budget.remaining} USD。预算包含预计开卡首充和补款，不含平台额外费用。仅为快照模拟结果，不代表真实并发压测通过。`;
-    const actions = { pay: '可直接支付', fund: '分配后需补款', wait: '等待', open: '需开卡评估', blocked: '未分配' };
+    $('diagConcurrencySummary').textContent = `${simulation.task_count} 个任务：分配现有卡 ${summary.assigned} 个（直接支付 ${summary.pay}、需补款 ${summary.fund}），等待 ${summary.waiting} 个，无可用卡或预算不足 ${summary.blocked} 个。模型内重复分配 ${summary.duplicate_assignments} 次。${contention ? `初始有 ${contention.tasks} 个任务同时首选卡 ${contention.card_id}，分配时会重新检查占用。` : ''}`;
+    $('diagConcurrencyBudget').textContent = `账户快照 ${simulation.budget.available} USD；模拟预留预算 ${simulation.budget.reserved} USD；剩余 ${simulation.budget.remaining} USD。预算仅包含预计补款，不含平台额外费用；自动开卡已禁用。仅为快照模拟结果，不代表真实并发压测通过。`;
+    const actions = { pay: '可直接支付', fund: '分配后需补款', wait: '等待', blocked: '未分配' };
     const reasons = { reserved_in_simulation: '仅在模拟中占用', busy: '卡片已被其他任务占用', cooldown: '支付后冷却中',
         authorizations_unconfirmed: '授权次数未确认', status_unconfirmed: '卡片状态未确认', account_balance: '共享账户预算不足',
-        opening_result: '等待模拟开卡结果', opening_not_simulated: '停在开卡前，未模拟新卡结果', opening_unavailable: '无符合条件的开卡产品', multiple_waiting: '多项等待条件' };
+        automatic_opening_disabled: '无可用现有卡，自动开卡已禁用', multiple_waiting: '多项等待条件' };
     $('diagConcurrencyRows').innerHTML = simulation.tasks.map(row => {
         const reason = row.reasons?.map(value => reasons[value] || value).join('、') || row.message || reasons[row.reason] || row.reason;
         return `<tr><td>${escapeHtml(row.task)}</td><td>${escapeHtml(row.initial_card_id ?? '—')}</td><td>${escapeHtml(actions[row.action] || row.action)}</td><td>${escapeHtml(row.card_id ?? '—')}</td><td>${escapeHtml(row.funding_amount)}</td><td>${escapeHtml(reason)}</td></tr>`;
@@ -112,12 +114,15 @@ $('diagSessionFile').addEventListener('change', async event => {
 });
 function diagShowOrder(order) {
     diagOrder = order;
+    if (diagFollowCurrentOrder && order.client_order_no && diagLogKey !== order.client_order_no) {
+        diagFollow(order.client_order_no, true);
+    }
     const terminal = ['success','failed','rejected'].includes(order.state);
     $('diagNewTest').disabled = !terminal;
-    $('diagPay').disabled = !['preparing','prepared'].includes(order.state);
-    $('diagPay').textContent = ['preparing','prepared'].includes(order.state) ? '继续原测试订单准备 · 可能真实扣款'
+    $('diagPay').disabled = !['preparing','prepared','retry_waiting'].includes(order.state);
+    $('diagPay').textContent = order.state === 'retry_waiting' ? '提交 Session 换卡重试 · 真实扣款' : ['preparing','prepared'].includes(order.state) ? '继续原测试订单准备 · 可能真实扣款'
         : ['funding_waiting','funding_review'].includes(order.state) ? '补款正在核对，请查询原任务' : '当前订单已结束或已提交，请查询原单';
-    $('diagOrderState').textContent = `${order.client_order_no} · ${order.plan_name || order.plan_type} · ${order.card_id ? `卡 ${order.card_id}` : '待选卡'} · ${order.state} · ${order.message || ''}`;
+    $('diagOrderState').textContent = `${order.client_order_no} · 第 ${order.attempt || 1} / 3 次尝试 · ${order.plan_name || order.plan_type} · ${order.card_id ? `卡 ${order.card_id}` : '待选卡'} · ${order.state} · ${order.message || ''}`;
     $('diagCaptcha').replaceChildren();
     if (order.captcha?.url) {
         try {
@@ -126,6 +131,19 @@ function diagShowOrder(order) {
         } catch (_) { /* malformed challenge */ }
     }
 }
+async function diagResumeOrder(order) {
+    await selectView('diagnostics/payment');
+    diagSetRequestId(order.request_id);
+    // Resume the persisted plan even before the optional catalog preflight has run.
+    if (![...$('diagPlan').options].some(option => option.value === order.plan_type)) {
+        $('diagPlan').add(new Option(order.plan_name || order.plan_type, order.plan_type));
+    }
+    $('diagPlan').value = order.plan_type;
+    $('diagSession').value = ''; $('diagSessionFile').value = ''; $('diagAuthorized').checked = false;
+    diagFollow(order.client_order_no, true); diagShowOrder(order);
+    notice(`已载入原测试请求 ${order.request_id}；重新上传该账号 Session 后继续。`, 'success');
+    $('diagSession').focus();
+}
 async function diagQueryOrder(refresh = true) {
     const id = $('diagRequestId').value.trim();
     if (!id) throw new Error('尚无测试请求编号');
@@ -133,6 +151,7 @@ async function diagQueryOrder(refresh = true) {
     diagQueryBusy = true;
     try {
         const data = await request(`/api/admin/manual/orders/${encodeURIComponent(id)}${refresh ? '/refresh' : ''}`, refresh ? {} : undefined);
+        if (!diagLogKey && selectedDiagnostic === 'payment') diagFollowCurrentOrder = true;
         diagShowOrder(data.order);
         return data.order;
     } finally { diagQueryBusy = false; }
@@ -145,7 +164,7 @@ $('diagPay').onclick = () => perform(async () => {
     let id = $('diagRequestId').value.trim();
     if (!id) { id = crypto.randomUUID(); diagSetRequestId(id); }
     diagPayBusy = true; $('diagPay').disabled = true;
-    diagFollow(`manual-${id}`);
+    diagFollow(`manual-${id}`, true);
     $('diagOrderState').textContent = '正在处理原请求；请勿创建新的付款请求。';
     try {
         const data = await diagnosticFetch('/api/admin/manual/orders', {
@@ -160,12 +179,12 @@ $('diagPay').onclick = () => perform(async () => {
         throw error;
     } finally {
         diagPayBusy = false;
-        if (!diagOrder || ['preparing','prepared'].includes(diagOrder.state)) $('diagPay').disabled = false;
+        if (!diagOrder || ['preparing','prepared','retry_waiting'].includes(diagOrder.state)) $('diagPay').disabled = false;
         await diagReadLogs().catch(() => {});
     }
 });
 $('diagQueryOrder').onclick = () => perform(async () => {
-    const id = $('diagRequestId').value.trim(); if (id) diagFollow(`manual-${id}`);
+    const id = $('diagRequestId').value.trim(); if (id) diagFollow(`manual-${id}`, true);
     await diagQueryOrder(); await diagReadLogs();
 });
 $('diagNewTest').onclick = () => {
@@ -184,7 +203,7 @@ $('diagDownload').onclick = () => perform(async () => {
 });
 document.addEventListener('click', event => {
     const button = event.target.closest('[data-debug-trace]'); if (!button) return;
-    document.querySelector('[data-tab="diagnostics"]').click();
+    selectView('diagnostics/trace');
     diagFollow(button.dataset.debugTrace);
     perform(async () => { await diagReadLogs(); $('diagTraceId').scrollIntoView({ behavior: 'smooth', block: 'center' }); });
 });
@@ -192,7 +211,7 @@ $('diagAutoLogs').addEventListener('change', () => {
     diagTrackingStarted = Date.now(); diagPollFailures = 0; diagNextPollAt = 0;
 });
 setInterval(async () => {
-    if (document.hidden || selected !== 'diagnostics' || !$('diagAutoLogs').checked || !localStorage.getItem(SECONDARY_KEY) || diagPolling) return;
+    if (document.hidden || selected !== 'diagnostics' || !['payment','trace'].includes(selectedDiagnostic) || !$('diagAutoLogs').checked || !localStorage.getItem(SECONDARY_KEY) || diagPolling) return;
     if (!diagTrackingStarted) diagTrackingStarted = Date.now();
     if (Date.now() - diagTrackingStarted >= 15 * 60 * 1000 || diagPollFailures >= 5) {
         $('diagAutoLogs').checked = false;
@@ -203,7 +222,7 @@ setInterval(async () => {
     diagPolling = true;
     try {
         if ($('diagTraceId').value.trim()) await diagReadLogs();
-        if ($('diagRequestId').value && !diagPayBusy && (!diagOrder || ['funding_waiting','funding_review','submitting','pending','manual'].includes(diagOrder.state))) await diagQueryOrder();
+        if ($('diagRequestId').value && !diagPayBusy && (!diagOrder || ['retry_waiting','funding_waiting','funding_review','submitting','pending','manual'].includes(diagOrder.state))) await diagQueryOrder();
         diagPollFailures = 0;
     } catch (_) { diagPollFailures++; }
     finally {

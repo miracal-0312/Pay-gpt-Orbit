@@ -60,7 +60,7 @@ test('diagnostic polling backs off after errors and pauses after five failures',
     const source = fs.readFileSync(require.resolve('../public/diagnostics.js'), 'utf8');
     let now = 1000, tick, loads = 0;
     const nodes = { diagAutoLogs: { checked: true, addEventListener() {} }, diagTraceId: { value: 'job-1' }, diagRequestId: { value: '' }, diagLogState: {} };
-    const context = vm.createContext({ Date: { now: () => now }, document: { hidden: false }, selected: 'diagnostics',
+    const context = vm.createContext({ Date: { now: () => now }, document: { hidden: false }, selected: 'diagnostics', selectedDiagnostic: 'trace',
         $: id => nodes[id], localStorage: { getItem: () => 'verified' }, SECONDARY_KEY: 'secondary',
         diagTrackingStarted: now, diagPollFailures: 0, diagNextPollAt: 0, diagPolling: false,
         diagPayBusy: false, diagOrder: null, setInterval(fn) { tick = fn; },

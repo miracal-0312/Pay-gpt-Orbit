@@ -36,6 +36,11 @@ module.exports = function createRecovery({ store, query, activeJobs, audit, noti
             return { success: true, querySkipped: true };
         }
         if (task.orbitcard_state === 'retry_waiting') {
+            const { confirmedFailure } = require('./payment-retry-policy');
+            if (task.gpt_api_order_id && confirmedFailure(JSON.parse(task.gpt_api_raw || '{}'), {
+                orderId: task.gpt_api_order_id, clientOrderNo: task.orbitcard_client_order_no, cardId: task.orbitcard_card_id,
+                planType: require('./plan-registry').PROVIDER_PLANS[require('./plan-registry').paymentPlan(task.orbitcard_plan_type)], email: task.orbitcard_email
+            })) return { success: true, querySkipped: true };
             await lockSupport(task.job_key, 'retry_waiting',
                 '自动重试已停用，请联系售后QQ 2244527967处理', { legacyRetry: true });
             return { success: true, querySkipped: true };
