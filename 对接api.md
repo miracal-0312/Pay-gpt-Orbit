@@ -14,7 +14,7 @@
 
 成功授权来自 `cardTransaction`，按交易 ID 持久去重；清算和本地开通不直接加次数，修改上限不重置历史计数。达到配置上限的卡停止分配，空闲后删除且不补位；任何订单、后台维护和同步卡片都禁止自动开卡。管理员仍可手动申请，每张首充 20 USD。ACTIVE 和 CANCELLED 卡直接申请删除，未知结果保留原幂等键，仅通过 `cardDetail` 查询；确认 `DELETED` 后退役，不重复删卡或推测退款。未知授权状态或分页不完整暂停选卡，详见 [ORBITCARD-CARDS.md](ORBITCARD-CARDS.md)。
 
-订阅调用需要 `subscriptions:read`、`subscriptions:create` 权限，余额查询另需 `account:read`。卡池还需 `cards:create`、`cards:read`、`cards:manage`、`products:read`、`cards:fund`；交易对账另需 `transactions:read`，不需要敏感卡资料。连接测试只查询套餐和余额，不创建订阅或开卡。卡片协议见 [Open API](Orbitcard-Open-API-V1.md)。
+订阅调用需要 `subscriptions:read`、`subscriptions:create` 权限，余额查询另需 `account:read`。卡池还需 `cards:create`、`cards:read`、`cards:manage`、`products:read`、`cards:fund`；交易对账另需 `transactions:read`，不需要敏感卡资料。接口一键测试仅向平台发送读取请求，财务写操作只做本地参数与幂等键模拟，不创建订阅或开卡。卡片协议见 [Open API](Orbitcard-Open-API-V1.md)。
 
 管理员手动申请时，服务端组装 `{product_code,amount:"20.00",quantity:1}`；产品码来自最新 `getProductCode` 的 `data.list`，不额外提交身份资料或卡号。产品查询返回 `manual_application` 作为手动申请参数预览，以及 `application_error`；旧 `automatic_application` 与 `products[].plans` 已移除。手动申请不要求会员价格，CDK 代充需已配置套餐 USD 金额。历史自动申请仅在有平台 order_no 时按原平台、API Key、正文和幂等键核对；无订单号的未知申请不重发，prepared 未发送意图关闭为失败。详见 [开卡参数](ORBITCARD-CARDS.md#次数与卡池规则)。
 
@@ -64,7 +64,19 @@
 
 ## 管理入口
 
-后台继续使用 `/api/admin/gpt-api` 配置路径，旧预算和地区字段不再读取或接受。「调试与日志 → 接口查询」提供 `/test` 连接测试、`/status` 套餐余额及 `GET /api/admin/orbitcard/payment-regions` 地区查询，查询不修改默认配置。「支付预检与测试」提供 `POST /api/admin/orbitcard/diagnostics/preflight` 只读检查、并发模拟和唯一真实测试入口（模拟最多 1 个等待任务，其余需等待的任务为 blocked / queue_full）；真实测试复用 `POST /api/admin/manual/orders` 的 `test` 模式，不增加支付通道，手动开通页只留人工交付。「订单链路」集中管理员订单与 `GET /api/admin/orbitcard/diagnostics/logs/:jobKey?cursor=0` 日志查看，订单行保留快捷入口；另有「运行日志」「登录记录」，旧 `#logs` 转至运行日志。Telegram 发送测试在「接口查询」独立通知面板，使用已保存配置真实发送消息，设置页保留快捷入口；卡台查询面板仍为只读。上述调试需二级验证。CDK 行锁保护任务创建，卡片分配使用命名锁，每次尝试以固定订单号原子认领；未知结果只查原单。
+后台继续使用 `/api/admin/gpt-api` 配置路径，旧预算和地区字段不再读取或接受。「调试与日志 → 接口查询」通过「一键全部测试」顺序检查当前注册的 13 项接口，统一使用已保存配置。9 项只读操作实际请求平台，4 项财务写操作仅做本地请求参数与幂等键模拟；单项失败仍继续，展示分项模式、状态、耗时、摘要及总览，运行期间禁止重复发起。依赖卡片或原订单的读取自动选择现有记录；缺少依赖显示跳过，不能计为通过。模拟不发送平台，不能证明真实财务写权限或支付成功；不包含未接入的冻结、退款操作、Telegram 发送或真实支付。「支付预检与测试」提供 `POST /api/admin/orbitcard/diagnostics/preflight` 只读检查、并发模拟和唯一真实测试入口（模拟最多 1 个等待任务，其余需等待的任务为 blocked / queue_full）；真实测试复用 `POST /api/admin/manual/orders` 的 `test` 模式，不增加支付通道，手动开通页只留人工交付。「订单链路」集中管理员订单与 `GET /api/admin/orbitcard/diagnostics/logs/:jobKey?cursor=0` 日志查看，订单行保留快捷入口；另有「运行日志」「登录记录」，旧 `#logs` 转至运行日志。Telegram 发送测试在「接口查询」独立通知面板，使用已保存配置真实发送消息，设置页保留快捷入口；接口面板不执行真实财务写操作。一键接口测试使用管理员登录鉴权；支付预检、链路日志和真实支付仍需二级验证。CDK 行锁保护任务创建，卡片分配使用命名锁，每次尝试以固定订单号原子认领；未知结果只查原单。
+
+一键接口测试使用以下管理路由：
+
+- `GET /api/admin/orbitcard/diagnostics/interfaces` 返回 `{success:true,target,operations}`；`target` 是已保存的平台根域名，每项包含 `operation`、`path`、`label`、`mode`。
+- `POST /api/admin/orbitcard/diagnostics/interface-test` 每次测试一项，仅接受 `{operation,card_id?}`。可选 `card_id` 仅适用于 `cardDetail`、`cardTransaction`、`getCardFlow`；不接受临时 URL、平台请求 Body 或 Session。未指定卡片时选当前平台本地非注销卡；一键流程也会使用卡片列表返回的 `summary.selected_card_id`。订阅查询自动选择当前平台及 API 身份下已提交的原订单，优先成功订单、其次最近订单；只读结果，不结算或恢复订单。
+
+| 测试模式 | 当前注册接口 |
+|---|---|
+| `live_read`（9 项） | `getAccountBalance`、`getProductCode`、`getSubscriptionPlans`、`getSubscriptionPaymentRegions`、`getCardList`、`cardDetail`、`cardTransaction`、`getCardFlow`、`getSubscription` |
+| `local_simulation`（4 项） | `createCard`、`rechargeCard`、`deleteCard`、`createSubscription` |
+
+单项响应为 `{success:true,result}`。`result` 包含 `operation`、`path`、`label`、`mode`、`status`、`message`、`elapsed_ms`，按结果附带 `http_status`、`platform_code`、安全 `summary` 或 `checks`。`status` 为 `passed`、`failed` 或 `skipped`；外层 `success:true` 只表示测试完成返回，不能代替分项结果判断，跳过也不能算通过。地区接口对四档套餐各查询一次，明细放在 `checks`。本地写模拟返回 `summary.validation=request_contract` 和 `summary.sent_to_platform=false`，仅检查示例请求字段、金额格式及幂等键等本地契约，不验证真实平台权限；无需使用真实卡或用户 Session。参数非法返回 HTTP 400，测试服务不可用返回 HTTP 503。
 
 `POST /api/admin/orders/:jobKey/refresh` 查询已有订单；`GET /api/admin/task-logs/:jobKey/audit` 下载日志。管理 HTTP 请求使用 `Authorization: Bearer <token>`，不接受 `?token=`；管理员令牌与供应商 HMAC 用途不同。`/api/admin/gpt-api/status` 仅返回套餐、余额及检查结果，不附带 `recent_orders`；订单页与原单查询保留。
 

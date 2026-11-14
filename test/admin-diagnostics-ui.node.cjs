@@ -82,7 +82,7 @@ test('the diagnostics hub owns every log viewer and test entry without duplicate
         assert.match(hub, new RegExp(`data-diagnostic-tab="${name}"[^>]*aria-controls="diagnostic-${name}"`));
         assert.match(hub, new RegExp(`id="diagnostic-${name}" data-diagnostic-panel="${name}"`));
     }
-    for (const id of ['testApi', 'diagPay', 'diagnosticLog', 'diagTraceLog', 'runtimeLogs', 'loginLogs', 'manualOrderRows']) {
+    for (const id of ['testAllApi', 'apiTestSummary', 'apiInterfaceRows', 'diagPay', 'diagnosticLog', 'diagTraceLog', 'runtimeLogs', 'loginLogs', 'manualOrderRows']) {
         assert.match(hub, new RegExp(`id="${id}"`));
     }
     assert.doesNotMatch(html, /data-tab="logs"|name="manualMode"/);

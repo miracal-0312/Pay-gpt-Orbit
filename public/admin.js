@@ -595,44 +595,101 @@ async function diagnosticFetch(path, body) {
         throw error;
     }
 }
+async function runDiagnosticOutput(outputId, action) {
+    const output = $(outputId);
+    output.className = 'diagnostic-output'; output.textContent = '正在查询平台接口…';
+    try {
+        const result = await action(output), failed = Boolean(typeof result === 'object' && (result.failed || result.warning));
+        output.innerHTML = typeof result === 'string' ? result : result.html;
+        output.className = `diagnostic-output ${failed ? 'error' : 'success'}`;
+        return !failed;
+    } catch (error) {
+        output.textContent = `查询失败：${error.message}`; output.className = 'diagnostic-output error';
+        return false;
+    }
+}
 async function runDiagnostic(buttonId, outputId, action) {
-    const button = $(buttonId), output = $(outputId);
-    button.disabled = true; output.className = 'diagnostic-output'; output.textContent = '正在查询平台接口…';
-    try { const result = await action(output); output.innerHTML = typeof result === 'string' ? result : result.html;
-        output.className = `diagnostic-output ${typeof result === 'object' && result.warning ? 'warning' : 'success'}`; }
-    catch (error) { output.textContent = `查询失败：${error.message}`; output.className = 'diagnostic-output error'; }
+    const button = $(buttonId);
+    button.disabled = true;
+    try { return await runDiagnosticOutput(outputId, action); }
     finally { button.disabled = false; }
 }
-function checkedAt() { return escapeHtml(new Date().toLocaleString('zh-CN')); }
-function planItems(plans) {
-    return (plans || []).map(plan => `<li>${escapeHtml(plan.name || plan.type)} <code>${escapeHtml(plan.type)}</code></li>`).join('') || '<li>平台未返回已启用套餐</li>';
-}
-$('testApi').onclick = () => runDiagnostic('testApi', 'testResult', async () => {
-    const data = await diagnosticFetch('/api/admin/gpt-api/test', { base_url: $('baseUrl').value.trim() });
-    const balance = data.balance?.available_balance;
-    return {html:`<strong>连接成功 · ${checkedAt()}</strong><p>目标：<code>${escapeHtml(data.target || '')}</code></p><p>套餐读取成功：${escapeHtml((data.plans || []).length)} 项</p><ul>${planItems(data.plans)}</ul><p>账户可用余额：${balance == null ? escapeHtml(data.balance_error || '查询失败') : `${escapeHtml(balance)} USD`}</p>`,warning:balance == null};
-});
-$('loadCatalog').onclick = () => runDiagnostic('loadCatalog', 'catalog', async () => {
-    const data = await diagnosticFetch('/api/admin/gpt-api/status');
-    const balance = data.balance?.available_balance;
-    return {html:`<strong>查询完成 · ${checkedAt()}</strong><p>账户可用余额：${balance == null ? escapeHtml(data.balance_error || '查询失败') : `${escapeHtml(balance)} USD`}</p><ul>${planItems(data.plans)}</ul>`,warning:balance == null};
-});
-$('loadRegions').onclick = () => runDiagnostic('loadRegions', 'regionResult', async output => {
-    const regions = {};
-    for (const [index, plan] of Object.keys(cardPlans).entries()) {
-        output.textContent = `正在查询地区 ${index + 1}/4：${cardPlans[plan]}…`;
-        try {
-            const data = await diagnosticFetch(`/api/admin/orbitcard/payment-regions?plan=${plan}`);
-            regions[plan] = data.regions?.[plan] || { options: [], error: '平台未返回该套餐地区' };
-            appendPlatformChecks([regions[plan].trace], savedBaseUrl);
-        } catch (error) { regions[plan] = { options: [], error: error.message }; }
-    }
-    const rows = Object.entries(cardPlans).flatMap(([plan,label]) => {
-        const result=regions[plan];
-        return (result.options?.length ? result.options : [null]).map(item => `<tr><td>${escapeHtml(label)}</td><td>${escapeHtml(item ? regionLabel(item.code) : '—')}</td><td>${item?.default ? '是' : '否'}</td><td>${escapeHtml(result.error || '可用')}</td></tr>`);
+function renderApiInterfaceRows(rows) {
+    $('apiInterfaceRows').innerHTML = rows.map(row => {
+        const simulated = row.mode === 'local_simulation';
+        const label = { waiting: '等待', running: '测试中', failed: '失败', skipped: '跳过',
+            passed: simulated ? '模拟通过' : '查询通过' }[row.status];
+        const appearance = { passed: 'success', failed: 'failed', skipped: 'pending', running: 'running' }[row.status] || '';
+        const metrics = [row.elapsed_ms == null ? '' : `${row.elapsed_ms} ms`,
+            row.http_status == null ? '' : `HTTP ${row.http_status}`,
+            row.platform_code == null ? '' : `code ${row.platform_code}`].filter(Boolean).join(' · ');
+        const details = row.summary !== undefined || row.checks?.length
+            ? `<details><summary>查看安全摘要</summary><pre>${escapeHtml(JSON.stringify({ summary: row.summary, checks: row.checks }, null, 2))}</pre></details>` : '';
+        return `<tr><td><strong>${escapeHtml(row.label)}</strong><br><code>${escapeHtml(row.path)}</code></td><td>${simulated ? '本地模拟<br><small>未向平台发送</small>' : '真实只读查询'}</td><td><span class="pill ${appearance}">${label}</span>${metrics ? `<br><small>${escapeHtml(metrics)}</small>` : ''}</td><td>${escapeHtml(row.message || '')}${details}</td></tr>`;
     }).join('');
-    return { html: `<strong>地区查询完成 · ${checkedAt()}</strong><div class="table-wrap"><table><thead><tr><th>套餐</th><th>地区</th><th>平台默认</th><th>状态</th></tr></thead><tbody>${rows}</tbody></table></div>`, warning: Object.values(regions).some(result=>result.error) };
-});
+}
+let apiDiagnosticsBusy = false;
+async function runAllApiDiagnostics() {
+    if (apiDiagnosticsBusy) return;
+    apiDiagnosticsBusy = true;
+    const button = $('testAllApi'), summary = $('apiTestSummary');
+    const counts = { live_read: 0, local_simulation: 0, failed: 0, skipped: 0 };
+    const totals = () => `真实查询通过 ${counts.live_read} 项，本地模拟通过 ${counts.local_simulation} 项，失败 ${counts.failed} 项，跳过 ${counts.skipped} 项`;
+    button.disabled = true; button.textContent = '正在测试…'; summary.className = 'diagnostic-output';
+    summary.textContent = '正在读取全部接口清单…';
+    $('apiInterfaceTarget').textContent = '正在读取已保存的测试配置…';
+    $('apiInterfaceRows').innerHTML = '<tr><td colspan="4">正在读取本轮接口清单…</td></tr>';
+    try {
+        const manifest = await diagnosticFetch('/api/admin/orbitcard/diagnostics/interfaces');
+        const seen = new Set();
+        if (!Array.isArray(manifest.operations) || !manifest.operations.length || manifest.operations.some(item =>
+            !item || !/^[A-Za-z]+$/.test(item.operation || '') || item.path !== `/api/open/v1/${item.operation}`
+            || !['live_read', 'local_simulation'].includes(item.mode) || seen.has(item.operation) || !seen.add(item.operation))) {
+            throw new Error('接口清单无效，未执行测试');
+        }
+        $('apiInterfaceTarget').textContent = `测试目标：${manifest.target || '已保存的平台配置'}。本轮全部真实查询使用已保存配置。`;
+        const rows = manifest.operations.map(item => ({ operation: item.operation, path: item.path,
+            label: item.label || item.operation, mode: item.mode, status: 'waiting', message: '等待本轮测试' }));
+        let cardId = null;
+        renderApiInterfaceRows(rows);
+        for (const [index, row] of rows.entries()) {
+            row.status = 'running'; row.message = row.mode === 'local_simulation' ? '正在本地验证请求规则，不向平台发送…' : '正在查询平台接口…';
+            summary.textContent = `正在测试 ${index + 1}/${rows.length}：${row.label} · ${totals()}。`;
+            renderApiInterfaceRows(rows);
+            try {
+                const body = { operation: row.operation };
+                if (cardId && ['cardDetail', 'cardTransaction', 'getCardFlow'].includes(row.operation)) body.card_id = cardId;
+                const data = await diagnosticFetch('/api/admin/orbitcard/diagnostics/interface-test', body);
+                const result = data.result;
+                if (!result || result.operation !== row.operation || result.mode !== row.mode || result.path !== row.path
+                    || !['passed', 'failed', 'skipped'].includes(result.status)) throw new Error('接口测试结果与请求不匹配，请查看调试日志');
+                Object.assign(row, { status: result.status, message: result.message, elapsed_ms: result.elapsed_ms,
+                    http_status: result.http_status, platform_code: result.platform_code, summary: result.summary, checks: result.checks });
+                if (row.status === 'passed' && Array.isArray(row.checks) && row.checks.some(check => check?.status === 'failed' || check?.success === false)) {
+                    row.status = 'failed'; row.message = '部分接口检查失败，请查看安全摘要。';
+                }
+                if (row.mode === 'live_read') appendPlatformChecks((Array.isArray(result.checks) ? result.checks : []).map(check => ({
+                    ...check, path: row.path, success: check.status === 'passed', error: check.status === 'failed' ? check.message : ''
+                })), manifest.target || '');
+                if (row.operation === 'getCardList' && row.status === 'passed'
+                    && Number.isSafeInteger(result.summary?.selected_card_id) && result.summary.selected_card_id > 0) cardId = result.summary.selected_card_id;
+            } catch (error) { row.status = 'failed'; row.message = error.message; }
+            if (row.status === 'passed') counts[row.mode]++; else counts[row.status]++;
+            appendDiagnosticLog(`接口 ${row.operation} · ${row.mode === 'local_simulation' ? '本地模拟（未发送）' : '真实查询'} · ${row.status} · ${row.message || ''}`);
+            renderApiInterfaceRows(rows);
+        }
+        summary.textContent = `全部 ${rows.length} 个接口检查完成：${totals()}。本地模拟不代表真实写入或支付成功。`;
+        summary.className = `diagnostic-output ${counts.failed ? 'error' : counts.skipped ? 'warning' : 'success'}`;
+        appendDiagnosticLog(`全部接口测试完成 · ${totals()}`);
+    } catch (error) {
+        summary.textContent = `接口测试未完成：${error.message}。请核对配置后重新运行。`;
+        summary.className = 'diagnostic-output error';
+        $('apiInterfaceRows').innerHTML = '<tr><td colspan="4">本轮未能读取有效接口清单，请重新运行。</td></tr>';
+    } finally {
+        apiDiagnosticsBusy = false; button.disabled = false; button.textContent = '一键全部测试';
+    }
+}
+$('testAllApi').onclick = runAllApiDiagnostics;
 $('clearDiagnosticLog').onclick = () => { diagnosticLines.length = 0; $('diagnosticLog').textContent = '尚无调试记录。'; };
 $('refreshPaymentRegions').onclick = () => perform(loadPaymentRegions);
 for (const plan of Object.keys(cardPlans)) $(`paymentRegion_${plan}`).addEventListener('change', () => {

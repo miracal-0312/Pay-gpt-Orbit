@@ -3,6 +3,17 @@ const { CardPreparationError } = require('./orbitcard-card-policy');
 
 module.exports = function registerDiagnostics(app, { store, requireSecondaryAuth, logs }) {
     const service = require('./orbitcard-diagnostics')({ store, audit: entry => logs.push(entry) });
+    const interfaces = require('./orbitcard-interface-diagnostics')({ store });
+    // Mounted after administrator authentication. These routes only read the
+    // platform or validate synthetic write requests locally, without any payment.
+    const interfaceHandler = action => async (req, res) => {
+        res.set('Cache-Control', 'no-store');
+        try { res.json(await action(req)); }
+        catch (error) { res.status(error instanceof CardPreparationError ? 400 : 503).json({ success: false,
+            message: error instanceof CardPreparationError ? error.message : '接口测试暂不可用；未创建或修改支付订单' }); }
+    };
+    app.get('/api/admin/orbitcard/diagnostics/interfaces', interfaceHandler(() => interfaces.manifest()));
+    app.post('/api/admin/orbitcard/diagnostics/interface-test', interfaceHandler(req => interfaces.run(req.body || {})));
     app.post('/api/admin/orbitcard/diagnostics/preflight', requireSecondaryAuth, async (req, res) => {
         res.set('Cache-Control', 'no-store');
         try { res.json(await service.preflight(req.body || {})); }

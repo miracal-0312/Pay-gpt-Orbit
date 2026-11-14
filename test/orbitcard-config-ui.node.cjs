@@ -90,8 +90,8 @@ test('Orbitcard credentials come only from environment, never admin input or old
         assert.match(html, /ORBITCARD_API_SECRET/);
         assert.doesNotMatch(html, /id="apiKey"|id="apiSecret"/);
         assert.doesNotMatch(html, /id="price_plus"|id="region_plus"/);
-        assert.match(html, /id="testResult"/);
-        assert.match(html, /id="regionResult"/);
+        assert.match(html, /id="testAllApi"/);
+        assert.match(html, /id="apiInterfaceRows"/);
         for (const plan of ['plus', 'pro100', 'pro200', 'pro500']) {
             assert.match(html, new RegExp(`id="paymentRegion_${plan}"`));
             assert.match(html, new RegExp(`id="planPrice_${plan}"`));
