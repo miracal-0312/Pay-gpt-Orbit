@@ -84,7 +84,8 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
             const rows = await query('SELECT * FROM orbitcard_card_issues WHERE scope=? AND job_key=? ORDER BY created_at DESC LIMIT 1', [scope, jobKey]);
             return rows[0] || null;
         }
-        async function reserveCard(cardId, jobKey, planType) {
+        async function reserveCard(cardId, jobKey, planType, limit = poolPolicy.MAX_USES) {
+            limit = poolPolicy.validateLimit(limit);
             const plan = planFor(planType);
             return transaction(async tx => {
                 const opts = { connection: tx };
@@ -98,11 +99,12 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
                 const card = cards[0];
                 const uses = await runQuery('SELECT * FROM orbitcard_card_uses WHERE job_key=? FOR UPDATE', [jobKey], opts);
                 if (uses[0]) {
-                    if (uses[0].state === 'reserved' && Number(uses[0].card_id) === Number(cardId) && card?.active_job === jobKey) return card;
+                    if (uses[0].state === 'reserved' && Number(uses[0].card_id) === Number(cardId) && card?.active_job === jobKey)
+                        return card.provider_status === 'ACTIVE' && poolPolicy.eligible(card, now(), limit) ? card : null;
                     throw new CardPreparationError('本任务已绑定卡片，不允许更换支付卡');
                 }
                 if (!card || card.active_job || card.provider_status !== 'ACTIVE'
-                    || !poolPolicy.eligible(card, now())) return null;
+                    || !poolPolicy.eligible(card, now(), limit)) return null;
                 await runExecute('INSERT INTO orbitcard_card_uses (job_key,scope,card_id,plan_type,state,authorization_baseline) VALUES (?,?,?,?,\'reserved\',?)', [jobKey,scope,cardId,plan,Number(card.authorization_count)], opts);
                 await runExecute('UPDATE orbitcard_managed_cards SET active_job=? WHERE scope=? AND card_id=?', [jobKey,scope,cardId], opts);
                 await runExecute('UPDATE task_logs SET orbitcard_card_id=? WHERE job_key=?', [cardId,jobKey], opts);
@@ -225,13 +227,6 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
             const updated = await runExecute(`UPDATE orbitcard_managed_cards SET authorization_pending_count=GREATEST(COALESCE(authorization_pending_count,0),?)
                 WHERE scope=? AND card_id=?`, [pending,current.scope,current.card_id], options);
             if (updated.affectedRows !== 1) throw new CardPreparationError('原订单卡片不存在，不能确认消费授权待同步状态');
-        }
-        // A successful authorization can appear before available balance catches up.
-        // Failed payments may also leave a temporary authorization hold.
-        if (['success', 'failed'].includes(orbitcardState)) {
-            const updated = await runExecute(`UPDATE orbitcard_managed_cards SET reuse_after_ms=GREATEST(COALESCE(reuse_after_ms,0),?)
-                WHERE scope=? AND card_id=?`, [now() + poolPolicy.REUSE_COOLDOWN_MS, current.scope, current.card_id], options);
-            if (updated.affectedRows !== 1) throw new Error('原订单卡片不存在，不能保存支付后冷却时间');
         }
         await runExecute('UPDATE orbitcard_card_uses SET state=? WHERE job_key=?', [next,jobKey], options);
         await runExecute('UPDATE orbitcard_managed_cards SET active_job=NULL WHERE scope=? AND card_id=? AND active_job=?',

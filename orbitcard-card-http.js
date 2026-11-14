@@ -2,7 +2,7 @@
 
 const cardsApi = require('./orbitcard-cards-client');
 const api = require('./orbitcard-client');
-const { MAX_USES, coolingDown } = require('./orbitcard-pool');
+const { authorizationLimit } = require('./orbitcard-pool');
 const { CardPreparationError } = require('./orbitcard-card-policy');
 const { PLAN_TYPES: CANONICAL_PLAN_TYPES, PROVIDER_PLANS } = require('./plan-registry');
 
@@ -18,11 +18,11 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
         const cards = (await methods.listCards()).map(card => ({
             card_id: Number(card.card_id), active_job: card.active_job,
             authorization_count: card.authorization_count == null ? null : Number(card.authorization_count),
-            authorization_limit: MAX_USES, authorizations_checked_at: card.authorizations_checked_at,
+            authorization_limit: authorizationLimit(cfg), authorizations_checked_at: card.authorizations_checked_at,
             authorization_pending: card.authorization_pending_count != null
                 && (card.authorization_count == null || Number(card.authorization_count) < Number(card.authorization_pending_count)),
             retiring: Boolean(card.retirement_key),
-            cooling_down: coolingDown(card), reuse_after_ms: Number(card.reuse_after_ms || 0),
+            cooling_down: false, reuse_after_ms: 0,
             provider_status: card.provider_status, product_code: card.product_code, last4: card.last4,
             balance: card.balance, currency: card.currency, source: card.source, updated_at: card.updated_at
         }));
@@ -89,8 +89,8 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
             || Array.isArray(req.body) || Object.keys(req.body).length)) {
             throw new CardPreparationError('共享卡池开卡不接收套餐或自定义参数，请提交空请求');
         }
-        const card = await cardService.apply(await config());
-        res.json({ success: true, card, message: `开卡成功，首充 20 USD；成功消费授权满 ${MAX_USES} 次后停止分配` });
+        const cfg = await config(), card = await cardService.apply(cfg);
+        res.json({ success: true, card, message: `开卡成功，首充 20 USD；成功消费授权满 ${authorizationLimit(cfg)} 次后停止分配` });
     }));
     app.post('/api/admin/orbitcard/issues/refresh', handler(async (req, res) => {
         await cardService.recover(await config());

@@ -9,6 +9,7 @@ let cdkPlanFilter = '', cdkLoadSequence = 0, cdkLoadedFilter = null, cdkLoadedCo
 let cdkExporting = false;
 let cdkEditing = null, cdkStatusSaving = false;
 let manualCatalog = { plans: [] }, manualOrders = [];
+let manualQueuedRequest = '';
 let paymentRegionLoadSequence = 0;
 let autoRefreshStarted = Date.now(), autoRefreshBusy = false, autoRefreshFailures = 0;
 let noticeTimer = null;
@@ -27,6 +28,20 @@ $('closeNotice').addEventListener('click', () => {
 });
 function escapeHtml(value) { return String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch])); }
 function logout() { localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(SECONDARY_KEY); location.assign(loginUrl); }
+const PAYMENT_QUEUE_FULL_MESSAGE = '当前支付卡繁忙，等待队列已满，请 10 分钟后再下单。';
+const shownQueueFailures = new Set();
+function showPaymentQueueFull(data, key = '') {
+    if (data?.error_code !== 'PAYMENT_QUEUE_FULL') return false;
+    if (key && shownQueueFailures.has(key)) return true;
+    if (key) shownQueueFailures.add(key);
+    $('paymentQueueMessage').textContent = PAYMENT_QUEUE_FULL_MESSAGE;
+    if (!$('paymentQueueDialog').open) $('paymentQueueDialog').showModal();
+    return true;
+}
+function reportError(error) {
+    notice(error.error_code === 'PAYMENT_QUEUE_FULL' ? PAYMENT_QUEUE_FULL_MESSAGE : error.message, 'error');
+    showPaymentQueueFull(error);
+}
 const pendingRequests = new Map();
 function request(url, body, method = body === undefined ? 'GET' : 'POST') {
     const key = JSON.stringify([method, url, body]);
@@ -54,6 +69,8 @@ async function requestOnce(url, body, method) {
         if (data.secondaryRequired) { localStorage.removeItem(SECONDARY_KEY); $('unlockState').textContent = '请重新验证二级密码'; }
         const error = new Error(data.message || `请求失败（${response.status}）`);
         error.httpStatus = response.status;
+        error.error_code = data.error_code;
+        error.retry_after_seconds = data.retry_after_seconds;
         error.checks = Array.isArray(data.checks) ? data.checks : [];
         error.target = data.target || '';
         throw error;
@@ -66,18 +83,18 @@ async function requestOnce(url, body, method) {
 }
 async function perform(action, success) {
     try { const result = await action(); if (success) notice(success, 'success'); return result; }
-    catch (error) { notice(error.message, 'error'); return null; }
+    catch (error) { reportError(error); return null; }
 }
 function status(value) { const text = { success: '成功', failed: '失败', rejected: '未受理（已释放）', retry: '待重新提交 Session', retry_waiting: '等待换卡重试', running: '处理中', preparing: '准备支付', funding_waiting: '等待补款到账', funding_review: '补款对账工单（后台跟进）', funding_pending: '补款待核对（支付已停止）', card_pending: '原开卡待确认（支付已停止）', prepared: '资金已就绪', submitting: '提交中', manual: '人工处理（支付已停止）', support_locked: '人工售后（支付已停止）', pending: '待确认', unused: '未使用', used: '已使用', redeemed: '已核销', processing: '占用中' }[value] || value; return `<span class="pill ${escapeHtml(value)}">${escapeHtml(text)}</span>`; }
 function renderTasks(tasks) {
     $('tasks').innerHTML = tasks.map(task => {
         const order = task.order || {}, fee = order.fee_status ? `${order.service_fee ?? '—'} ${order.currency || 'USDT'} / ${order.fee_status}` : '—';
         const payment = order.payment ? `${order.payment.amount} ${order.payment.currency}` : '—';
-        const preparing = ['preparing','prepared','funding_waiting','funding_review','card_pending','funding_pending','balance_blocked'].includes(task.orbitcard_state);
+        const preparing = task.queued || ['preparing','prepared','funding_waiting','funding_review','card_pending','funding_pending','balance_blocked'].includes(task.orbitcard_state);
         const refresh = task.provider === 'orbitcard' ? `<button class="secondary" data-refresh-order="${escapeHtml(task.jobKey)}">${['funding_waiting','funding_review','funding_pending'].includes(task.orbitcard_state) ? '核对原补款' : '查原单'}</button>${preparing ? '' : ` <button type="button" class="secondary" data-edit-order="${escapeHtml(task.jobKey)}" data-order-status="${escapeHtml(task.status)}">人工修改</button>`}` : '<small>历史记录</small>';
         const cardLabel = task.card_id || (task.provider !== 'orbitcard' ? '历史未绑定'
             : ['preparing','prepared','rejected','balance_blocked','card_pending'].includes(task.orbitcard_state) ? '尚未分配支付卡' : '未记录支付卡');
-        return `<tr><td>${escapeHtml(task.time)}<br><code>${escapeHtml(task.cdk)}</code></td><td>${escapeHtml(task.provider === 'orbitcard' ? task.token : '历史账号')}<br><code>${escapeHtml(task.order_id || task.client_order_no || task.jobKey)}</code><br>卡 ID：${escapeHtml(cardLabel)}</td><td>${status(['funding_review','funding_pending','card_pending'].includes(task.orbitcard_state) ? task.orbitcard_state : task.status)}<br>${escapeHtml(task.message)}</td><td>${escapeHtml(fee)}</td><td>${escapeHtml(payment)}</td><td>${refresh} <button class="secondary" data-download-audit="${escapeHtml(task.jobKey)}">下载日志</button> <button class="secondary" data-debug-trace="${escapeHtml(task.jobKey)}">链路日志</button></td></tr>`;
+        return `<tr><td>${escapeHtml(task.time)}<br><code>${escapeHtml(task.cdk)}</code></td><td>${escapeHtml(task.provider === 'orbitcard' ? task.token : '历史账号')}<br><code>${escapeHtml(task.order_id || task.client_order_no || task.jobKey)}</code><br>卡 ID：${escapeHtml(cardLabel)}</td><td>${task.queued ? '<span class="pill">排队等待</span>' : status(['funding_review','funding_pending','card_pending'].includes(task.orbitcard_state) ? task.orbitcard_state : task.status)}<br>${escapeHtml(task.message)}</td><td>${escapeHtml(fee)}</td><td>${escapeHtml(payment)}</td><td>${refresh} <button class="secondary" data-download-audit="${escapeHtml(task.jobKey)}">下载日志</button> <button class="secondary" data-debug-trace="${escapeHtml(task.jobKey)}">链路日志</button></td></tr>`;
     }).join('') || '<tr><td colspan="6">暂无任务</td></tr>';
 }
 async function loadOverview() {
@@ -96,6 +113,7 @@ async function loadApi() {
     savedBaseUrl = config.base_url;
     $('apiEnabled').checked = config.enabled; $('baseUrl').value = config.base_url;
     $('productCode').value = config.orbitcard_product_code || '';
+    $('cardAuthorizationLimit').value = String(config.orbitcard_max_authorizations ?? 4);
     $('maxInitialAmount').value = config.orbitcard_max_initial_amount || ''; $('maxFee').value = config.orbitcard_max_fee;
     paymentRegionLoadSequence++;
     for (const plan of Object.keys(cardPlans)) {
@@ -176,18 +194,22 @@ async function loadCardIdPreview() {
         $('cardIdPreview').textContent = `平台共 ${data.total} 张卡，可用 ${data.active} 张。${ids.length ? `前 ${ids.length} 张：${ids.join('、')}` : '当前没有卡片，自动开卡已禁用，请手动申请卡片。'}`;
     } catch (error) { $('cardIdPreview').textContent = `卡片 ID 读取失败：${error.message}`; }
 }
-function apiInput() { return { enabled: $('apiEnabled').checked, base_url: $('baseUrl').value.trim(),
+function apiInput() {
+    const authorizationLimit = Number($('cardAuthorizationLimit').value);
+    if (!Number.isSafeInteger(authorizationLimit) || authorizationLimit < 1) throw new Error('单卡成功授权次数上限必须是有效的正整数');
+    return { enabled: $('apiEnabled').checked, base_url: $('baseUrl').value.trim(),
+    orbitcard_max_authorizations: authorizationLimit,
     orbitcard_product_code: $('productCode').value.trim(), orbitcard_max_initial_amount: $('maxInitialAmount').value.trim(),
     orbitcard_payment_regions: Object.fromEntries(Object.keys(cardPlans).map(plan => [plan, $(`paymentRegion_${plan}`).value])),
     orbitcard_plan_prices: Object.fromEntries(Object.keys(cardPlans).map(plan => [plan, $(`planPrice_${plan}`).value.trim()])),
-    orbitcard_max_fee: $('maxFee').value.trim() }; }
+    orbitcard_max_fee: $('maxFee').value.trim() };
+}
 function renderCardRow(card, sync = null) {
     const id = escapeHtml(card.card_id);
     const usage = `${escapeHtml(card.authorization_count ?? '待同步')} / ${escapeHtml(card.authorization_limit)} 次成功消费授权`;
     const history = card.retiring ? '待确认删卡'
         : card.authorization_count != null && Number(card.authorization_count) >= Number(card.authorization_limit) ? '达到上限，停止分配'
-            : card.authorization_pending ? '等待授权同步，暂不分配'
-            : card.cooling_down ? '支付后冷却中，暂不分配' : '平台成功消费授权自动累计';
+            : card.authorization_pending ? '等待授权同步，暂不分配' : '平台成功消费授权自动累计';
     const countedAt = card.authorizations_checked_at ? `授权统计时间：${escapeHtml(card.authorizations_checked_at)}` : '尚未完成授权统计';
     const last4 = card.last4 ? `****${escapeHtml(card.last4)}` : '尾号未提供';
     const confirmed = sync?.synced_ids?.includes(Number(card.card_id));
@@ -400,7 +422,7 @@ async function loadSelected() {
     if (selected === 'settings') await Promise.all([loadOverview(), loadSecurity()]);
     if (selected === 'cdks' && localStorage.getItem(SECONDARY_KEY)) { await loadCdkPlans().catch(error => { cdkPlans = {}; notice(`套餐目录读取失败：${error.message}`, 'error'); }); await loadCdks(); }
     if (selected === 'manual' && localStorage.getItem(SECONDARY_KEY)) {
-        await loadManualCatalog();
+        await Promise.all([loadManualCatalog(), loadManualOrders()]);
     }
 }
 function selectView(tab) {
@@ -448,8 +470,14 @@ function form(id, handler) {
         submitting = true;
         const button = $(id).querySelector('button[type=submit],button:not([type])');
         if (button) button.disabled = true;
-        try { await handler(); } catch (error) { notice(error.message, 'error'); }
-        finally { submitting = false; if (button) button.disabled = false; }
+        try { await handler(); } catch (error) { reportError(error); }
+        finally {
+            submitting = false;
+            if (button) {
+                button.disabled = id === 'manualForm' && Boolean(manualQueuedRequest);
+                if (id === 'manualForm') button.textContent = manualQueuedRequest ? '排队等待，请查询原订单' : '确认扣款并开通';
+            }
+        }
     });
 }
 form('unlockForm', async () => {
@@ -481,11 +509,11 @@ async function loadManualCatalog() {
 }
 function renderManualOrders(orders) {
     $('manualOrderRows').innerHTML = orders.map(order => {
-        const outcome = status(order.state);
+        const outcome = order.queued ? '<span class="pill">排队等待</span>' : status(order.state);
         const previousAttempts = (order.attempts || []).map((attempt, index) => `<button type="button" class="secondary" data-debug-trace="${escapeHtml(attempt.client_order_no)}">第 ${index + 1} 次 · 卡 ${escapeHtml(attempt.card_id)} 日志</button>`).join('');
         const captcha = order.captcha?.url ? `<br><a href="${escapeHtml(order.captcha.url)}" target="_blank" rel="noopener noreferrer">打开平台验证链接</a>` : '';
-        const action = `${['preparing','retry_waiting'].includes(order.state)
-            ? `<button type="button" class="secondary" data-retry-manual="${escapeHtml(order.request_id)}">${order.state === 'retry_waiting' ? '提交 Session 换卡重试' : '继续准备'}</button>` : ''}${['submitting','pending','manual'].includes(order.state)
+        const action = `${!order.queued && ['preparing','retry_waiting'].includes(order.state)
+            ? `<button type="button" class="secondary" data-retry-manual="${escapeHtml(order.request_id)}">${order.state === 'retry_waiting' ? '提交 Session 换卡重试' : '继续准备'}</button>` : ''}${order.queued || ['submitting','pending','manual'].includes(order.state)
             ? `<button type="button" class="secondary" data-refresh-manual="${escapeHtml(order.request_id)}">查询原订单</button>` : ''}
             <button type="button" class="secondary" data-download-manual="${escapeHtml(order.client_order_no)}">下载日志</button> <button type="button" class="secondary" data-debug-trace="${escapeHtml(order.client_order_no)}">链路日志</button>`;
         return `<tr><td>${escapeHtml(new Date(order.created_at).toLocaleString('zh-CN'))}<br>${escapeHtml(order.target_email)}</td>
@@ -498,6 +526,15 @@ async function loadManualOrders() {
     const data = await request('/api/admin/manual/orders');
     manualOrders = data.orders || [];
     renderManualOrders(manualOrders);
+    if (manualQueuedRequest) {
+        const order = manualOrders.find(item => item.request_id === manualQueuedRequest);
+        if (order && !order.queued) {
+            showPaymentQueueFull(order, order.request_id);
+            manualQueuedRequest = '';
+        }
+        $('manualSubmit').disabled = Boolean(manualQueuedRequest);
+        $('manualSubmit').textContent = manualQueuedRequest ? '排队等待，请查询原订单' : '确认扣款并开通';
+    }
 }
 $('refreshManualCatalog').onclick = () => perform(loadManualCatalog);
 $('refreshManualOrders').onclick = () => perform(loadManualOrders);
@@ -508,6 +545,7 @@ $('manualSessionFile').addEventListener('change', async event => {
     catch (_) { $('manualSession').value = ''; notice('文件不是有效的 JSON', 'error'); }
 });
 form('manualForm', async () => {
+    if (manualQueuedRequest) throw new Error('当前订单正在排队，请在订单链路中查询原订单。');
     if (!manualCatalog.plans.some(plan => plan.type === $('manualPlan').value)) throw new Error('请选择当前开放的套餐');
     try { JSON.parse($('manualSession').value); } catch (_) { throw new Error('Session 必须是完整 JSON'); }
     const requestId = $('manualRetryId').value.trim() || crypto.randomUUID();
@@ -517,9 +555,11 @@ form('manualForm', async () => {
         cdk_code: $('manualCdk').value.trim(),
         session: $('manualSession').value, authorized: $('manualAuthorized').checked
     });
+    manualQueuedRequest = data.order.queued ? requestId : '';
     $('manualRetryId').value = '';
     $('manualSession').value = ''; $('manualSessionFile').value = ''; $('manualAuthorized').checked = false;
-    notice(`订单 ${data.order.client_order_no} 已受理；请查询原订单确认结果。`, 'success');
+    showPaymentQueueFull(data.order, requestId);
+    notice(data.order.queued ? '订单已进入等待队列，系统会自动继续，请勿重复提交。' : `订单 ${data.order.client_order_no} 已受理；请查询原订单确认结果。`, 'success');
     diagFollow(data.order.client_order_no);
     await selectView('diagnostics/trace');
     await diagReadLogs();
@@ -672,7 +712,7 @@ document.addEventListener('click', event => {
     const retryManual = event.target.closest('[data-retry-manual]');
     if (retryManual) {
         const order = manualOrders.find(item => item.request_id === retryManual.dataset.retryManual);
-        if (order && ['preparing','retry_waiting'].includes(order.state)) {
+        if (order && !order.queued && ['preparing','retry_waiting'].includes(order.state)) {
             perform(async () => {
                 if (order.mode === 'test') { await diagResumeOrder(order); return; }
                 await selectView('manual');
@@ -692,7 +732,8 @@ document.addEventListener('click', event => {
     if (refreshManual) perform(async () => {
         refreshManual.disabled = true;
         try {
-            await request(`/api/admin/manual/orders/${encodeURIComponent(refreshManual.dataset.refreshManual)}/refresh`, {});
+            const data = await request(`/api/admin/manual/orders/${encodeURIComponent(refreshManual.dataset.refreshManual)}/refresh`, {});
+            showPaymentQueueFull(data.order, refreshManual.dataset.refreshManual);
             await loadManualOrders();
             notice('已查询管理员原订单', 'success');
         } finally { refreshManual.disabled = false; }
@@ -700,7 +741,7 @@ document.addEventListener('click', event => {
     const transactions = event.target.closest('[data-card-transactions]');
     if (transactions) { $('transactionCardId').value = transactions.dataset.cardTransactions; $('transactionPage').value = '1'; $('loadTransactions').click(); }
     const refresh = event.target.closest('[data-refresh-order]');
-    if (refresh) perform(async () => { refresh.disabled = true; try { await request(`/api/admin/orders/${encodeURIComponent(refresh.dataset.refreshOrder)}/refresh`, {}); await loadOverview(); notice('已查询原订单', 'success'); } finally { refresh.disabled = false; } });
+    if (refresh) perform(async () => { refresh.disabled = true; try { const data = await request(`/api/admin/orders/${encodeURIComponent(refresh.dataset.refreshOrder)}/refresh`, {}); showPaymentQueueFull(data.data, refresh.dataset.refreshOrder); await loadOverview(); notice('已查询原订单', 'success'); } finally { refresh.disabled = false; } });
     const changeStatus = event.target.closest('[data-cdk-status]');
     if (changeStatus) editCdkStatus(changeStatus);
     const remove = event.target.closest('[data-delete-cdk]');

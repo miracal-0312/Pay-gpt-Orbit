@@ -7,7 +7,7 @@ class FundingContinuationDeferred extends Error {}
 // CDK orchestration owns settlement and the bounded sequence of payment attempts.
 // HTTP/WebSocket registration stays in server.js.
 module.exports = function createPaymentService({ store, cardService, worker, activeJobs, activeChallenges,
-    audit, broadcast, log, notify, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), now = Date.now }) {
+    audit, broadcast, log, notify, waitingQueue = null, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), now = Date.now }) {
     async function runWorker({ task, session, planType }) {
         const jobKey = task.jobKey;
         const rootJobKey = task.orbitcardRetryRootJobKey || task.jobKey;
@@ -35,9 +35,13 @@ module.exports = function createPaymentService({ store, cardService, worker, act
                 return cardId;
             }
             let pending;
-            try { return await ready(await cardService.allocate(task.apiConfig, jobKey, planType, {
-                excludedCardIds: [task.orbitcardRetryFirstCardId, task.orbitcardRetrySecondCardId].filter(Boolean).map(Number)
-            })); }
+            const allocate = () => cardService.allocate(task.apiConfig, jobKey, planType, {
+                excludedCardIds: [task.orbitcardRetryFirstCardId, task.orbitcardRetrySecondCardId].filter(Boolean).map(Number),
+                ...(waitingQueue ? { waitForAvailability: waitingQueue.has(jobKey) } : {})
+            });
+            try { return await ready(await (waitingQueue ? waitingQueue.allocate({ key: jobKey, session, cfg: task.apiConfig, allocate,
+                onWait: message => setProgress('running', 10, message, { orbitcardState: preparationState,
+                    expectedState: preparationState, expectedClientOrderNo: task.orbitcardClientOrderNo }) }) : allocate())); }
             catch (error) { if (!(error instanceof FundingAwaitingError)) throw error; pending = error; }
             await setProgress('running', 10, '正在补款，每 5 秒核对，最多等待 120 秒；足额后继续订阅', {
                 orbitcardState: 'funding_waiting', expectedState: preparationState, expectedClientOrderNo: task.orbitcardClientOrderNo
@@ -181,7 +185,10 @@ module.exports = function createPaymentService({ store, cardService, worker, act
                 }
             } catch (_) { /* durable identity remains reserved; recovery only queries this identity */ }
             log(jobKey, recordedMessage, 'worker_error');
-        } finally { activeChallenges.delete(jobKey); activeJobs.delete(jobKey); }
+        } finally {
+            try { await waitingQueue?.release(jobKey); }
+            finally { activeChallenges.delete(jobKey); activeJobs.delete(jobKey); }
+        }
     }
 
     return { run: runWorker };

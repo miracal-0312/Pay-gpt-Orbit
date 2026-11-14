@@ -13,11 +13,11 @@ function taskCount(value = 10) {
 
 // An in-memory model of one burst arriving at allocation. It shares the real
 // decision policy, but never acquires database locks or calls a write API.
-async function simulateSelection({ snapshot, count, available, planType, priceFor, jobPrefix }) {
+async function simulateSelection({ snapshot, count, available, planType, priceFor, jobPrefix, maxAuthorizations }) {
     count = taskCount(count);
     const saved = snapshot.saved.map(row => ({ ...row }));
-    let remaining = available, tail = Promise.resolve();
-    const decide = jobKey => decideCards({ ...snapshot, saved, jobKey, planType, priceFor });
+    let remaining = available, tail = Promise.resolve(), waiting = 0;
+    const decide = jobKey => decideCards({ ...snapshot, saved, jobKey, planType, priceFor, maxAuthorizations });
     const initial = decide(`${jobPrefix}-initial`);
     const initialCard = initial.candidates[0]?.card.card_id || null;
     const initialWaiting = Object.fromEntries([...new Set(initial.waiting.map(row => row.reason))]
@@ -40,6 +40,9 @@ async function simulateSelection({ snapshot, count, available, planType, priceFo
             }
             if (decision.action === 'wait') {
                 const reasons = [...new Set(decision.waiting.map(card => card.reason))];
+                if (!reasons.includes('busy')) return { ...row, action: 'blocked', reason: reasons[0], reasons };
+                if (waiting) return { ...row, action: 'blocked', reason: 'queue_full', message: '等待队列已满，请 10 分钟后再下单' };
+                waiting++;
                 return { ...row, action: 'wait', reason: reasons.length === 1 ? reasons[0] : 'multiple_waiting', reasons };
             }
             return { ...row, action: 'blocked', reason: 'automatic_opening_disabled', message: '没有可用的现有卡，自动开卡已禁用' };
@@ -50,7 +53,7 @@ async function simulateSelection({ snapshot, count, available, planType, priceFo
     const assigned = tasks.filter(row => row.card_id != null);
     return { read_only: true, model: 'serialized_snapshot_allocation', database_locks_tested: false,
         snapshot_at: new Date(snapshot.now).toISOString(), plan_type: planType, task_count: count,
-        holds_until_end: true, payment_completion_simulated: false, admission_limit_simulated: false,
+        holds_until_end: true, payment_completion_simulated: false, admission_limit_simulated: false, waiting_limit: 1,
         initial_candidate_count: initial.candidates.length, initial_waiting: initialWaiting, skipped: initial.skipped,
         initial_contention: initialCard ? { card_id: initialCard, tasks: count } : null,
         summary: { assigned: assigned.length, pay: tasks.filter(row => row.action === 'pay').length,

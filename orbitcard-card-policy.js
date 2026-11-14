@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 
 const { paymentPlan } = require('./plan-registry');
 class CardPreparationError extends Error {}
+class CardBusyError extends CardPreparationError {}
 class AccountBalanceError extends CardPreparationError {}
 class FundingPendingError extends CardPreparationError {}
 const FUNDING_POLL_MS = 5000;
@@ -37,5 +38,5 @@ function settlementState(current, orbitcardState) {
     return current;
 }
 
-module.exports = { planFor, cardScope, settlementState, CardPreparationError, AccountBalanceError, FundingPendingError, FundingAwaitingError, FUNDING_POLL_MS, FUNDING_WAIT_MS,
+module.exports = { planFor, cardScope, settlementState, CardPreparationError, CardBusyError, AccountBalanceError, FundingPendingError, FundingAwaitingError, FUNDING_POLL_MS, FUNDING_WAIT_MS,
     CardDataError, CardSelectionError };

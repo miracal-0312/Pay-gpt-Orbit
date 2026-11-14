@@ -6,7 +6,7 @@ const createService = require('../orbitcard-manual-service');
 const createStore = require('../orbitcard-manual-store');
 const { cardScope } = require('../orbitcard-card-policy');
 
-function fixture({ unknown = false, pendingAllocation = false, now = Date.now } = {}) {
+function fixture({ unknown = false, pendingAllocation = false, now = Date.now, queueOptions = null } = {}) {
     const orders = new Map(), calls = [], created = [], allocations = [], auditEntries = [], auditContexts = [];
     const cfg = { enabled: true, base_url: 'https://orbitcard.cc', api_key: 'key',
         orbitcard_plan_prices: { plus: '20.00', pro100: '100.00', pro200: '200.00', pro500: '500.00' } };
@@ -55,6 +55,11 @@ function fixture({ unknown = false, pendingAllocation = false, now = Date.now } 
             assert.equal(row.client_order_no, key);
             row.card_id = cardId; row.state = 'prepared';
             return row;
+        },
+        noteManualWaiting: async (requestId, key, message) => {
+            const row=orders.get(requestId);
+            assert.equal(row.client_order_no,key);assert.equal(row.state,'preparing');assert.equal(row.card_id,0);
+            row.message=message;return row;
         },
         failManualPreparation: async (requestId, _key, message) => {
             const row = orders.get(requestId);
@@ -120,8 +125,9 @@ function fixture({ unknown = false, pendingAllocation = false, now = Date.now } 
         return 12;
     } };
     const activeJobs = new Set();
-    const service = createService({ store, activeJobs, audit: entry => auditEntries.push(entry), provider, cardService, now });
-    return { service, calls, created, orders, allocations, cfg, store, provider, cardService, activeJobs, auditEntries, auditContexts };
+    const waitingQueue = queueOptions && require('../payment-waiting-queue').createPaymentWaitingQueue({store,activeJobs,now,...queueOptions});
+    const service = createService({ store, activeJobs, waitingQueue, audit: entry => auditEntries.push(entry), provider, cardService, now });
+    return { service, calls, created, orders, allocations, cfg, store, provider, cardService, activeJobs, waitingQueue, auditEntries, auditContexts };
 }
 
 async function until(check) {
@@ -257,6 +263,113 @@ test('simultaneous administrator retries reserve capacity before awaiting durabl
     assert.equal(f.activeJobs.size,0);
     assert.equal(claims,1);
     assert.equal(f.calls.filter(call=>call.operation==='createSubscription').length,3);
+});
+
+test('administrator admission returns one queued order promptly at capacity and rejects any additional order',async()=>{
+    process.env.ORBITCARD_API_KEY='key';process.env.ORBITCARD_API_SECRET='secret';
+    let release;
+    const gate=new Promise(resolve=>{release=resolve;});
+    const f=fixture({queueOptions:{sleep:()=>gate}});
+    f.store.getMaxConcurrentActivations=async()=>1;
+    f.activeJobs.add('previous-cdk');
+    const input={requestId:id,planType:'gpt-plus',mode:'test',session,authorized:true};
+    const order=await f.service.create(input);
+    try {
+        assert.equal(order.state,'preparing');assert.match(order.message,/等待队列/);
+        assert.equal(f.waitingQueue.count,1);assert.equal(f.waitingQueue.activeCount(),1);
+        assert.equal(f.allocations.length,0);assert.equal(f.calls.length,0);
+        await assert.rejects(f.service.create({...input,requestId:'36aad0bb-5eb7-4771-93f5-1ebd049b29e0'}),
+            error=>error.code==='PAYMENT_QUEUE_FULL'&&error.status===429&&error.retryAfterSeconds===600);
+        await assert.rejects(f.service.create(input),error=>error.status===409);
+        assert.equal(f.orders.size,1);
+        assert.ok(!JSON.stringify([...f.orders.values()]).includes('secret-session'));
+    } finally {f.activeJobs.delete('previous-cdk');release();}
+    await until(()=>f.orders.get(id).state==='success'&&f.activeJobs.size===0);
+    assert.equal(f.waitingQueue.count,0);
+    assert.equal(f.calls.filter(call=>call.operation==='createSubscription').length,1);
+});
+
+test('administrator busy-card preparation keeps one queue place until the card is available without holding HTTP open',async()=>{
+    process.env.ORBITCARD_API_KEY='key';process.env.ORBITCARD_API_SECRET='secret';
+    let release,busy=true,attempts=0;
+    const gate=new Promise(resolve=>{release=resolve;});
+    const f=fixture({queueOptions:{sleep:()=>gate}});
+    f.store.getMaxConcurrentActivations=async()=>1;
+    f.cardService.allocate=async()=>{attempts++;if(busy)throw new (require('../orbitcard-card-policy').CardBusyError)('card busy');return 12;};
+    const order=await f.service.create({requestId:id,planType:'gpt-plus',mode:'test',session,authorized:true});
+    try {
+        assert.equal(order.state,'preparing');assert.match(order.message,/等待队列/);
+        await until(()=>attempts>=2);
+        assert.equal(f.waitingQueue.count,1);assert.equal(f.waitingQueue.activeCount(),0);
+        assert.equal(f.calls.filter(call=>call.operation==='createSubscription').length,0);
+    } finally {busy=false;release();}
+    await until(()=>f.orders.get(id).state==='success'&&f.activeJobs.size===0);
+    assert.equal(f.waitingQueue.isFull(),false);
+    assert.equal(f.calls.filter(call=>call.operation==='createSubscription').length,1);
+});
+
+test('an administrator waiting timeout releases its unsubmitted order and exposes a safe retry delay',async()=>{
+    process.env.ORBITCARD_API_KEY='key';process.env.ORBITCARD_API_SECRET='secret';
+    let clock=Date.now();
+    const f=fixture({now:()=>clock,queueOptions:{waitMs:10000,sleep:async ms=>{clock+=ms;}}});
+    f.cardService.allocate=async()=>{throw new (require('../orbitcard-card-policy').CardBusyError)('card busy');};
+    await f.service.create({requestId:id,planType:'gpt-plus',mode:'test',session,authorized:true});
+    await until(()=>f.orders.get(id).state==='failed'&&f.activeJobs.size===0);
+    const order=await f.service.get(id);
+    assert.equal(order.error_code,'PAYMENT_QUEUE_TIMEOUT');assert.equal(order.retry_after_seconds,600);
+    assert.equal(f.waitingQueue.isFull(),false);
+    assert.equal(f.calls.filter(call=>call.operation==='createSubscription').length,0);
+});
+
+test('administrator refresh and recovery hand queued retries to the background while retaining their execution lock',async()=>{
+    process.env.ORBITCARD_API_KEY='key';process.env.ORBITCARD_API_SECRET='secret';
+    for(const trigger of ['refresh','recover']) {
+        let release,busy=true,clock=Date.now();
+        const gate=new Promise(resolve=>{release=resolve;});
+        const f=fixture({unknown:true,now:()=>clock,queueOptions:{sleep:()=>gate}});
+        const second='36aad0bb-5eb7-4771-93f5-1ebd049b29e0';
+        for(const requestId of [id,second]) {
+            await f.service.create({requestId,planType:'gpt-plus',mode:'test',session,authorized:true});
+            await until(()=>f.activeJobs.size===0);
+        }
+        clock+=5000;
+        f.cardService.allocate=async()=>{if(busy)throw new (require('../orbitcard-card-policy').CardBusyError)('busy');return 13;};
+        f.provider.request=async(_cfg,operation,body,key)=>{
+            if(operation==='createSubscription')return {success:true,data:{task_no:'RETRY',client_order_no:key,plan_type:body.plan_type,card_id:body.card_id}};
+            assert.equal(operation,'getSubscription');
+            const identity=body.client_order_no||f.orders.get(id).client_order_no;
+            const failed=identity===`manual-${id}`;
+            return {success:true,data:{task_no:failed?'FAILED':identity===`manual-${second}`?'SECOND':'RETRY',client_order_no:identity,
+                card_id:identity.includes('attempt-')?13:12,plan_type:'gpt-plus',query_source:'upstream',
+                status:failed?'failed':'succeeded',subscription_succeeded:!failed}};
+        };
+        try {
+            if(trigger==='refresh') {
+                const result=await f.service.refresh(id);
+                assert.equal(result.state,'preparing');assert.match(result.message,/等待队列/);
+                await f.service.refresh(second);
+            } else await f.service.recover();
+            assert.equal(f.orders.get(second).state,'success','another order must not wait behind a queued retry');
+            assert.equal(f.orders.get(id).state,'preparing');
+            assert.equal(f.activeJobs.has(`manual-${id}-attempt-2`),true);
+            const lock=await f.store.acquirePaymentLock(require('../payment-execution-lock').manualLockKeys(id));
+            assert.equal(lock,null,'the returned HTTP result must not release the background execution lock');
+        } finally {busy=false;release();}
+        await until(()=>f.orders.get(id).state==='success'&&f.activeJobs.size===0);
+        const lock=await f.store.acquirePaymentLock(require('../payment-execution-lock').manualLockKeys(id));
+        assert.ok(lock);await lock.release();
+    }
+});
+
+test('administrator HTTP reports queue-full feedback and a ten-minute retry header',async()=>{
+    const routes=new Map(),app={get(){},post(path,...handlers){routes.set(path,handlers.at(-1));}};
+    const {PaymentQueueFullError}=require('../payment-waiting-queue');
+    require('../orbitcard-manual-http')(app,{service:{create:async()=>{throw new PaymentQueueFullError();}},requireSecondaryAuth(){}});
+    const response={headers:{},set(key,value){this.headers[key]=value;return this;},status(code){this.code=code;return this;},json(body){this.body=body;return this;}};
+    await routes.get('/api/admin/manual/orders')({body:{}},response);
+    assert.equal(response.code,429);assert.equal(response.headers['Retry-After'],'600');
+    assert.equal(response.body.error_code,'PAYMENT_QUEUE_FULL');assert.equal(response.body.retry_after_seconds,600);
+    assert.match(response.body.message,/10 分钟/);
 });
 
 test('manual payment stages and all upstream preparation calls share one durable trace without Session secrets', async()=>{
@@ -473,6 +586,11 @@ function storeFixture({ enqueueRedemption } = {}) {
             Object.assign(db.orders.find(o=>o.request_id===p[3]),{client_order_no:p[0],retry_history:p[1],state:'preparing',
                 card_id:0,authorization_baseline:null,issue_key:null,task_no:null,snapshot:null,message:p[2]});
         }
+        else if (q.startsWith('UPDATE orbitcard_admin_orders SET message = ?')) {
+            const row=db.orders.find(o=>o.request_id===p[1]);
+            if(!row||row.client_order_no!==p[2]||row.state!=='preparing'||Number(row.card_id)!==0)return {affectedRows:0};
+            row.message=p[0];
+        }
         else if (q.startsWith('UPDATE cdk_codes SET used_at = CURRENT_TIMESTAMP')) db.cdks.find(c => c.cdk_code === p[0]).used_at = 'reserved';
         else if (q.startsWith('UPDATE cdk_codes SET used_at = NULL')) {
             const code = db.cdks.find(c => c.cdk_code === p[0]);
@@ -540,7 +658,7 @@ function storeFixture({ enqueueRedemption } = {}) {
 
 async function prepareOrder(store, input) {
     const order = await store.prepareManualOrder(input);
-    const card = await store.reserveManualCard(input.requestId, input.cardId, order.client_order_no, input.planType);
+    const card = await store.reserveManualCard(input.requestId, input.cardId, order.client_order_no, input.planType, input.authorizationLimit || 7);
     assert.ok(card, 'test order must reserve an eligible card');
     return store.markManualPrepared(input.requestId, order.client_order_no, input.cardId);
 }
@@ -694,6 +812,38 @@ function manualFailure(order, overrides = {}) {
         status: 'failed', subscription_succeeded: false, query_source: 'upstream', ...overrides };
 }
 
+test('waiting progress checks the original identity and a prepared waiting timeout safely releases unused resources',async()=>{
+    const {db,store}=storeFixture(),input=manualInput(id);
+    const order=await store.prepareManualOrder(input);
+    await store.noteManualWaiting(id,order.client_order_no,'queued');
+    assert.equal(db.orders[0].message,'queued');
+    await assert.rejects(store.noteManualWaiting(id,'foreign','stale'),/状态已变更/);
+    assert.ok(await store.reserveManualCard(id,12,order.client_order_no,input.planType));
+    await store.markManualPrepared(id,order.client_order_no,12);
+    await assert.rejects(store.noteManualWaiting(id,order.client_order_no,'stale'),/状态已变更/);
+    db.fundings.push({job_key:order.client_order_no,state:'pending',scope:db.card.scope,card_id:12,
+        credential_hash:input.apiKeyHash,plan_type:'plus'});
+    await assert.rejects(store.failManualPreparation(id,order.client_order_no,'queue timeout'),/状态尚未确认/);
+    assert.equal(db.card.active_job,order.client_order_no);assert.equal(db.cdks[0].used_at,'reserved');
+    db.fundings.length=0;
+    const stopped=await store.failManualPreparation(id,order.client_order_no,'queue timeout');
+    assert.equal(stopped.state,'failed');assert.equal(stopped.message,'queue timeout');
+    assert.equal(db.card.active_job,null);assert.equal(db.cdks[0].used_at,null);
+});
+
+test('administrator card reservation rechecks its supplied authorization limit within the transaction',async()=>{
+    const {db,store}=storeFixture(),input=manualInput(id);
+    db.card.authorization_count=8;
+    const order=await store.prepareManualOrder(input);
+    assert.equal(await store.reserveManualCard(id,12,order.client_order_no,input.planType),null);
+    assert.equal(await store.reserveManualCard(id,12,order.client_order_no,input.planType,8),null);
+    assert.ok(await store.reserveManualCard(id,12,order.client_order_no,input.planType,10));
+    assert.equal(db.orders[0].authorization_baseline,8);
+    await store.markManualPrepared(id,order.client_order_no,12);await store.claimManualSubmission(id);
+    await store.settleManualOrder(id,{state:'success',message:'confirmed'});
+    assert.equal(db.orders[0].state,'success');assert.equal(db.card.authorization_pending_count,9);
+});
+
 test('durable administrator retry keeps exactly three different cards and rejects duplicate claims and stale results', async () => {
     const { db, store, now } = storeFixture(), input = manualInput(id);
     const credentials = { email: input.targetEmail, baseUrl: input.baseUrl, apiKeyHash: input.apiKeyHash };
@@ -707,7 +857,7 @@ test('durable administrator retry keeps exactly three different cards and reject
             snapshot, retryAllowed: true, expectedClientOrderNo: current.client_order_no });
         assert.equal(settled.state, attempt < 3 ? 'retry_waiting' : 'support_locked');
         assert.equal(db.card.active_job, null);
-        assert.equal(db.card.reuse_after_ms, now() + 300000);
+        assert.equal(db.card.reuse_after_ms, 0);
         assert.equal(db.cdks[0].used_at, 'reserved');
         if (attempt === 3) {
             assert.equal(await store.startManualRetry(id, current.client_order_no, credentials), null);
@@ -841,7 +991,6 @@ test('manual CDK and card reservation settle atomically on verified success or f
     assert.equal(db.orders[0].state,'support_locked');
     assert.equal(db.card.active_job, null);
     assert.equal(db.card.authorization_count, 3);
-    advance(require('../orbitcard-pool').REUSE_COOLDOWN_MS);
     const next = '36aad0bb-5eb7-4771-93f5-1ebd049b29e0';
     db.cdks.push({...db.cdks[0],cdk_code:'KC-SECOND',used_at:null});
     await prepareOrder(store, manualInput(next,{cdkCode:'KC-SECOND'}));
@@ -857,7 +1006,7 @@ test('manual CDK and card reservation settle atomically on verified success or f
     assert.equal(db.card.authorization_pending_count, 4);
 });
 
-test('only an explicitly rejected unaccepted subscription releases the CDK without payment cooldown',async()=>{
+test('only an explicitly rejected unaccepted subscription releases the CDK without payment',async()=>{
     const {db,store}=storeFixture({enqueueRedemption:async()=>{throw Error('rejected orders cannot emit redemption');}});
     await prepareOrder(store,manualInput(id));await store.claimManualSubmission(id);
     await store.settleManualOrder(id,{state:'rejected',message:'not accepted'});
@@ -873,13 +1022,13 @@ test('only an explicitly rejected unaccepted subscription releases the CDK witho
     }
 });
 
-test('every confirmed accepted subscription failure locks the CDK and releases the card with cooldown',async()=>{
+test('every confirmed accepted subscription failure locks the CDK and releases the card immediately',async()=>{
     for(const previous of ['submitting','pending','manual']) {
         const {db,store,now}=storeFixture();await prepareOrder(store,manualInput(id));await store.claimManualSubmission(id);
         if(previous!=='submitting')await store.settleManualOrder(id,{state:previous,message:previous});
         await store.settleManualOrder(id,{state:'failed',message:'confirmed failed'});
         assert.equal(db.orders[0].state,'support_locked');assert.equal(db.cdks[0].used_at,'reserved');assert.equal(db.card.active_job,null);
-        assert.equal(db.card.reuse_after_ms,now()+require('../orbitcard-pool').REUSE_COOLDOWN_MS);
+        assert.equal(db.card.reuse_after_ms,0);
         await store.settleManualOrder(id,{state:'pending',message:'stale query'});
         assert.equal(db.orders[0].state,'support_locked');assert.equal(db.cdks[0].used_at,'reserved');
     }
@@ -913,7 +1062,7 @@ test('manual original-order refresh settles terminal upstream snapshots and rele
         assert.equal(db.card.balance, 91);
         assert.equal(db.card.authorization_count, 0);
         assert.equal(db.card.authorization_pending_count || 0, status === 'succeeded' ? 1 : 0);
-        assert.equal(db.card.reuse_after_ms, now() + require('../orbitcard-pool').REUSE_COOLDOWN_MS);
+        assert.equal(db.card.reuse_after_ms, 0);
         assert.equal(db.cdks[0].used_at, mode === 'test' ? null : 'reserved');
         assert.equal(events.find(event => event.event === 'subscription_result_checked').data.state,
             status === 'failed' ? 'failed' : 'success');
@@ -973,7 +1122,6 @@ test('administrator success waits for its authorization; seven observed authoriz
         await store.failManualPreparation(waitingId,waiting.client_order_no,'still awaiting authorization');
         // This fixture stands in for a successful transaction-ID synchronization.
         db.card.authorization_count = count + 1;
-        advance(require('../orbitcard-pool').REUSE_COOLDOWN_MS);
     }
     const eighth = manualInput(id, { mode: 'test', cdkCode: null });
     const order = await store.prepareManualOrder(eighth);
@@ -982,36 +1130,31 @@ test('administrator success waits for its authorization; seven observed authoriz
     assert.equal(db.card.active_job, null);
 });
 
-test('submitted administrator success and failure cool the card even when authorization has already synchronized', async () => {
-    const { REUSE_COOLDOWN_MS } = require('../orbitcard-pool');
+test('administrator cards can be reused immediately when the authorization is synchronized despite legacy cooldown metadata', async () => {
     for (const state of ['success', 'failed']) {
-        const { db, store, now, advance } = storeFixture();
+        const { db, store, now } = storeFixture();
+        const reuseAfter = now() + 600000;
+        db.card.reuse_after_ms = reuseAfter;
         await prepareOrder(store, manualInput(id, { mode: 'test', cdkCode: null }));
         await store.claimManualSubmission(id);
         // An authorization can become visible before the card balance catches up.
         db.card.authorization_count = 1;
         await store.settleManualOrder(id, { state, message: 'confirmed' });
-        const reuseAfter = now() + REUSE_COOLDOWN_MS;
         assert.equal(db.card.reuse_after_ms, reuseAfter);
         assert.equal(db.card.active_job, null);
         const nextId = '36aad0bb-5eb7-4771-93f5-1ebd049b29e0';
         const next = await store.prepareManualOrder(manualInput(nextId, { mode: 'test', cdkCode: null }));
-        assert.equal(await store.reserveManualCard(nextId, 12, next.client_order_no, 'gpt-plus'), null);
-        advance(REUSE_COOLDOWN_MS - 1);
         await store.settleManualOrder(id, { state, message: 'duplicate final result' });
-        assert.equal(db.card.reuse_after_ms, reuseAfter, 'duplicate settlement must not extend cooldown');
-        assert.equal(await store.reserveManualCard(nextId, 12, next.client_order_no, 'gpt-plus'), null);
-        advance(1);
+        assert.equal(db.card.reuse_after_ms, reuseAfter, 'settlement no longer changes legacy cooldown data');
         assert.ok(await store.reserveManualCard(nextId, 12, next.client_order_no, 'gpt-plus'));
     }
 });
 
-test('expired administrator cooldown still requires the successful authorization to be visible', async () => {
+test('administrator cards still require the successful authorization to be visible', async () => {
     const { db, store, advance } = storeFixture();
     await prepareOrder(store, manualInput(id, { mode: 'test', cdkCode: null }));
     await store.claimManualSubmission(id);
     await store.settleManualOrder(id, { state: 'success', message: 'confirmed' });
-    advance(require('../orbitcard-pool').REUSE_COOLDOWN_MS);
     const nextId = '36aad0bb-5eb7-4771-93f5-1ebd049b29e0';
     const next = await store.prepareManualOrder(manualInput(nextId, { mode: 'test', cdkCode: null }));
     assert.equal(await store.reserveManualCard(nextId, 12, next.client_order_no, 'gpt-plus'), null);
@@ -1019,16 +1162,16 @@ test('expired administrator cooldown still requires the successful authorization
     assert.ok(await store.reserveManualCard(nextId, 12, next.client_order_no, 'gpt-plus'));
 });
 
-test('failure to persist administrator card cooldown rolls back settlement and keeps ownership', async () => {
+test('administrator settlement never writes the retired cooldown column', async () => {
     const { db, store } = storeFixture();
     await prepareOrder(store, manualInput(id));
     await store.claimManualSubmission(id);
     db.failCooldown = true;
-    await assert.rejects(store.settleManualOrder(id, { state: 'success', message: 'confirmed' }), /冷却/);
-    assert.equal(db.orders[0].state, 'submitting');
-    assert.equal(db.card.active_job, `manual-${id}`);
+    await store.settleManualOrder(id, { state: 'success', message: 'confirmed' });
+    assert.equal(db.orders[0].state, 'success');
+    assert.equal(db.card.active_job, null);
     assert.equal(db.card.reuse_after_ms, 0);
-    assert.equal(db.card.authorization_pending_count, undefined);
+    assert.equal(db.card.authorization_pending_count, 1);
     assert.equal(db.cdks[0].used_at, 'reserved');
 });
 
@@ -1060,8 +1203,6 @@ test('a replayed manual reservation keeps its original authorization baseline', 
     assert.equal(db.card.authorization_pending_count,1);
     const nextId='36aad0bb-5eb7-4771-93f5-1ebd049b29e0';
     const next=await store.prepareManualOrder(manualInput(nextId,{mode:'test',cdkCode:null}));
-    assert.equal(await store.reserveManualCard(nextId,12,next.client_order_no,'gpt-plus'),null);
-    advance(require('../orbitcard-pool').REUSE_COOLDOWN_MS);
     assert.ok(await store.reserveManualCard(nextId,12,next.client_order_no,'gpt-plus'));
 });
 

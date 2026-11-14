@@ -66,7 +66,8 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
         });
     }
 
-    async function reserveManualCard(requestId, cardId, jobKey, planType) {
+    async function reserveManualCard(requestId, cardId, jobKey, planType, limit = poolPolicy.MAX_USES) {
+        limit = poolPolicy.validateLimit(limit);
         return withTransaction(async connection => {
             const options = { connection };
             const [order] = await runQuery('SELECT * FROM orbitcard_admin_orders WHERE request_id = ? FOR UPDATE', [requestId], options);
@@ -80,8 +81,8 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
             const [card] = await runQuery('SELECT * FROM orbitcard_managed_cards WHERE scope = ? AND card_id = ? FOR UPDATE',
                 [order.scope, cardId], options);
             if (!card || card.provider_status !== 'ACTIVE' || card.currency !== 'USD') return null;
-            if (Number(order.card_id) === Number(cardId) && card.active_job === jobKey) return card;
-            if (card.active_job || !poolPolicy.eligible(card, now())) return null;
+            if (Number(order.card_id) === Number(cardId) && card.active_job === jobKey) return poolPolicy.eligible(card, now(), limit) ? card : null;
+            if (card.active_job || !poolPolicy.eligible(card, now(), limit)) return null;
             await runExecute('UPDATE orbitcard_managed_cards SET active_job = ? WHERE scope = ? AND card_id = ?',
                 [jobKey, order.scope, cardId], options);
             await runExecute('UPDATE orbitcard_admin_orders SET card_id = ?, authorization_baseline = ?, message = ? WHERE request_id = ? AND state = \'preparing\'',
@@ -102,7 +103,7 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
         return withTransaction(async connection => {
             const options = { connection };
             const [order] = await runQuery('SELECT * FROM orbitcard_admin_orders WHERE request_id = ? FOR UPDATE', [requestId], options);
-            if (!order || order.client_order_no !== jobKey || !['preparing','card_pending'].includes(order.state)) return null;
+            if (!order || order.client_order_no !== jobKey || !['preparing','prepared','card_pending'].includes(order.state)) return null;
             const issues = await runQuery('SELECT * FROM orbitcard_card_issues WHERE job_key = ? OR issue_key = ? FOR UPDATE',
                 [jobKey, order.issue_key || null], options);
             const fundings = await runQuery('SELECT * FROM orbitcard_card_fundings WHERE job_key = ? FOR UPDATE', [jobKey], options);
@@ -135,7 +136,7 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
             if (order.cdk_code && !retry) {
                 await runExecute('UPDATE cdk_codes SET used_at = NULL WHERE cdk_code = ? AND manual_redeemed_at IS NULL', [order.cdk_code], options);
             }
-            await runExecute("UPDATE orbitcard_admin_orders SET state = 'failed', message = ? WHERE request_id = ? AND state IN ('preparing','card_pending')",
+            await runExecute("UPDATE orbitcard_admin_orders SET state = 'failed', message = ? WHERE request_id = ? AND state IN ('preparing','prepared','card_pending')",
                 [String(message || '').slice(0,255), requestId], options);
             if (retry) await runExecute('UPDATE orbitcard_admin_orders SET state = ?, message = ? WHERE request_id = ?',
                 ['support_locked', '换卡重试准备失败，CDK 保持锁定；' + String(message || '').slice(0, 180), requestId], options);
@@ -169,6 +170,14 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
             WHERE request_id = ? AND client_order_no = ? AND state IN ('preparing','funding_waiting') AND card_id = ?`,
         ['支付卡已准备，等待提交原订阅订单', requestId, jobKey, cardId]);
         if (result.affectedRows !== 1) throw new Error('管理员订单支付卡准备状态不一致');
+        return getManualOrder(requestId);
+    }
+
+    async function noteManualWaiting(requestId, jobKey, message) {
+        const result = await runExecute(`UPDATE orbitcard_admin_orders SET message = ?
+            WHERE request_id = ? AND client_order_no = ? AND state = 'preparing' AND card_id = 0`,
+        [String(message || '').slice(0, 255), requestId, jobKey]);
+        if (result.affectedRows !== 1) throw new Error('管理员订单准备状态已变更，不能继续等待支付卡');
         return getManualOrder(requestId);
     }
 
@@ -313,11 +322,6 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
                         WHERE scope=? AND card_id=?`, [pending,order.scope,order.card_id], options);
                     if (updated.affectedRows !== 1) throw new Error('原管理员订单卡片不存在，不能确认消费授权待同步状态');
                 }
-                if (state !== 'rejected') {
-                    const cooled = await runExecute(`UPDATE orbitcard_managed_cards SET reuse_after_ms=GREATEST(COALESCE(reuse_after_ms,0),?)
-                        WHERE scope=? AND card_id=?`, [now()+poolPolicy.REUSE_COOLDOWN_MS,order.scope,order.card_id], options);
-                    if (cooled.affectedRows !== 1) throw new Error('原管理员订单卡片不存在，不能设置支付后冷却时间');
-                }
                 await runExecute(`UPDATE orbitcard_managed_cards SET active_job = NULL
                     WHERE scope = ? AND card_id = ? AND active_job = ?`,
                 [order.scope, order.card_id, order.client_order_no], options);
@@ -359,6 +363,6 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
 
     return { getManualOrder, listManualOrders, listRecoverableManualOrders, noteManualQueryAttempt,
         prepareManualOrder, reserveManualCard, attachManualIssue, blockManualBalance,
-        failManualPreparation, pauseManualPreparation, markManualPrepared, waitManualFunding, reviewManualFunding, releaseManualFunding,
+        failManualPreparation, pauseManualPreparation, markManualPrepared, noteManualWaiting, waitManualFunding, reviewManualFunding, releaseManualFunding,
         claimManualSubmission, abandonPreparedManualOrder, settleManualOrder, startManualRetry };
 };

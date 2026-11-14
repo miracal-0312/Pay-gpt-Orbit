@@ -258,7 +258,7 @@ test('restart query settles an upstream failure snapshot once and releases the s
     assert.equal(f.db.cards[0].active_job, null);
     assert.equal(f.db.uses[0].state, 'released');
     assert.equal(f.db.cards[0].authorization_count, 0);
-    assert.equal(f.db.cards[0].reuse_after_ms, f.now() + require('../orbitcard-pool').REUSE_COOLDOWN_MS);
+    assert.equal(f.db.cards[0].reuse_after_ms, undefined);
     assert.ok(f.db.cdks[0].used_at);
     assert.equal((await f.store.recordOrbitcardPaymentFailure(task.jobKey, {
         clientOrderNo: task.orbitcardClientOrderNo, cardId: 42, orderId: 'SUB-SNAPSHOT', raw: JSON.stringify(snapshot)

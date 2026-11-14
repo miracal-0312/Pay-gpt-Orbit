@@ -3,6 +3,7 @@
 const { createPasswordHash } = require('./admin-auth');
 const mysql = require('mysql2/promise');
 const orbitcardConfig = require('./orbitcard-config');
+const cardPool = require('./orbitcard-pool');
 const { normalizeAdminPaths } = require('./admin-paths');
 let pool = null;
 let lockConnections = 0;
@@ -23,7 +24,7 @@ const DEFAULT_ADMIN_LOGIN_PATH = String(process.env.ADMIN_LOGIN_PATH || 'admin-l
 const DEFAULT_ADMIN_PANEL_PATH = String(process.env.ADMIN_PANEL_PATH || 'admin').trim().toLowerCase();
 const GPT_API_CONFIG_KEYS = [
     'gpt_api_enabled', 'gpt_api_base_url', 'gpt_api_protocol_version',
-    'orbitcard_max_fee', 'orbitcard_product_code', 'orbitcard_max_initial_amount', 'orbitcard_payment_regions', 'orbitcard_plan_prices'
+    'orbitcard_max_fee', 'orbitcard_product_code', 'orbitcard_max_initial_amount', 'orbitcard_max_authorizations', 'orbitcard_payment_regions', 'orbitcard_plan_prices'
 ];
 
 function getPool() {
@@ -114,6 +115,7 @@ async function ensureGptApiConfigDefaults() {
         const defaults = { gpt_api_enabled: '0', gpt_api_base_url: orbitcardConfig.DEFAULT_BASE_URL,
             orbitcard_max_fee: '',
             orbitcard_product_code: '', orbitcard_max_initial_amount: '',
+            orbitcard_max_authorizations: String(cardPool.MAX_USES),
             orbitcard_payment_regions: '{}',
             orbitcard_plan_prices: '{}',
         };
@@ -145,6 +147,7 @@ async function getGptApiConfig() {
         orbitcard_max_fee: String(map.orbitcard_max_fee || ''),
         orbitcard_product_code: String(map.orbitcard_product_code || ''),
         orbitcard_max_initial_amount: String(map.orbitcard_max_initial_amount || ''),
+        orbitcard_max_authorizations: cardPool.authorizationLimit(map),
         orbitcard_payment_regions: orbitcardConfig.normalizePaymentRegions(JSON.parse(map.orbitcard_payment_regions || '{}')),
         orbitcard_plan_prices: orbitcardConfig.normalizePlanPrices(JSON.parse(map.orbitcard_plan_prices || '{}'))
     };
@@ -164,6 +167,7 @@ async function saveGptApiConfig(input = {}) {
         orbitcard_max_fee: cfg.orbitcard_max_fee,
         orbitcard_product_code: cfg.orbitcard_product_code,
         orbitcard_max_initial_amount: cfg.orbitcard_max_initial_amount,
+        orbitcard_max_authorizations: String(cfg.orbitcard_max_authorizations),
         orbitcard_payment_regions: JSON.stringify(cfg.orbitcard_payment_regions),
         orbitcard_plan_prices: JSON.stringify(cfg.orbitcard_plan_prices) };
     await saveConfigValues(values);

@@ -42,6 +42,15 @@ test('admin timeout aborts pending fetch, removes dedup entry and allows an expl
     assert.equal(f.timers.size, 0);
     const retry = f.request('/hung'); assert.equal(f.calls.length, 2); f.finish(); await retry;
 });
+
+test('admin requests retain queue-full error details for the shared wait dialog', async () => {
+    const f = requests(), pending = f.request('/queue-full');
+    f.calls[0].resolve({ ok: false, status: 429, json: async () => ({ success: false,
+        error_code: 'PAYMENT_QUEUE_FULL', retry_after_seconds: 600, message: '请 10 分钟后再下单' }) });
+    await assert.rejects(pending, error => error.httpStatus === 429 && error.error_code === 'PAYMENT_QUEUE_FULL'
+        && error.retry_after_seconds === 600);
+    assert.equal(f.timers.size, 0);
+});
 test('admin polling is serial and stops after its time budget or repeated failures', async () => {
     let now = 1000, tick, release, loads = 0;
     const context = vm.createContext({ Date: { now: () => now }, document: { hidden: false },
@@ -62,8 +71,8 @@ test('diagnostic polling backs off after errors and pauses after five failures',
     const nodes = { diagAutoLogs: { checked: true, addEventListener() {} }, diagTraceId: { value: 'job-1' }, diagRequestId: { value: '' }, diagLogState: {} };
     const context = vm.createContext({ Date: { now: () => now }, document: { hidden: false }, selected: 'diagnostics', selectedDiagnostic: 'trace',
         $: id => nodes[id], localStorage: { getItem: () => 'verified' }, SECONDARY_KEY: 'secondary',
-        diagTrackingStarted: now, diagPollFailures: 0, diagNextPollAt: 0, diagPolling: false,
-        diagPayBusy: false, diagOrder: null, setInterval(fn) { tick = fn; },
+        diagTrackingStarted: now, diagTrackingBudget: () => 15 * 60 * 1000, diagPollFailures: 0, diagNextPollAt: 0, diagPolling: false,
+        diagPayBusy: false, diagOrder: null, diagSubmissionRejected: false, setInterval(fn) { tick = fn; },
         diagReadLogs: async () => { loads++; throw Error('offline'); }
     });
     vm.runInContext(source.slice(source.lastIndexOf("$('diagAutoLogs').addEventListener")), context);

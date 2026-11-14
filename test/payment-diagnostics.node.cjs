@@ -55,7 +55,7 @@ function managedPool(count=5,balance='20.00') {
     return f;
 }
 
-test('concurrent preflight assigns distinct cards from one readonly snapshot and leaves excess tasks waiting', async () => {
+test('concurrent preflight assigns distinct cards and admits just one waiting task', async () => {
     const f = managedPool(3);
     f.state.live[1].balance_amount = '2.00';
     f.state.live[2].balance_amount = '4.00';
@@ -65,7 +65,9 @@ test('concurrent preflight assigns distinct cards from one readonly snapshot and
     assert.equal(result.passed, true); assert.equal(result.ready, false);
     assert.deepEqual(result.steps.map(row => row.step), ['config', 'plans', 'balance', 'concurrency']);
     const sim = result.result.concurrency;
-    assert.deepEqual(sim.summary, { assigned: 3, pay: 1, fund: 2, waiting: 7, blocked: 0, opening: 0, duplicate_assignments: 0 });
+    assert.deepEqual(sim.summary, { assigned: 3, pay: 1, fund: 2, waiting: 1, blocked: 6, opening: 0, duplicate_assignments: 0 });
+    assert.equal(sim.waiting_limit, 1);
+    assert.ok(sim.tasks.slice(4).every(row => row.reason === 'queue_full'));
     assert.deepEqual(sim.tasks.slice(0, 3).map(row => row.card_id), [42, 44, 43]);
     assert.equal(sim.initial_contention.tasks, 10);
     assert.equal(sim.database_locks_tested, false);
@@ -76,6 +78,30 @@ test('concurrent preflight assigns distinct cards from one readonly snapshot and
     assert.equal(f.calls.filter(([op]) => op === 'cardTransaction').length, 3);
     assert.deepEqual(f.state.rows, before); assert.deepEqual(f.writes, []);
     assert.ok(!JSON.stringify([f.calls, f.events, result]).includes('must-not-read-or-forward-this-session'));
+});
+
+test('preflight and simulation use the current authorization limit for eligibility, displayed counts and retirement', async () => {
+    const f=managedPool(2);
+    f.state.rows[0].authorization_count=4;
+    f.state.rows[1].authorization_count=1;
+    const run=()=>f.service.preflight({stage:'cards',plan_type:'plus'});
+    const initial=(await run()).result.selection;
+    assert.equal(initial.card_id,43);
+    assert.equal(initial.cards[0].authorization_limit,4);
+    assert.deepEqual(initial.maintenance.retire_card_ids,[42]);
+    f.cfg.orbitcard_max_authorizations=6;
+    const raised=(await run()).result.selection;
+    assert.equal(raised.card_id,42);
+    assert.ok(raised.cards.every(card=>card.authorization_limit===6));
+    assert.deepEqual(raised.maintenance.retire_card_ids,[]);
+    const simulation=async()=> (await f.service.preflight({stage:'concurrency',plan_type:'plus',concurrent_tasks:5})).result.concurrency;
+    assert.equal((await simulation()).summary.assigned,2);
+    f.cfg.orbitcard_max_authorizations=2;
+    const lowered=await simulation();
+    assert.equal(lowered.summary.assigned,1);
+    assert.equal(lowered.summary.waiting,1);
+    assert.equal(lowered.summary.blocked,3);
+    assert.deepEqual(f.writes,[]);
 });
 
 test('concurrent selection shares the funding budget instead of spending the same balance for every task', async () => {
@@ -97,15 +123,16 @@ test('concurrent empty-pool simulation blocks all tasks without planning any ope
     assert.ok(sim.tasks.every(row=>row.reason==='automatic_opening_disabled'&&row.card_id===null));assert.deepEqual(f.writes,[]);
 });
 
-test('concurrent simulation preserves real owners and cooldowns and supports 100 requests without repeated platform reads', async () => {
+test('concurrent simulation preserves real owners, ignores historical cooldowns and bounds 100 requests', async () => {
     const f = managedPool(3);
     f.state.rows[0].active_job = 'real-order';
     f.state.rows[1].reuse_after_ms = Date.now() + 600000;
     const before = structuredClone(f.state.rows);
     const sim = (await f.service.preflight({ stage: 'concurrency', plan_type: 'plus', concurrent_tasks: 100 })).result.concurrency;
-    assert.equal(sim.task_count, 100); assert.equal(sim.summary.assigned, 1); assert.equal(sim.summary.waiting, 99);
-    assert.equal(sim.tasks[0].card_id, 44);
-    assert.deepEqual(sim.initial_waiting, { busy: 1, cooldown: 1 });
+    assert.equal(sim.task_count, 100); assert.equal(sim.summary.assigned, 2); assert.equal(sim.summary.waiting, 1);
+    assert.equal(sim.summary.blocked, 97);
+    assert.equal(sim.tasks[0].card_id, 43);
+    assert.deepEqual(sim.initial_waiting, { busy: 1 });
     assert.equal(f.calls.filter(([op]) => op === 'cardDetail').length, 1);
     assert.deepEqual(f.state.rows, before); assert.deepEqual(f.writes, []);
 });
@@ -250,16 +277,16 @@ test('preflight imports observable external card history in memory without expos
     Object.assign(f.state.live[0],{card_number:'5556597912341234',cvv:'private-cvv',merchant:'private-merchant'});
     const result=await f.service.preflight({stage:'cards',plan_type:'plus'});
     assert.equal(result.passed,true);assert.equal(result.result.selection.action,'pay');
-    const card=result.result.selection.cards[0];assert.equal(card.card_id,42);assert.equal(card.authorization_count,2);assert.equal(card.authorization_limit,7);
+    const card=result.result.selection.cards[0];assert.equal(card.card_id,42);assert.equal(card.authorization_count,2);assert.equal(card.authorization_limit,4);
     assert.ok(Date.parse(card.authorizations_checked_at));assert.deepEqual(f.state.rows,[]);assert.deepEqual(f.writes,[]);
     const output=JSON.stringify([result,f.events]);
     for(const secret of ['5556597912341234','private-cvv','private-merchant','private-transaction'])assert.ok(!output.includes(secret));
 });
-test('preflight follows the seven-authorization boundary using all transaction pages',async()=>{
-    for(const [count,action] of [[0,'pay'],[6,'pay'],[7,'unavailable'],[102,'unavailable']]) {
+test('preflight follows the default four-authorization boundary using all transaction pages',async()=>{
+    for(const [count,action] of [[0,'pay'],[3,'pay'],[4,'unavailable'],[102,'unavailable']]) {
         const f=fixture();f.state.transactions.set(42,Array.from({length:count},(_,i)=>authorization('live-'+i)));
         const before=structuredClone(f.state.rows), result=await f.service.preflight({stage:'cards',plan_type:'plus'});
-        assert.equal(result.passed,count<7);assert.equal(result.result.selection.action,action);assert.equal(result.result.selection.cards[0].authorization_count,count);
+        assert.equal(result.passed,count<4);assert.equal(result.result.selection.action,action);assert.equal(result.result.selection.cards[0].authorization_count,count);
         assert.deepEqual(f.state.rows,before);assert.deepEqual(f.writes,[]);
         if(count===102)assert.deepEqual(f.calls.filter(([operation])=>operation==='cardTransaction').map(call=>call[2].page),[1,2]);
     }
@@ -324,14 +351,15 @@ test('an idle card awaiting authorization stays excluded without automatic repla
     assert.equal(f.state.rows[0].authorization_count,0);assert.deepEqual(f.writes,[]);
 });
 
-test('preflight excludes a cooling card even with synchronized authorization and a high balance',async()=>{
+test('preflight ignores historical cooldown once authorization is synchronized',async()=>{
     const f=fixture();f.state.rows[0].authorization_pending_count=1;
     f.state.rows[0].reuse_after_ms=Date.now()+300000;
     f.state.transactions.set(42,[authorization('new')]);
     const response=await f.service.preflight({stage:'cards',plan_type:'plus'});
-    assert.equal(response.passed,false);
-    assert.equal(response.result.selection.action,'wait');
-    assert.equal(response.result.selection.waiting[0].reason,'cooldown');
+    assert.equal(response.passed,true);
+    assert.equal(response.result.selection.action,'pay');
+    assert.equal(response.result.selection.card_id,42);
+    assert.deepEqual(response.result.selection.waiting,[]);
     assert.deepEqual(f.writes,[]);
 });
 test('preflight cannot open around any number of inactive cards',async()=>{

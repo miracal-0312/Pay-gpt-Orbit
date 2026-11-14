@@ -22,10 +22,11 @@ function setup(fetchResult) {
 }
 
 function simulation() {
-    return { task_count: 10, summary: { assigned: 1, pay: 1, fund: 0, waiting: 9, blocked: 0, opening: 0, duplicate_assignments: 0 },
+    return { task_count: 10, waiting_limit: 1, summary: { assigned: 1, pay: 1, fund: 0, waiting: 1, blocked: 8, opening: 0, duplicate_assignments: 0 },
         initial_contention: { card_id: 42, tasks: 10 }, budget: { available: '100.00', reserved: '0.00', remaining: '100.00' },
         tasks: [{ task: 1, initial_card_id: 42, card_id: 42, action: 'pay', funding_amount: '0.00', reason: 'reserved_in_simulation' },
-            { task: 2, initial_card_id: 42, card_id: null, action: 'wait', funding_amount: '0.00', reason: 'busy' }] };
+            { task: 2, initial_card_id: 42, card_id: null, action: 'wait', funding_amount: '0.00', reason: 'busy' },
+            ...Array.from({length:8},(_,i)=>({task:i+3,initial_card_id:42,card_id:null,action:'blocked',funding_amount:'0.00',reason:'queue_full'}))] };
 }
 
 test('concurrency UI sends one readonly request without Session and renders model results separately from payment readiness', async () => {
@@ -41,7 +42,8 @@ test('concurrency UI sends one readonly request without Session and renders mode
     await pending;
     assert.equal(f.$('diagConcurrency').hidden, false);
     assert.match(f.$('diagSteps').innerHTML, /完成模拟/);
-    assert.match(f.$('diagConcurrencySummary').textContent, /等待 9 个.*模型内重复分配 0 次/);
+    assert.match(f.$('diagConcurrencySummary').textContent, /等待 1 个（最多 1 个），未分配 8 个.*模型内重复分配 0 次/);
+    assert.match(f.$('diagConcurrencyRows').innerHTML, /等待队列已满，请 10 分钟后再下单/);
     assert.match(f.$('diagConcurrencyBudget').textContent, /不代表真实并发压测通过/);
     assert.match(f.$('diagConcurrencyRows').innerHTML, /已被其他任务占用/);
     assert.ok(f.buttons.every(button => !button.disabled));

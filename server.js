@@ -12,6 +12,8 @@ const { PLAN_LABELS } = require('./plan-registry');
 const { notifyTelegramEvent } = require('./telegram-notify');
 const app = express();
 const activeJobs = new Set();
+const { createPaymentWaitingQueue, queueFeedback } = require('./payment-waiting-queue');
+const waitingQueue = createPaymentWaitingQueue({ store, activeJobs });
 const clients = new Map();
 const activeChallenges = new Map();
 let ready = null, draining = false, recoveryTimer = null, stopLogCleanup = null, server, wss;
@@ -30,6 +32,7 @@ function publicOrder(task) {
         attemptJobKey: task.job_key, attempt: Number(task.orbitcard_retry_attempt_no || 1),
         status: task.manual_redeemed_at ? 'success' : task.orbitcard_state === 'retry_waiting' ? 'retry' : task.status,
         message: task.manual_redeemed_at ? '卡密已由人工售后核销' : task.message,
+        queued: waitingQueue.has(task.job_key), ...queueFeedback(task.manual_redeemed_at ? '' : task.message),
         progress: task.manual_redeemed_at ? 100 : Number(task.progress || 0),
         order_id: task.gpt_api_order_id || null, client_order_no: task.orbitcard_client_order_no || null,
         cdk_state: task.manual_redeemed_at || task.orbitcard_state === 'success' ? 'redeemed' : ['failed','rejected'].includes(task.orbitcard_state) ? 'available' : 'reserved',
@@ -42,7 +45,7 @@ async function notify(task) {
     });
 }
 const cardService = require('./orbitcard-card-service')({ store, audit: entry => runtimeLog.push(entry) });
-const manualService = require('./orbitcard-manual-service')({ store, activeJobs, cardService, audit: entry => runtimeLog.push(entry) });
+const manualService = require('./orbitcard-manual-service')({ store, activeJobs, cardService, waitingQueue, audit: entry => runtimeLog.push(entry) });
 const recovery = require('./order-recovery')({ store, query: require('./orbitcard-query'), activeJobs,
     audit: entry => runtimeLog.push(entry), notify,
     checkBalance: task => store.getGptApiConfig().then(cfg => cardService.canResumeBalance(cfg,task)),
@@ -51,19 +54,20 @@ const recovery = require('./order-recovery')({ store, query: require('./orbitcar
 let cardRecoveryAt = 0;
 
 const { run: runWorker } = require('./payment-service')({ store, cardService, worker: require('./orbitcard-worker'),
-    activeJobs, activeChallenges, audit: entry => runtimeLog.push(entry), broadcast, log, notify });
+    activeJobs, activeChallenges, waitingQueue, audit: entry => runtimeLog.push(entry), broadcast, log, notify });
 
 app.disable('x-powered-by');
 // Only named proxy addresses/subnets may supply the client IP; never trust arbitrary forwarded headers.
 if (process.env.TRUST_PROXY?.trim()) app.set('trust proxy', process.env.TRUST_PROXY.split(',').map(value => value.trim()).filter(Boolean));
 app.use(createRequestGuard());
 app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '256kb' }));
-require('./admin-http')(app, { store, ensureStoreReady, getTotalActiveJobs: () => activeJobs.size, cardService, manualService });
+require('./admin-http')(app, { store, ensureStoreReady, getTotalActiveJobs: () => waitingQueue.activeCount(), cardService, manualService });
 
 app.get('/api/public/runtime', async (req, res, next) => {
     try {
         await ensureStoreReady();
-        res.json({ success: true, provider: 'orbitcard', runtime: { active_foreground_jobs: activeJobs.size,
+        res.json({ success: true, provider: 'orbitcard', runtime: { active_foreground_jobs: waitingQueue.activeCount(),
+            waiting_jobs: waitingQueue.count, max_waiting_jobs: 1,
             max_foreground_jobs: await store.getMaxConcurrentActivations() } });
     } catch (error) { next(error); }
 });
@@ -72,11 +76,11 @@ app.get('/api/health', async (req, res) => {
     catch (_) { res.status(503).json({ success: false }); }
 });
 app.get('/api/admin/data', async (req, res, next) => {
-    try { res.json({ ...(await store.getAdminData()), runtime: { active_foreground_jobs: activeJobs.size } }); }
+    try { res.json({ ...(await store.getAdminData()), runtime: { active_foreground_jobs: waitingQueue.activeCount(), waiting_jobs: waitingQueue.count, max_waiting_jobs: 1 } }); }
     catch (error) { next(error); }
 });
 
-const handleActivationRequest = require('./activation-service')({ store, ensureStoreReady, activeJobs, runWorker, log, isDraining: () => draining });
+const handleActivationRequest = require('./activation-service')({ store, ensureStoreReady, activeJobs, runWorker, log, broadcast, waitingQueue, isDraining: () => draining });
 app.post('/api/run-process', handleActivationRequest);
 
 app.post('/api/cdk/orbitcard/status', async (req, res, next) => {
@@ -182,6 +186,7 @@ async function start() {
 async function shutdown() {
     if (draining) return;
     draining = true;
+    waitingQueue.close();
     clearInterval(recoveryTimer);
     stopLogCleanup?.();
     if (wss) for (const ws of wss.clients) ws.close(1001, 'Restarting');

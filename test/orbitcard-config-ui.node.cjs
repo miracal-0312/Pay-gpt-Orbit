@@ -125,7 +125,7 @@ test('configuration form submits independent USD plan amounts and USDT service f
     const source = fs.readFileSync(path.resolve(__dirname, '../public/admin.js'), 'utf8');
     const block = source.slice(source.indexOf('function apiInput()'), source.indexOf('function renderCardRow('));
     const values = { apiEnabled: { checked: true }, baseUrl: { value: 'https://orbitcard.test' },
-        productCode: { value: '' }, maxInitialAmount: { value: '' }, maxFee: { value: ' 0.15 ' } };
+        productCode: { value: '' }, cardAuthorizationLimit: { value: '4' }, maxInitialAmount: { value: '' }, maxFee: { value: ' 0.15 ' } };
     const amounts = { plus: '15.54000001', pro100: '100', pro200: '', pro500: '500.25' };
     for (const plan of Object.keys(amounts)) {
         values[`planPrice_${plan}`] = { value: ` ${amounts[plan]} ` };
@@ -135,6 +135,7 @@ test('configuration form submits independent USD plan amounts and USDT service f
     assert.deepEqual(input.orbitcard_plan_prices, amounts);
     assert.equal(input.orbitcard_max_fee, '0.15');
     assert.equal(input.orbitcard_payment_regions.plus, 'PH');
+    assert.equal(input.orbitcard_max_authorizations, 4);
 });
 
 test('configuration page reloads saved USD amounts and leaves unconfigured plans empty', async () => {
@@ -155,6 +156,7 @@ test('configuration page reloads saved USD amounts and leaves unconfigured plans
     assert.equal(node('planPrice_pro100').value, '100.00000000');
     assert.equal(node('planPrice_pro200').value, '');
     assert.equal(node('maxFee').value, '0.15');
+    assert.equal(node('cardAuthorizationLimit').value, '4');
 });
 
 test('client signs with environment Secret even if config contains an obsolete Secret', async () => {

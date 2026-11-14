@@ -2,7 +2,10 @@
 const $ = id => document.getElementById(id);
 let activeCdk = '', activeJob = '', activePlanLabel = '', generation = 0, timer, expiryTimer, trackingStarted = 0, busy = false;
 let pollFailures = 0, verifying = false, submitting = false, runtimeBusy = false;
+let trackingQueued = false;
+function trackingBudget() { return (trackingQueued ? 45 : 15) * 60 * 1000; }
 const statusNames = { success: '订阅成功', failed: '充值失败', retry: '请重新提交 Session', manual: '处理中 / 结果待确认', running: '正在充值', processing: '正在充值', used: '卡密已使用', unused: '卡密可使用' };
+const QUEUE_FULL_MESSAGE = '当前支付卡繁忙，等待队列已满，请 10 分钟后再下单。';
 // Keep provider branding out of customer-facing copy, including stored order
 // messages and upstream errors. API identifiers remain unchanged.
 function publicText(text) {
@@ -22,13 +25,17 @@ async function requestJson(url, options = {}) {
         if (!response.ok) {
             const error = new Error(data.message || '请求失败，请稍后查询');
             error.httpStatus = response.status;
+            error.error_code = data.error_code;
+            error.retry_after_seconds = data.retry_after_seconds;
             throw error;
         }
         return data;
     } catch (error) {
         const failure = new Error(controller.signal.aborted ? '请求超时' : error.message || '网络连接异常');
         failure.httpStatus = error.httpStatus;
-        failure.uncertain = !error.httpStatus || error.httpStatus >= 500;
+        failure.error_code = error.error_code;
+        failure.retry_after_seconds = error.retry_after_seconds;
+        failure.uncertain = error.error_code !== 'PAYMENT_QUEUE_FULL' && (!error.httpStatus || error.httpStatus >= 500);
         throw failure;
     } finally { clearTimeout(timeout); }
 }
@@ -64,18 +71,20 @@ $('resultModal').addEventListener('keydown', event => {
     if (event.key === 'Escape') { event.preventDefault(); closeResult(); }
     if (event.key === 'Tab') { event.preventDefault(); $('resultClose').focus(); }
 });
-function showResult(data) {
+function showResult(data, repeat = false) {
+    if (data.queued) return;
     if (!['success', 'failed', 'manual', 'retry'].includes(data.status)) return;
-    const key = `${activeCdk}:${data.attemptJobKey || activeJob}:${data.status}`;
-    if (shownResults.has(key)) return;
+    const queueFull = data.error_code === 'PAYMENT_QUEUE_FULL';
+    const key = `${activeCdk}:${data.attemptJobKey || activeJob}:${data.status}:${data.error_code || ''}`;
+    if (!repeat && shownResults.has(key)) return;
     shownResults.add(key);
     const success = data.status === 'success';
     const uncertain = data.status === 'manual';
-    $('resultTitle').textContent = success ? '订阅成功' : uncertain ? '充值结果待确认' : '充值未成功';
+    $('resultTitle').textContent = queueFull ? '请稍后下单' : success ? '订阅成功' : uncertain ? '充值结果待确认' : '充值未成功';
     const reason = data.order?.failureMessage || data.message || '暂未取得具体错误原因';
-    $('resultDescription').textContent = success ? '订阅成功，请等待一会刷新账户状态。'
+    $('resultDescription').textContent = queueFull ? QUEUE_FULL_MESSAGE : success ? '订阅成功，请等待一会刷新账户状态。'
         : publicText(`${uncertain ? '充值结果尚未确认，请勿重复充值。\n' : ''}${reason}`);
-    $('resultSupport').textContent = success ? '' : '请联系售后QQ 2244527967处理';
+    $('resultSupport').textContent = success || queueFull ? '' : '请联系售后QQ 2244527967处理';
     if ($('resultModal').hidden) resultReturnFocus = document.activeElement;
     $('resultModal').hidden = false;
     $('resultClose').focus();
@@ -83,35 +92,38 @@ function showResult(data) {
 function display(data) {
     if (data.jobKey && activeJob && data.jobKey !== activeJob) return false;
     activeJob = data.jobKey || activeJob;
-    const retry = data.status === 'retry';
+    const queued = Boolean(data.queued);
+    if (queued) trackingQueued = true;
+    const label = queued ? '排队等待' : statusNames[data.status] || data.status;
+    const retry = !queued && data.status === 'retry';
     const released = data.status === 'failed' && data.cdk_state === 'available';
     $('retryBtn').hidden = !released;
     showRedeemStep(retry ? 2 : 3);
-    if (activePlanLabel) $('planInfo').textContent = `${activePlanLabel} · ${statusNames[data.status] || data.status}`;
+    if (activePlanLabel) $('planInfo').textContent = `${activePlanLabel} · ${label}`;
     $('redeemForm').hidden = !retry;
     $('refreshBtn').hidden = data.provider !== 'orbitcard';
     $('progressBox').hidden = false;
     const progress = Math.max(0, Math.min(100, Number(data.progress) || 0));
-    $('progressBox').setAttribute('aria-label', statusNames[data.status] || data.status);
+    $('progressBox').setAttribute('aria-label', label);
     $('progressBar').parentElement.setAttribute('aria-valuenow', String(data.status === 'success' ? 100 : progress));
     $('progressBar').style.width = `${data.status === 'success' ? 100 : progress}%`;
-    $('progressText').textContent = statusNames[data.status] || data.status;
+    $('progressText').textContent = label;
     message(data.message || statusNames[data.status] || '等待查询', data.status === 'success' ? 'success' : data.status === 'failed' ? 'error' : '');
     $('orderInfo').textContent = `订单：${data.order_id || data.client_order_no || activeJob || '待分配'}`;
     showResult(data);
-    if (['success', 'failed', 'retry'].includes(data.status)) {
+    if (!queued && ['success', 'failed', 'retry'].includes(data.status)) {
         clearTimeout(timer); clearChallenge();
-        $('trackingHint').textContent = retry ? '请提交原目标账号的最新 Session 继续。'
+        $('trackingHint').textContent = data.error_code === 'PAYMENT_QUEUE_FULL' ? QUEUE_FULL_MESSAGE : retry ? '请提交原目标账号的最新 Session 继续。'
             : released ? '卡密已释放，请先处理失败原因，再重新验证并继续充值。'
                 : data.status === 'failed' ? '卡密暂不可重试，请联系管理员核对原订单。' : '结果已确认，仍可手动查询原订单。';
         return false;
     }
-    $('trackingHint').textContent = '正在自动查询原订单，可随时手动刷新。';
+    $('trackingHint').textContent = queued ? '已进入等待队列，系统会自动继续，请勿重复提交。' : '正在自动查询原订单，可随时手动刷新。';
     return true;
 }
 async function refresh(auto = false, expected = generation) {
     if (!activeCdk || expected !== generation) return;
-    if (auto && Date.now() - trackingStarted >= 15 * 60 * 1000) {
+    if (auto && Date.now() - trackingStarted >= trackingBudget()) {
         $('trackingHint').textContent = '自动查询已暂停，可点击“查询原订单”继续。';
         return;
     }
@@ -132,7 +144,7 @@ async function refresh(auto = false, expected = generation) {
     } catch (error) { if (expected === generation) { clearChallenge(); message(`${error.message}。请保留原卡密并继续查询。`, 'error'); pollFailures = Math.min(pollFailures + 1, 4); } delay = Math.min(60000, 5000 * 2 ** pollFailures); }
     finally {
         busy = false; $('refreshBtn').disabled = false;
-        if (expected === generation && auto && Date.now() - trackingStarted < 15 * 60 * 1000) {
+        if (expected === generation && auto && Date.now() - trackingStarted < trackingBudget()) {
             clearTimeout(timer); timer = setTimeout(() => refresh(true, expected), delay);
         }
         else if (expected === generation && auto) $('trackingHint').textContent = '自动查询已暂停，可点击“查询原订单”继续。';
@@ -142,7 +154,7 @@ function startTracking() { clearTimeout(timer); trackingStarted = Date.now(); po
 $('cdkInput').addEventListener('input', () => {
     showRedeemStep(1);
     closeResult();
-    generation++; clearTimeout(timer); clearChallenge(); activeCdk = ''; activeJob = ''; activePlanLabel = '';
+    generation++; clearTimeout(timer); clearChallenge(); activeCdk = ''; activeJob = ''; activePlanLabel = ''; trackingQueued = false;
     $('redeemForm').hidden = true; $('refreshBtn').hidden = true; $('retryBtn').hidden = true; $('progressBox').hidden = true;
     $('sessionInput').value = '';
     $('orderInfo').textContent = ''; $('trackingHint').textContent = ''; $('planInfo').textContent = ''; message('');
@@ -161,6 +173,8 @@ async function verifyCurrentCdk(event) {
         if (current !== generation) return;
         activeCdk = cdk;
         const data = result.data; activePlanLabel = publicText(data.plan_label || data.plan_type);
+        if (!data.jobKey) trackingQueued = false;
+        if (data.queued) trackingQueued = true;
         $('planInfo').textContent = `${activePlanLabel} · ${statusNames[data.status] || data.status}`;
         $('redeemForm').hidden = !['unused','retry'].includes(data.status) || data.type !== '自助';
         showRedeemStep($('redeemForm').hidden ? 3 : 2);
@@ -185,13 +199,17 @@ $('redeemForm').addEventListener('submit', async event => {
         if (current !== generation) return;
         $('sessionInput').value = '';
         activeJob = result.jobKey;
+        if (result.queued) trackingQueued = true;
         showRedeemStep(3);
-        $('planInfo').textContent = `${activePlanLabel} · 订单已提交`;
+        $('planInfo').textContent = `${activePlanLabel} · ${result.queued ? '排队等待' : '订单已提交'}`;
         $('redeemForm').hidden = true; message(result.message);
         if (result.provider === 'orbitcard') startTracking();
     } catch (error) {
         if (current !== generation) return;
-        if (error.uncertain) {
+        if (error.error_code === 'PAYMENT_QUEUE_FULL') {
+            message(QUEUE_FULL_MESSAGE, 'error');
+            showResult({ status: 'failed', error_code: error.error_code }, true);
+        } else if (error.uncertain) {
             // An interrupted response cannot prove that the server rejected the order.
             $('sessionInput').value = ''; $('redeemForm').hidden = true; $('retryBtn').hidden = true;
             activeJob = ''; showRedeemStep(3);
@@ -205,7 +223,7 @@ $('refreshBtn').addEventListener('click', startTracking);
 async function runtime() {
     if (runtimeBusy || document.hidden) return;
     runtimeBusy = true;
-    try { const data = await requestJson('/api/public/runtime'); if (data.success) $('runtimeInfo').textContent = `当前处理任务 ${data.runtime.active_foreground_jobs} / ${data.runtime.max_foreground_jobs}`; }
+    try { const data = await requestJson('/api/public/runtime'); if (data.success) $('runtimeInfo').textContent = `当前处理任务 ${data.runtime.active_foreground_jobs} / ${data.runtime.max_foreground_jobs} · 排队等待 ${data.runtime.waiting_jobs ?? 0} / ${data.runtime.max_waiting_jobs ?? 1}`; }
     catch (_) { $('runtimeInfo').textContent = '服务状态暂不可用'; }
     finally { runtimeBusy = false; }
 }

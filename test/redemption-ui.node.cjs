@@ -7,7 +7,12 @@ const vm = require('node:vm');
 
 function setup() {
     const nodes = new Map(), timers = new Map(), delays = new Map(), calls = [];
-    let nextTimer = 0, response = null;
+    let nextTimer = 0, response = null, runtimeResponse = { success: false };
+    let now = Date.now();
+    class ClockDate extends Date {
+        constructor(...args) { super(...(args.length ? args : [now])); }
+        static now() { return now; }
+    }
     const node = id => {
         if (!nodes.has(id)) nodes.set(id, { value: '', hidden: false, disabled: false, style: {}, children: [],
             handlers: {}, attributes: {}, textContent: '', parentElement: { setAttribute() {} },
@@ -16,13 +21,13 @@ function setup() {
             replaceChildren() { this.children = []; }, append(child) { this.children.push(child); } });
         return nodes.get(id);
     };
-    const context = vm.createContext({ URL, Date, AbortController,
+    const context = vm.createContext({ URL, Date: ClockDate, AbortController,
         document: { getElementById: node, querySelectorAll: () => [], createElement: () => ({}) },
         setTimeout: (fn, delay) => { timers.set(++nextTimer, fn); delays.set(nextTimer, delay); return nextTimer; },
         clearTimeout: id => { timers.delete(id); delays.delete(id); }, setInterval() {},
         fetch: async (url, options) => {
             calls.push({ url, options });
-            if (url === '/api/public/runtime') return { ok: true, json: async () => ({ success: false }) };
+            if (url === '/api/public/runtime') return { ok: true, json: async () => runtimeResponse };
             if (typeof response === 'function') return response(url, options);
             if (response instanceof Error) throw response;
             return { ok: true, json: async () => response };
@@ -30,11 +35,11 @@ function setup() {
     });
     vm.runInContext(fs.readFileSync(path.join(__dirname, '../public/app.js'), 'utf8'), context);
     vm.runInContext("activeCdk = 'CODE-TEST'; activeJob = 'job-1'; activePlanLabel = 'Plus';", context);
-    return { node, timers, calls, context, respond(value) { response = value; },
+    return { node, timers, calls, context, respond(value) { response = value; }, runtime(value) { runtimeResponse = value; return context.runtime(); }, advance(ms) { now += ms; },
         fireTimeout(delay) {
             const id = [...delays].find(([id, ms]) => ms === delay && timers.has(id))?.[0];
             assert.ok(id, `Expected a ${delay} ms timer`);
-            const fn = timers.get(id); timers.delete(id); delays.delete(id); fn();
+            const fn = timers.get(id); timers.delete(id); delays.delete(id); return fn();
         },
         refresh: () => vm.runInContext('refresh(false)', context) };
 }
@@ -192,4 +197,104 @@ test('an explicitly rejected submission keeps the Session editable without start
     assert.equal(f.node('startBtn').disabled,false);
     assert.equal(f.node('sessionInput').value,'{"accessToken":"test"}');
     assert.equal(f.calls.filter(call=>call.url==='/api/cdk/orbitcard/status').length,0);
+});
+
+test('queue-full rejection preserves Session and shows a dismissible wait notice without support instructions', async () => {
+    const f = setup(); await flush();
+    const message = '当前支付卡繁忙，等待队列已满，请 10 分钟后再下单。';
+    f.node('cdkInput').value = 'CODE-TEST'; f.node('sessionInput').value = '{"accessToken":"test"}';
+    f.respond(() => ({ ok: false, status: 429, json: async () => ({ success: false, error_code: 'PAYMENT_QUEUE_FULL', retry_after_seconds: 600, message }) }));
+    await f.node('redeemForm').handlers.submit({ preventDefault() {} });
+    assert.equal(f.node('resultTitle').textContent, '请稍后下单');
+    assert.equal(f.node('resultDescription').textContent, message);
+    assert.equal(f.node('resultSupport').textContent, '');
+    assert.equal(f.node('sessionInput').value, '{"accessToken":"test"}');
+    assert.equal(f.node('redeemForm').hidden, false);
+    assert.equal(f.node('startBtn').disabled, false);
+    assert.equal(f.calls.filter(call => call.url === '/api/cdk/orbitcard/status').length, 0);
+    f.node('resultClose').handlers.click();
+    assert.equal(f.node('resultModal').hidden, true);
+    await f.node('redeemForm').handlers.submit({ preventDefault() {} });
+    assert.equal(f.node('resultModal').hidden, false, 'an explicit repeated rejected submission still explains why it was rejected');
+});
+
+test('an accepted queued task stays in progress and keeps polling without another submission', async () => {
+    const f = setup(); await flush();
+    f.node('resultModal').hidden = true;
+    f.respond({ success: true, data: { provider: 'orbitcard', jobKey: 'job-1', status: 'running', queued: true, message: '正在等待支付卡' } });
+    await vm.runInContext('startTracking()', f.context);
+    assert.equal(f.node('progressText').textContent, '排队等待');
+    assert.match(f.node('planInfo').textContent, /排队等待/);
+    assert.match(f.node('trackingHint').textContent, /系统会自动继续.*请勿重复提交/);
+    assert.equal(f.node('redeemForm').hidden, true);
+    assert.equal(f.node('resultModal').hidden, true);
+    assert.equal(f.timers.size, 1);
+    assert.equal(f.calls.filter(call => call.url === '/api/run-process').length, 0);
+});
+
+test('queue-full discovered after acceptance shows the wait notice once and stops tracking', async () => {
+    const f = setup(); await flush();
+    f.respond({ success: true, data: { provider: 'orbitcard', jobKey: 'job-1', status: 'failed', cdk_state: 'available', error_code: 'PAYMENT_QUEUE_FULL', retry_after_seconds: 600 } });
+    await vm.runInContext('startTracking()', f.context);
+    assert.equal(f.node('resultTitle').textContent, '请稍后下单');
+    assert.equal(f.node('resultSupport').textContent, '');
+    assert.match(f.node('trackingHint').textContent, /10 分钟后再下单/);
+    assert.equal(f.node('retryBtn').hidden, false);
+    assert.equal(f.timers.size, 0);
+    f.node('resultClose').handlers.click();
+    await f.refresh();
+    assert.equal(f.node('resultModal').hidden, true);
+});
+
+test('runtime displays running and waiting capacity separately', async () => {
+    const f = setup(); await flush();
+    await f.runtime({ success: true, runtime: { active_foreground_jobs: 2, max_foreground_jobs: 3, waiting_jobs: 1, max_waiting_jobs: 1 } });
+    assert.equal(f.node('runtimeInfo').textContent, '当前处理任务 2 / 3 · 排队等待 1 / 1');
+});
+
+test('an order that entered the queue keeps a fixed 45-minute tracking window after leaving the queue', async () => {
+    const f = setup(); await flush();
+    const data = { provider: 'orbitcard', jobKey: 'job-1', status: 'running', queued: true };
+    f.respond({ success: true, data });
+    await vm.runInContext('startTracking()', f.context);
+    f.advance(16 * 60 * 1000);
+    f.respond({ success: true, data: { ...data, queued: false } });
+    await f.fireTimeout(5000);
+    assert.equal(f.calls.filter(call => call.url === '/api/cdk/orbitcard/status').length, 2);
+    f.advance(28 * 60 * 1000);
+    await f.fireTimeout(5000);
+    assert.equal(f.calls.filter(call => call.url === '/api/cdk/orbitcard/status').length, 3);
+    f.advance(60 * 1000);
+    await f.fireTimeout(5000);
+    assert.equal(f.calls.filter(call => call.url === '/api/cdk/orbitcard/status').length, 3);
+    assert.equal(f.timers.size, 0);
+    assert.match(f.node('trackingHint').textContent, /自动查询已暂停/);
+});
+
+test('nonqueued orders retain a 15-minute budget and a new CDK clears the prior queue extension', async () => {
+    const f = setup(); await flush();
+    f.respond({ success: true, data: { provider: 'orbitcard', jobKey: 'job-1', status: 'running', queued: true } });
+    await vm.runInContext('startTracking()', f.context);
+    f.node('cdkInput').value = 'NEW-CODE'; f.node('cdkInput').handlers.input();
+    vm.runInContext("activeCdk='NEW-CODE'; activeJob='new-job';", f.context);
+    f.respond({ success: true, data: { provider: 'orbitcard', jobKey: 'new-job', status: 'running' } });
+    await vm.runInContext('startTracking()', f.context);
+    const queries = f.calls.filter(call => call.url === '/api/cdk/orbitcard/status').length;
+    f.advance(15 * 60 * 1000);
+    await f.fireTimeout(5000);
+    assert.equal(f.calls.filter(call => call.url === '/api/cdk/orbitcard/status').length, queries);
+    assert.equal(f.timers.size, 0);
+});
+
+test('queue admission in the submission response extends tracking even if the first status response has already left the queue', async () => {
+    const f = setup(); await flush();
+    f.node('cdkInput').value = 'CODE-TEST'; f.node('sessionInput').value = '{"accessToken":"test"}';
+    f.respond(url => url === '/api/run-process'
+        ? reply({ success: true, provider: 'orbitcard', jobKey: 'job-1', queued: true })
+        : reply({ success: true, data: { provider: 'orbitcard', jobKey: 'job-1', status: 'running', queued: false } }));
+    await f.node('redeemForm').handlers.submit({ preventDefault() {} }); await flush();
+    f.advance(16 * 60 * 1000);
+    await f.fireTimeout(5000);
+    assert.equal(f.calls.filter(call => call.url === '/api/cdk/orbitcard/status').length, 2);
+    assert.equal(f.timers.size, 1);
 });

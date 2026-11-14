@@ -53,7 +53,7 @@ async function migrate(saved) {
     const code = source.slice(source.indexOf('async function ensureGptApiConfigDefaults()'), source.indexOf('async function getGptApiConfig()'));
     const connection = {};
     const keys = ['gpt_api_enabled','gpt_api_base_url','gpt_api_key','gpt_api_protocol_version','orbitcard_card_id','orbitcard_region','orbitcard_max_fee'];
-    const fn = new Function('withTransaction','runQuery','runExecute','orbitcardConfig','GPT_API_CONFIG_KEYS', `return (${code});`)(
+    const fn = new Function('withTransaction','runQuery','runExecute','orbitcardConfig','GPT_API_CONFIG_KEYS','cardPool', `return (${code});`)(
         callback => callback(connection),
         async (_, __, options) => {
             assert.equal(options.connection, connection);
@@ -63,7 +63,7 @@ async function migrate(saved) {
             assert.equal(options.connection, connection);
             if (sql.startsWith('DELETE')) for (const key of args) delete saved[key];
             else if (!sql.startsWith('INSERT IGNORE') || saved[args[0]] == null) saved[args[0]] = args[1];
-        }, config, keys
+        }, config, keys, require('../orbitcard-pool')
     );
     await fn();
     return saved;
@@ -95,6 +95,7 @@ test('new installs default to Orbitcard and remain disabled until configured', a
     assert.equal(values.gpt_api_enabled, '0');
     assert.equal(values.gpt_api_base_url, config.DEFAULT_BASE_URL);
     assert.equal(values.gpt_api_protocol_version, config.PROTOCOL_VERSION);
+    assert.equal(values.orbitcard_max_authorizations, '4');
 });
 
 test('enabling requires environment Key, HTTPS root URL and server Secret; card selection is automatic', () => {

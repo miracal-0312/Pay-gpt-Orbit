@@ -3,7 +3,7 @@
 const crypto = require('node:crypto');
 const api = require('./orbitcard-client');
 const { parseSession } = require('./session-input');
-const { cardScope, CardPreparationError, FundingAwaitingError, FUNDING_POLL_MS, FUNDING_WAIT_MS } = require('./orbitcard-card-policy');
+const { cardScope, CardPreparationError, CardBusyError, FundingAwaitingError, FUNDING_POLL_MS, FUNDING_WAIT_MS } = require('./orbitcard-card-policy');
 const { PaymentStoppedError } = require('./payment-automation');
 const { PROVIDER_TO_PLAN: CDK_PLAN } = require('./plan-registry');
 const { manualLockKeys } = require('./payment-execution-lock');
@@ -18,7 +18,7 @@ class ManualOrderError extends Error {
     constructor(message, status = 400) { super(message); this.status = status; }
 }
 
-module.exports = function createManualService({ store, activeJobs, audit, cardService, provider = api, now = Date.now,
+module.exports = function createManualService({ store, activeJobs, audit, cardService, waitingQueue = null, provider = api, now = Date.now,
     sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), fundingWaitMs = FUNDING_WAIT_MS }) {
     const subscription = require('./orbitcard-subscription-service')(provider, audit);
     const inFlight = new Set(), challenges = new Map(), nextQueryAt = new Map();
@@ -78,7 +78,8 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
             target_email: order.target_email, card_id: Number(order.card_id) || null, state: order.state,
             mode: order.mode, cdk_code: order.cdk_code || null, attempt: manualHistory(order).length + 1,
             attempts: manualHistory(order),
-            message: order.message || '', order: snapshot, created_at: order.created_at, updated_at: order.updated_at,
+            message: order.message || '', ...(waitingQueue ? require('./payment-waiting-queue').queueFeedback(order.message) : {}),
+            order: snapshot, created_at: order.created_at, updated_at: order.updated_at,
             captcha: challenges.get(order.request_id) || null };
     }
 
@@ -136,6 +137,9 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
             throw new ManualOrderError('此请求编号已用于另一笔管理员订单', 409);
         }
         if (existing && !['preparing','prepared','retry_waiting'].includes(existing.state)) return publicOrder(existing);
+        if (waitingQueue?.isFull() && !waitingQueue.has(existing?.client_order_no || `manual-${requestId}`)) {
+            throw new (require('./payment-waiting-queue').PaymentQueueFullError)();
+        }
         const enabled = await plans(cfg);
         const selected = enabled.find(item => item.type === planType);
         if (!selected) throw new ManualOrderError('卡台当前未对该 API Key 开放此套餐', 409);
@@ -144,11 +148,26 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
         try { await subscription.requireRegion(cfg, planType); }
         catch (error) { throw new ManualOrderError(error.message, 409); }
         const maxConcurrent = await store.getMaxConcurrentActivations();
-        if (activeJobs.size >= maxConcurrent) {
-            throw new ManualOrderError('当前充值任务已满，请稍后重试', 429);
-        }
         const slot = `manual-accept-${crypto.randomUUID()}`;
+        let waitingTicket = null, waitingHandedOff = false;
+        if ((waitingQueue ? waitingQueue.activeCount() : activeJobs.size) >= maxConcurrent) {
+            if (!waitingQueue) throw new ManualOrderError('当前充值任务已满，请稍后重试', 429);
+            waitingTicket = await waitingQueue.acquire(slot);
+        }
         activeJobs.add(slot);
+        async function handoffWaiting(order) {
+            await executionGuard.assertOwned();
+            const updated = order.state === 'preparing' && !Number(order.card_id)
+                ? await store.noteManualWaiting(requestId, order.client_order_no, waitingQueue.waitingMessage) : order;
+            waitingTicket.rename(order.client_order_no);
+            activeJobs.delete(slot);
+            activeJobs.add(order.client_order_no);
+            const job = continueCardWaiting(updated, cfg, session, waitingTicket);
+            waitingHandedOff = true;
+            handoff(job);
+            record(order, 'manual_card_waiting', waitingQueue.waitingMessage);
+            return publicOrder(updated);
+        }
         try {
             if (!existing) {
                 try {
@@ -173,6 +192,7 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
             const attemptIdentity = existing.client_order_no;
             cfg.auditJobKey = attemptIdentity;
             cfg.paymentGuard = { assertAllowed: () => store.assertPaymentAllowed(attemptIdentity) };
+            if (waitingTicket) return await handoffWaiting(existing);
             if (existing.state === 'preparing') {
                 record(existing, 'manual_preparation_started', '开始实时选卡并按需准备资金', { plan_type: planType });
                 try {
@@ -185,6 +205,12 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
                     existing = await store.markManualPrepared(requestId, existing.client_order_no, cardId);
                     record(existing, 'manual_card_ready', '管理员订单支付卡已准备', { card_id: cardId, plan_type: planType });
                 } catch (error) {
+                    if (error instanceof CardBusyError && waitingQueue) {
+                        try {
+                            waitingTicket = await waitingQueue.acquire(slot);
+                            return await handoffWaiting(existing);
+                        } catch (waitingError) { error = waitingError; }
+                    }
                     if (error instanceof FundingAwaitingError && typeof cardService.confirmFunding === 'function') {
                         await executionGuard.assertOwned();
                         await store.assertPaymentAllowed(existing.client_order_no);
@@ -209,6 +235,7 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
                             '支付准备结果待人工核对，已退出自动支付；停止开卡、补款和订阅充值');
                     }
                     record(existing, 'manual_preparation_failed', '管理员订单支付准备未完成，请查询原准备记录', { error_type: error instanceof CardPreparationError ? 'card_preparation' : 'local_error' });
+                    if (String(error.code || '').startsWith('PAYMENT_QUEUE_')) throw error;
                     if (error instanceof ManualOrderError) throw error;
                     if (error instanceof CardPreparationError || /请求编号|待确认管理员订单|支付卡|CDK|卡密/.test(error.message)) {
                         throw new ManualOrderError(error.message, 409);
@@ -229,7 +256,45 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
                     { plan_type: planType, card_id: Number(existing.card_id), target_email: email, mode, cdk_code: code || undefined });
             }
             return publicOrder(await store.getManualOrder(requestId));
-        } finally { activeJobs.delete(slot); }
+        } finally {
+            activeJobs.delete(slot);
+            if (waitingTicket && !waitingHandedOff) await waitingTicket.release();
+        }
+    }
+
+    async function continueCardWaiting(order, cfg, session, ticket) {
+        const identity = order.client_order_no;
+        try {
+            await waitingQueue.waitForCapacity(ticket, { session, cfg });
+            let prepared = order;
+            if (order.state !== 'prepared') {
+                const cardId = await waitingQueue.allocate({ key: identity, session, cfg,
+                    allocate: () => cardService.allocate(cfg, identity, order.plan_type, { manualRequestId: order.request_id,
+                        excludedCardIds: manualHistory(order).map(item => Number(item.card_id)), waitForAvailability: waitingQueue.has(identity) }),
+                    onWait: message => store.noteManualWaiting(order.request_id, identity, message) });
+                await cfg.executionGuard?.assertOwned();
+                parseSession(session);
+                prepared = await store.markManualPrepared(order.request_id, identity, cardId);
+            } else await ticket.release();
+            if (await store.claimManualSubmission(order.request_id)) {
+                rememberSession(order.request_id, session);
+                await submit(prepared, cfg, session);
+            }
+        } catch (error) {
+            if (error instanceof PaymentStoppedError) return;
+            try {
+                await cfg.executionGuard?.assertOwned();
+                if (error instanceof FundingAwaitingError) {
+                    const waiting = await store.waitManualFunding(order.request_id, identity, '支付卡已分配，正在核对原补款到账后继续');
+                    await continueFunding(waiting, cfg, session, error.retryAfterMs);
+                } else {
+                    try { await store.failManualPreparation(order.request_id, identity, require('./log-safety').sanitize(error.message)); }
+                    catch (_) { await store.pauseManualPreparation(order.request_id, identity, '等待支付卡期间准备结果待核对，保留原记录'); }
+                }
+            } catch (_) { record(order, 'manual_wait_recovery_deferred', '支付卡等待已停止，保留原任务供恢复核对'); }
+        } finally {
+            try { await ticket.release(); } finally { activeJobs.delete(identity); }
+        }
     }
 
     async function finishFundingError(order, cfg, error) {
@@ -382,7 +447,7 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
         }
     }
 
-    async function retryPayment(order, cfg) {
+    async function retryPayment(order, cfg, handoff = null) {
         const entry = retrySessions.get(order.request_id);
         if (!entry || entry.until <= now()) { retrySessions.delete(order.request_id); return publicOrder(order); }
         try { parseSession(entry.session); } catch (_) { retrySessions.delete(order.request_id); return publicOrder(order); }
@@ -393,7 +458,7 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
         await subscription.requireRegion(cfg, order.plan_type);
         const capacity = await store.getMaxConcurrentActivations();
         const alreadyActive = activeJobs.has(order.client_order_no);
-        if (!alreadyActive && activeJobs.size >= capacity) return publicOrder(order);
+        if (!alreadyActive && (waitingQueue ? waitingQueue.activeCount() : activeJobs.size) >= capacity) return publicOrder(order);
         const slot = alreadyActive ? null : `manual-retry-accept-${crypto.randomUUID()}`;
         if (slot) activeJobs.add(slot);
         let next;
@@ -408,10 +473,25 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
         const retryIdentity = next.client_order_no;
         const retryCfg = { ...cfg, auditJobKey: retryIdentity,
             paymentGuard: { assertAllowed: () => store.assertPaymentAllowed(retryIdentity) } };
+        let background = false;
         try {
-            const cardId = await cardService.allocate(retryCfg, next.client_order_no, next.plan_type, {
-                manualRequestId: next.request_id, excludedCardIds: manualHistory(next).map(item => Number(item.card_id))
+            const allocate = () => cardService.allocate(retryCfg, next.client_order_no, next.plan_type, {
+                manualRequestId: next.request_id, excludedCardIds: manualHistory(next).map(item => Number(item.card_id)),
+                ...(waitingQueue ? { waitForAvailability: waitingQueue.has(retryIdentity) } : {})
             });
+            let cardId;
+            try {
+                cardId = await (waitingQueue && !handoff ? waitingQueue.allocate({ key: retryIdentity, session: entry.session, cfg: retryCfg, allocate,
+                    onWait: message => store.noteManualWaiting(next.request_id, retryIdentity, message) }) : allocate());
+            } catch (error) {
+                if (!(error instanceof CardBusyError) || !waitingQueue || !handoff) throw error;
+                const ticket = await waitingQueue.acquire(retryIdentity);
+                const updated = await store.noteManualWaiting(next.request_id, retryIdentity, waitingQueue.waitingMessage);
+                const job = continueCardWaiting(updated, retryCfg, entry.session, ticket);
+                background = true;
+                handoff(job);
+                return publicOrder(updated);
+            }
             await cfg.executionGuard?.assertOwned();
             const prepared = await store.markManualPrepared(next.request_id, next.client_order_no, cardId);
             if (await store.claimManualSubmission(next.request_id)) await submit(prepared, retryCfg, entry.session);
@@ -419,12 +499,22 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
             await cfg.executionGuard?.assertOwned();
             if (error instanceof FundingAwaitingError) {
                 const waiting = await store.waitManualFunding(next.request_id, next.client_order_no, '换卡补款处理中，核对原补款后继续');
-                await continueFunding(waiting, retryCfg, entry.session, error.retryAfterMs);
+                const job = continueFunding(waiting, retryCfg, entry.session, error.retryAfterMs);
+                if (handoff) {
+                    background = true;
+                    handoff(job.finally(() => activeJobs.delete(retryIdentity)));
+                    return publicOrder(waiting);
+                }
+                await job;
             } else {
                 try { await store.failManualPreparation(next.request_id, next.client_order_no, require('./log-safety').sanitize(error.message)); }
                 catch (_) { await store.pauseManualPreparation(next.request_id, next.client_order_no, '换卡资金操作待核对，保留原记录'); }
             }
-        } finally { activeJobs.delete(retryIdentity); }
+        } finally {
+            if (!background) {
+                try { await waitingQueue?.release(retryIdentity); } finally { activeJobs.delete(retryIdentity); }
+            }
+        }
         return get(order.request_id);
     }
 
@@ -433,11 +523,15 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
         if (!order) throw new ManualOrderError('管理员订单不存在', 404);
         const guard = await store.acquirePaymentLock(manualLockKeys(requestId, order.cdk_code));
         if (!guard) return get(requestId);
-        try { await guard.assertOwned(); return await refreshOwned(requestId, knownCfg, guard); }
-        finally { await guard.release(); }
+        let background = null;
+        try { await guard.assertOwned(); return await refreshOwned(requestId, knownCfg, guard, pending => { background = pending; }); }
+        finally {
+            if (background) background.catch(() => {}).finally(() => guard.release()).catch(() => {});
+            else await guard.release();
+        }
     }
 
-    async function refreshOwned(requestId, knownCfg = null, guard = null) {
+    async function refreshOwned(requestId, knownCfg = null, guard = null, handoff = null) {
         if (inFlight.has(requestId)) return get(requestId);
         inFlight.add(requestId);
         try {
@@ -453,7 +547,7 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
             }
             if (order.state === 'retry_waiting') {
                 const cfg = { ...(knownCfg || await config()), executionGuard: guard || knownCfg?.executionGuard };
-                return await retryPayment(order, cfg);
+                return await retryPayment(order, cfg, handoff);
             }
             if (!['submitting', 'pending', 'manual'].includes(order.state)) return publicOrder(order);
             const cfg = { ...(knownCfg || await config()), executionGuard: guard || knownCfg?.executionGuard };
@@ -489,7 +583,7 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
                         ? '需要完成人机验证，然后继续查询原订单' : 'Orbitcard 仍在处理；继续查询原订单'
             });
             record(order, 'manual_order_query', '管理员原订单查询完成', { state: next, task_no: updated.task_no });
-            if (updated.state === 'retry_waiting') return await retryPayment(updated, cfg);
+            if (updated.state === 'retry_waiting') return await retryPayment(updated, cfg, handoff);
             if (next !== 'pending') retrySessions.delete(requestId);
             return publicOrder(updated);
         } finally { inFlight.delete(requestId); }

@@ -33,6 +33,16 @@ test('local refresh labels cached balances and does not show green live ACTIVE',
     assert.match(f.$('cardSyncState').textContent,/不会调用平台/);
 });
 
+test('historical cooldown fields do not mark a card as unavailable in the UI',async()=>{
+    const f=setup(()=>{});
+    f.card.cooling_down=true;
+    f.card.reuse_after_ms=300000;
+    f.card.authorization_count=2;
+    await f.api.loadCards();
+    assert.doesNotMatch(f.$('cardRows').innerHTML,/冷却|300000|暂不分配/);
+    assert.match(f.$('cardRows').innerHTML,/平台成功消费授权自动累计/);
+});
+
 test('deleted and unavailable cards are omitted from rows after local refresh',async()=>{
     for(const status of ['DELETED','UNAVAILABLE']) {
         const f=setup(()=>{});
