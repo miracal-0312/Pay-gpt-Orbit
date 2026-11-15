@@ -42,6 +42,72 @@ async function requestJson(url, options = {}) {
 function post(url, body) {
     return requestJson(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 }
+// Confirmation belongs to this exact Session and verified CDK, in page memory only.
+let pendingAccount = null, confirmedAccount = null;
+function sessionEmail(raw) {
+    const session = JSON.parse(raw);
+    if (!session || Array.isArray(session) || typeof session !== 'object'
+        || !session.user || typeof session.user !== 'object' || Array.isArray(session.user)
+        || !session.account || typeof session.account !== 'object' || Array.isArray(session.account)
+        || typeof (session.accessToken || session.access_token) !== 'string'
+        || !(session.accessToken || session.access_token).trim()) throw new Error('请粘贴包含 user、account 和 accessToken 的完整 Session JSON');
+    const email = session.user.email;
+    if (typeof email !== 'string' || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error('Session 缺少有效的账号邮箱，请重新获取');
+    if (session.expires && (!Number.isFinite(Date.parse(session.expires)) || Date.parse(session.expires) <= Date.now())) throw new Error('Session 已过期，请重新获取');
+    return email;
+}
+function closeAccountConfirmation() {
+    pendingAccount = null;
+    if ($('accountConfirmModal').open) $('accountConfirmModal').close();
+    $('accountConfirmEmail').textContent = '';
+    $('accountConfirmPlan').textContent = '';
+}
+function resetAccountConfirmation() {
+    confirmedAccount = null;
+    closeAccountConfirmation();
+    $('accountConfirmationState').textContent = '';
+}
+function accountMatches(value) {
+    return value && value.generation === generation && value.cdk === activeCdk
+        && activeCdk === $('cdkInput').value.trim() && value.session === $('sessionInput').value;
+}
+function confirmAccount(raw, submitAfterConfirm = false) {
+    const email = sessionEmail(raw);
+    confirmedAccount = null;
+    pendingAccount = { session: raw, cdk: activeCdk, generation, submitAfterConfirm };
+    $('accountConfirmEmail').textContent = email;
+    $('accountConfirmPlan').textContent = activePlanLabel;
+    $('accountConfirmAccept').textContent = submitAfterConfirm ? '是此账号，确认充值' : '是此账号，确认';
+    $('accountConfirmHint').textContent = submitAfterConfirm ? '确认后将为此账号提交充值。' : '确认账号后，请点击页面上的“确认充值”继续。';
+    if (!$('accountConfirmModal').open) $('accountConfirmModal').showModal();
+    $('accountConfirmCancel').focus();
+}
+function cancelAccountConfirmation() {
+    resetAccountConfirmation();
+    $('sessionInput').focus();
+}
+$('accountConfirmCancel').addEventListener('click', cancelAccountConfirmation);
+$('accountConfirmModal').addEventListener('cancel', event => { event.preventDefault(); cancelAccountConfirmation(); });
+$('accountConfirmAccept').addEventListener('click', async () => {
+    const selected = pendingAccount;
+    closeAccountConfirmation();
+    if (!accountMatches(selected) || submitting || $('redeemForm').hidden) {
+        resetAccountConfirmation();
+        return;
+    }
+    try {
+        const email = sessionEmail(selected.session);
+        confirmedAccount = selected;
+        $('accountConfirmationState').textContent = `已确认目标账号：${email}`;
+        if (selected.submitAfterConfirm) return submitRecharge();
+        $('startBtn').focus();
+    } catch (error) { resetAccountConfirmation(); message(error.message, 'error'); }
+});
+$('sessionInput').addEventListener('input', event => {
+    resetAccountConfirmation();
+    if (event.isComposing || submitting || $('redeemForm').hidden || !activeCdk || activeCdk !== $('cdkInput').value.trim()) return;
+    try { confirmAccount($('sessionInput').value); } catch (_) { /* Incomplete typing is validated on submit. */ }
+});
 function showRedeemStep(step) {
     for (const item of document.querySelectorAll('[data-redeem-step]')) {
         if (Number(item.dataset.redeemStep) === step) item.setAttribute('aria-current', 'step');
@@ -64,6 +130,9 @@ const shownResults = new Set();
 let resultReturnFocus;
 function closeResult() {
     $('resultModal').hidden = true;
+    $('resultAccountInfo').hidden = true;
+    $('resultEmail').textContent = '';
+    $('resultPlan').textContent = '';
     resultReturnFocus?.focus();
 }
 $('resultClose').addEventListener('click', closeResult);
@@ -85,6 +154,9 @@ function showResult(data, repeat = false) {
     $('resultDescription').textContent = queueFull ? QUEUE_FULL_MESSAGE : success ? '订阅成功，请等待一会刷新账户状态。'
         : publicText(`${uncertain ? '充值结果尚未确认，请勿重复充值。\n' : ''}${reason}`);
     $('resultSupport').textContent = success || queueFull ? '' : '请联系售后QQ 2244527967处理';
+    $('resultAccountInfo').hidden = !success;
+    $('resultEmail').textContent = success ? data.target_email || '原订单未记录账号' : '';
+    $('resultPlan').textContent = success ? publicText(data.plan_label || activePlanLabel || '原订单未记录套餐') : '';
     if ($('resultModal').hidden) resultReturnFocus = document.activeElement;
     $('resultModal').hidden = false;
     $('resultClose').focus();
@@ -92,6 +164,7 @@ function showResult(data, repeat = false) {
 function display(data) {
     if (data.jobKey && activeJob && data.jobKey !== activeJob) return false;
     activeJob = data.jobKey || activeJob;
+    if (data.plan_label) activePlanLabel = publicText(data.plan_label);
     const queued = Boolean(data.queued);
     if (queued) trackingQueued = true;
     const label = queued ? '排队等待' : statusNames[data.status] || data.status;
@@ -101,6 +174,7 @@ function display(data) {
     showRedeemStep(retry ? 2 : 3);
     if (activePlanLabel) $('planInfo').textContent = `${activePlanLabel} · ${label}`;
     $('redeemForm').hidden = !retry;
+    if (!retry) resetAccountConfirmation();
     $('refreshBtn').hidden = data.provider !== 'orbitcard';
     $('progressBox').hidden = false;
     const progress = Math.max(0, Math.min(100, Number(data.progress) || 0));
@@ -152,6 +226,7 @@ async function refresh(auto = false, expected = generation) {
 }
 function startTracking() { clearTimeout(timer); trackingStarted = Date.now(); pollFailures = 0; $('refreshBtn').hidden = false; return refresh(true); }
 $('cdkInput').addEventListener('input', () => {
+    resetAccountConfirmation();
     showRedeemStep(1);
     closeResult();
     generation++; clearTimeout(timer); clearChallenge(); activeCdk = ''; activeJob = ''; activePlanLabel = ''; trackingQueued = false;
@@ -162,6 +237,7 @@ $('cdkInput').addEventListener('input', () => {
 async function verifyCurrentCdk(event) {
     event.preventDefault();
     if (verifying) return;
+    resetAccountConfirmation();
     verifying = true;
     const current = ++generation; clearTimeout(timer); clearChallenge(); activeJob = '';
     const cdk = $('cdkInput').value.trim(); $('verifyBtn').disabled = true; $('retryBtn').disabled = true;
@@ -187,15 +263,23 @@ async function verifyCurrentCdk(event) {
 }
 $('verifyForm').addEventListener('submit', verifyCurrentCdk);
 $('retryBtn').addEventListener('click', verifyCurrentCdk);
-$('redeemForm').addEventListener('submit', async event => {
-    event.preventDefault();
+async function submitRecharge() {
     if (submitting) return;
     if (!activeCdk || activeCdk !== $('cdkInput').value.trim()) return message('请先验证当前卡密', 'error');
+    if ($('redeemForm').hidden) return;
+    const session = $('sessionInput').value, cdk = activeCdk;
+    try {
+        sessionEmail(session);
+        if (!accountMatches(confirmedAccount)) { confirmAccount(session, true); return; }
+    } catch (error) {
+        resetAccountConfirmation();
+        return message(error instanceof SyntaxError ? 'Session 不是有效的 JSON' : error.message, 'error');
+    }
+    resetAccountConfirmation();
     submitting = true;
     const current = generation; $('startBtn').disabled = true;
     try {
-        JSON.parse($('sessionInput').value);
-        const result = await post('/api/run-process', { cdk: activeCdk, session: $('sessionInput').value });
+        const result = await post('/api/run-process', { cdk, session });
         if (current !== generation) return;
         $('sessionInput').value = '';
         activeJob = result.jobKey;
@@ -218,6 +302,10 @@ $('redeemForm').addEventListener('submit', async event => {
         } else message(error instanceof SyntaxError ? 'Session 不是有效的 JSON' : error.message, 'error');
     }
     finally { submitting = false; $('startBtn').disabled = false; }
+}
+$('redeemForm').addEventListener('submit', event => {
+    event.preventDefault();
+    return submitRecharge();
 });
 $('refreshBtn').addEventListener('click', startTracking);
 async function runtime() {

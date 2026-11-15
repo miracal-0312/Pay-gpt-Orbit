@@ -8,7 +8,7 @@ const taskSockets = require('./task-sockets');
 const store = require('./mysql-store');
 const runtimeLog = require('./runtime-log');
 const adminAuth = require('./admin-auth');
-const { PLAN_LABELS } = require('./plan-registry');
+const { PLAN_LABELS, PROVIDER_TO_PLAN } = require('./plan-registry');
 const { notifyTelegramEvent } = require('./telegram-notify');
 const app = express();
 const activeJobs = new Set();
@@ -27,6 +27,7 @@ function broadcast(jobKey, data) {
     for (const ws of clients.get(jobKey) || []) taskSockets.send(ws, { jobKey, ...data });
 }
 function publicOrder(task) {
+    const planType = PROVIDER_TO_PLAN[task.orbitcard_plan_type] || task.orbitcard_plan_type || null;
     return { provider: task.orbitcard_client_order_no ? 'orbitcard' : 'history',
         jobKey: task.orbitcard_retry_root_job_key || task.job_key,
         attemptJobKey: task.job_key, attempt: Number(task.orbitcard_retry_attempt_no || 1),
@@ -34,6 +35,8 @@ function publicOrder(task) {
         message: task.manual_redeemed_at ? '卡密已由人工售后核销' : task.message,
         queued: waitingQueue.has(task.job_key), ...queueFeedback(task.manual_redeemed_at ? '' : task.message),
         progress: task.manual_redeemed_at ? 100 : Number(task.progress || 0),
+        target_email: task.orbitcard_email || null,
+        plan_type: planType, plan_label: PLAN_LABELS[planType] || planType,
         order_id: task.gpt_api_order_id || null, client_order_no: task.orbitcard_client_order_no || null,
         cdk_state: task.manual_redeemed_at || task.orbitcard_state === 'success' ? 'redeemed' : ['failed','rejected'].includes(task.orbitcard_state) ? 'available' : 'reserved',
         order: store.safeOrder(task.gpt_api_raw) };

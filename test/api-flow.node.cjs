@@ -213,6 +213,44 @@ test('API-only HTTP server serves the new UI, protects management and has no ret
     const rejected = await fetch(base+'/api/run-process',{ method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ cdk:'CDK-TEST',session:JSON.stringify(session) }) });
     assert.equal(rejected.status,503); assert.ok((await rejected.json()).message.includes('Orbitcard'));
 });
+test('original order query returns the saved account and readable plan without exposing credentials', async t => {
+    const task = { job_key: 'paid-job', orbitcard_client_order_no: 'paid-order', status: 'success', orbitcard_state: 'success',
+        orbitcard_email: 'paid@example.test', session_payload: 'private-session', orbitcard_api_key_hash: 'private-key',
+        gpt_api_raw: JSON.stringify({ accessToken: 'private-token', session_json: { accessToken: 'private-nested' } }) };
+    const { app } = load('server.js', { './mysql-store': {
+        ensureReady: async () => {}, getAdminPaths: async () => ({ loginPath: 'admin-login', panelPath: 'admin' }),
+        getOrbitcardTaskByCdk: async cdk => cdk === 'CDK-TEST' ? task : null,
+        safeOrder: require('../mysql-store').safeOrder
+    }, './runtime-log': { push() {}, initialize() {} },
+    './order-recovery': () => ({ refreshTask: async () => ({ success: true, querySkipped: true }) }) });
+    const server = app.listen(0, '127.0.0.1'); await once(server, 'listening');
+    t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
+    const query = cdk => fetch(`http://127.0.0.1:${server.address().port}/api/cdk/orbitcard/status`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cdk })
+    });
+    for (const [providerPlan, planType, label] of [
+        ['gpt-plus', 'plus', 'ChatGPT Plus'], ['gpt-pro-5x', 'pro100', 'ChatGPT Pro 100'],
+        ['gpt-pro-20x', 'pro200', 'ChatGPT Pro 200'], ['gpt-pro-25x', 'pro500', 'ChatGPT Pro 500']
+    ]) {
+        task.orbitcard_plan_type = providerPlan;
+        const response = await query('CDK-TEST'), body = await response.json();
+        assert.equal(response.status, 200);
+        assert.equal(response.headers.get('cache-control'), 'no-store');
+        assert.equal(body.data.target_email, 'paid@example.test');
+        assert.equal(body.data.plan_type, planType);
+        assert.equal(body.data.plan_label, label);
+        assert.equal(body.data.status, 'success');
+        assert.doesNotMatch(JSON.stringify(body), /private-/);
+    }
+    task.orbitcard_email = null; task.orbitcard_plan_type = null;
+    const missingDetails = await (await query('CDK-TEST')).json();
+    assert.equal(missingDetails.data.target_email, null);
+    assert.equal(missingDetails.data.plan_label, null);
+    const missingOrder = await query('MISSING-CDK');
+    assert.equal(missingOrder.status, 404);
+    assert.equal(Object.hasOwn(await missingOrder.json(), 'data'), false);
+});
+
 test('CDK status API distinguishes confirmed redemption from reservations and fails closed on lookup errors', async t => {
     let row = null, fail = false;
     const queries = [];

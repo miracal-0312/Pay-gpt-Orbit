@@ -13,11 +13,12 @@
 <ol class="session-guide-steps">
 <li><span class="session-step-number" aria-hidden="true">1</span><div><strong>登录目标 ChatGPT 账号</strong><p>打开 ChatGPT，确认当前登录的是需要充值的账号；如不是，请先切换账号。</p><a class="button secondary" href="https://chatgpt.com/" target="_blank" rel="noopener noreferrer">前往 ChatGPT 登录 <span aria-hidden="true">↗</span><span class="session-link-hint">（新标签页）</span></a></div></li>
 <li><span class="session-step-number" aria-hidden="true">2</span><div><strong>获取并复制完整 Session</strong><p>登录后，在同一浏览器中打开下方链接，复制页面显示的全部 JSON 内容。</p><a class="button" href="https://chatgpt.com/api/auth/session" target="_blank" rel="noopener noreferrer">获取 Session <span aria-hidden="true">↗</span><span class="session-link-hint">（新标签页）</span></a></div></li>
-<li><span class="session-step-number" aria-hidden="true">3</span><div><strong>粘贴到下方，确认充值</strong><p>返回本页，粘贴完整 JSON，核对目标账号后点击“确认充值”。</p></div></li>
+<li><span class="session-step-number" aria-hidden="true">3</span><div><strong>粘贴到下方，确认充值</strong><p>返回本页，粘贴完整 JSON，在弹窗中确认目标账号邮箱，再点击“确认充值”。</p></div></li>
 </ol>
 </section>
 <label>完整 Session JSON<textarea id="sessionInput" rows="7" autocomplete="off" spellcheck="false" aria-describedby="sessionPrivacy" placeholder="完成上方步骤后，在此粘贴包含 user、account、accessToken 的完整 JSON" required></textarea></label>
 <p id="sessionPrivacy" class="session-privacy"><strong>隐私提醒：</strong>Session 包含敏感凭据，请勿分享给其他人。</p>
+<p id="accountConfirmationState" class="account-confirmation-state" role="status" aria-live="polite"></p>
 <div><button id="startBtn">确认充值</button></div>
 </form>
 <div id="progressBox" hidden><p id="progressText"></p><div class="progress" role="progressbar" aria-label="充值进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="progressBar" style="width:0%"></div></div></div>
@@ -27,6 +28,11 @@
 </section>
 <aside class="redeem-guide" aria-label="兑换步骤"><h2>三步完成订阅兑换</h2><ol class="redeem-steps"><li data-redeem-step="1" aria-current="step"><span class="step-number">01</span><div><strong>验证卡密</strong>核对卡密对应的套餐与使用状态。</div></li><li data-redeem-step="2"><span class="step-number">02</span><div><strong>提交账号 Session</strong>使用需要开通会员的目标账号。</div></li><li data-redeem-step="3"><span class="step-number">03</span><div><strong>查询充值结果</strong>保留原卡密，随时查看同一笔订单。</div></li></ol><p class="guide-note">结果待确认时请继续查询原订单。遇到异常，请联系售后QQ 2244527967处理。</p></aside></div>
 <section class="plans-section"><div class="section-heading"><h2>支持的订阅套餐</h2><p class="muted">具体套餐由卡密决定，提交前会核对平台是否开放。</p></div><div class="plan-grid"><div class="plan" data-plan="plus"><small>01 / PLUS</small><h3>ChatGPT Plus</h3></div><div class="plan" data-plan="pro100"><small>02 / PRO</small><h3>ChatGPT Pro 100</h3></div><div class="plan" data-plan="pro200"><small>03 / PRO</small><h3>ChatGPT Pro 200</h3></div><div class="plan" data-plan="pro500"><small>04 / PRO</small><h3>ChatGPT Pro 500</h3></div></div></section><details class="panel"><summary>充值与卡密状态说明</summary><p>确认充值后卡密会被占用。订阅成功后核销；只有平台明确拒绝首笔提交并确认未受理时才会释放。首次支付明确失败后停止充值，请联系售后处理，，卡密仍会保持占用。</p><p>超时、网络异常和“待确认”不代表失败。请用原卡密查询原订单，避免重复充值。需要人机验证时，会显示有时效的验证链接。</p><p>服务端不保存本次提交的完整 Session。重新打开页面后，输入原卡密即可恢复订单查询。</p></details>
-<p id="runtimeInfo" class="muted" role="status"></p></main><footer class="public-footer"><span>YZWAI / 订阅兑换</span><span>充值结果以原订单的订阅状态为准</span></footer><div id="resultModal" class="result-modal" role="dialog" aria-modal="true" aria-labelledby="resultTitle" aria-describedby="resultDescription resultSupport" hidden>
-<section class="result-card"><h2 id="resultTitle"></h2><p id="resultDescription"></p><p id="resultSupport"></p><button id="resultClose" type="button">我知道了</button></section>
-</div></body></html>
+<p id="runtimeInfo" class="muted" role="status"></p></main><footer class="public-footer"><span>YZWAI / 订阅兑换</span><span>充值结果以原订单的订阅状态为准</span></footer><div id="resultModal" class="result-modal" role="dialog" aria-modal="true" aria-labelledby="resultTitle" aria-describedby="resultDescription resultAccountInfo resultSupport" hidden>
+<section class="result-card"><h2 id="resultTitle"></h2><p id="resultDescription"></p><dl id="resultAccountInfo" class="account-confirm-details" hidden><dt>充值账号</dt><dd id="resultEmail"></dd><dt>充值套餐</dt><dd id="resultPlan"></dd></dl><p id="resultSupport"></p><button id="resultClose" type="button">我知道了</button></section>
+</div>
+<dialog id="accountConfirmModal" class="account-confirm-modal" aria-labelledby="accountConfirmTitle" aria-describedby="accountConfirmDescription accountConfirmEmail accountConfirmPlan accountConfirmHint">
+<section class="result-card"><h2 id="accountConfirmTitle">确认目标账号</h2><p id="accountConfirmDescription">从 Session 中读取到以下账号，这是你要充值的目标账号吗？</p>
+<dl class="account-confirm-details"><dt>账号邮箱</dt><dd id="accountConfirmEmail"></dd><dt>充值套餐</dt><dd id="accountConfirmPlan"></dd></dl>
+<p id="accountConfirmHint" class="muted"></p><button id="accountConfirmCancel" type="button" class="secondary" autofocus>不是，返回修改</button><button id="accountConfirmAccept" type="button">是此账号，确认</button></section>
+</dialog></body></html>
