@@ -108,7 +108,6 @@ CREATE TABLE IF NOT EXISTS orbitcard_managed_cards (
     successful_order_count INT UNSIGNED NOT NULL DEFAULT 0,
     authorization_count INT UNSIGNED NULL,
     authorizations_checked_at DATETIME(3) NULL,
-    authorization_pending_count INT UNSIGNED NULL,
     retirement_key VARCHAR(80) NULL,
     retirement_state VARCHAR(16) NULL,
     active_job VARCHAR(64) NULL,
@@ -150,7 +149,6 @@ CREATE TABLE IF NOT EXISTS orbitcard_card_uses (
     card_id BIGINT UNSIGNED NOT NULL,
     plan_type VARCHAR(16) NOT NULL,
     state VARCHAR(16) NOT NULL DEFAULT 'reserved',
-    authorization_baseline INT UNSIGNED NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     KEY idx_oc_card_uses (scope, card_id, state)
@@ -167,7 +165,6 @@ CREATE TABLE IF NOT EXISTS orbitcard_admin_orders (
     plan_name VARCHAR(128) NOT NULL,
     target_email VARCHAR(255) NOT NULL,
     card_id BIGINT UNSIGNED NOT NULL,
-    authorization_baseline INT UNSIGNED NULL,
     issue_key VARCHAR(80) NULL,
     admin_email VARCHAR(128) NOT NULL,
     state VARCHAR(16) NOT NULL DEFAULT 'prepared',

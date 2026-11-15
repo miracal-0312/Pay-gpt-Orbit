@@ -195,10 +195,10 @@ async function loadCardIdPreview() {
     } catch (error) { $('cardIdPreview').textContent = `卡片 ID 读取失败：${error.message}`; }
 }
 function apiInput() {
-    const authorizationLimit = Number($('cardAuthorizationLimit').value);
-    if (!Number.isSafeInteger(authorizationLimit) || authorizationLimit < 1) throw new Error('单卡成功会员订单次数上限必须是有效的正整数');
+    const successfulOrderLimit = Number($('cardAuthorizationLimit').value);
+    if (!Number.isSafeInteger(successfulOrderLimit) || successfulOrderLimit < 1) throw new Error('单卡成功会员订单次数上限必须是有效的正整数');
     return { enabled: $('apiEnabled').checked, base_url: $('baseUrl').value.trim(),
-    orbitcard_max_authorizations: authorizationLimit,
+    orbitcard_max_authorizations: successfulOrderLimit,
     orbitcard_product_code: $('productCode').value.trim(), orbitcard_max_initial_amount: $('maxInitialAmount').value.trim(),
     orbitcard_payment_regions: Object.fromEntries(Object.keys(cardPlans).map(plan => [plan, $(`paymentRegion_${plan}`).value])),
     orbitcard_plan_prices: Object.fromEntries(Object.keys(cardPlans).map(plan => [plan, $(`planPrice_${plan}`).value.trim()])),
@@ -209,7 +209,7 @@ function renderCardRow(card, sync = null) {
     const usage = `${escapeHtml(card.successful_order_count ?? '待同步')} / ${escapeHtml(card.successful_order_limit)} 笔成功会员订单`;
     const history = card.retiring ? '待确认删卡'
         : card.successful_order_count != null && Number(card.successful_order_count) >= Number(card.successful_order_limit) ? '达到上限，停止分配'
-            : '按卡台确认成功的会员订单去重累计';
+            : '按当前 API 可读取的卡台成功会员订单去重累计';
     const countedAt = '授权流水仅供对账，不影响订单计数';
     const last4 = card.last4 ? `****${escapeHtml(card.last4)}` : '尾号未提供';
     const confirmed = sync?.synced_ids?.includes(Number(card.card_id));
@@ -230,7 +230,7 @@ async function loadCards(sync = null) {
     $('cardRows').innerHTML = data.cards.map(card => renderCardRow(card, sync)).join('') || '<tr><td colspan="5">尚无卡片，请同步或申请。</td></tr>';
     $('cardSyncState').textContent = sync?.failed ? `平台同步失败${sync.message ? `：${sync.message}` : ''}。下面显示旧的本地快照，不能用于确认当前状态和余额。`
         : sync?.checked_at ? `查询完成：${sync.checked_at}，同步 ${sync.count} 张，详情读取失败 ${sync.failed_ids.length} 张，已移出列表 ${(sync.removed_ids || []).length} 张。数值为本次查询时的快照。`
-            : '状态、余额和授权次数为本地快照，点击“同步平台卡片”读取完整交易记录并维护卡池。“刷新本地记录”不会调用平台；消费授权次数包含接口可见的其他项目历史消费。';
+            : '状态、余额和成功会员订单次数为本地快照，点击“同步卡片与订单”更新。“刷新本地记录”不会调用平台；API 不可见的网页订单不计入，授权流水仅供对账。';
     $('issueRows').innerHTML = data.issues.map(issue => `<tr><td>${escapeHtml(issue.created_at)}<br><code>${escapeHtml(issue.issue_key)}</code></td><td>${escapeHtml(issue.product_code)}<br>${escapeHtml(issue.amount)}</td><td>${issue.job_key ? escapeHtml(cardPlans[issue.plan_type] || issue.plan_type) : '共享卡池'} / ${escapeHtml(issue.state)}<br>${escapeHtml(issue.provider_status || '')}<br>${escapeHtml(issue.message)}</td><td>${escapeHtml(issue.order_no || '待返回')}<br>${escapeHtml(issue.card_id || '待返回')}</td></tr>`).join('') || '<tr><td colspan="4">暂无开卡申请</td></tr>';
     $('fundingRows').innerHTML=(data.fundings || []).map(funding => `<tr><td>${escapeHtml(funding.created_at)}<br><code>${escapeHtml(funding.job_key)}</code></td><td>${escapeHtml(funding.card_id)}<br>${escapeHtml(funding.amount)} USD</td><td>${escapeHtml(funding.state)} / ${escapeHtml(funding.provider_status)}<br>${escapeHtml(funding.order_no || funding.funding_key)}<br>${escapeHtml(funding.message)}</td><td>${escapeHtml(funding.fee_snapshot || '待确认')}<br>目标余额：${escapeHtml(funding.target_balance)}</td></tr>`).join('') || '<tr><td colspan="4">暂无卡片补款</td></tr>';
 }

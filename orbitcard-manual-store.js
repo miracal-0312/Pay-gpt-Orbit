@@ -67,7 +67,7 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
         });
     }
 
-    async function reserveManualCard(requestId, cardId, jobKey, planType, limit = poolPolicy.DEFAULT_MAX_AUTHORIZATIONS) {
+    async function reserveManualCard(requestId, cardId, jobKey, planType, limit = poolPolicy.DEFAULT_MAX_SUCCESSFUL_ORDERS) {
         limit = poolPolicy.validateLimit(limit);
         return withTransaction(async connection => {
             const options = { connection };
@@ -86,8 +86,8 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
             if (card.active_job || !poolPolicy.eligible(card, limit)) return null;
             await runExecute('UPDATE orbitcard_managed_cards SET active_job = ? WHERE scope = ? AND card_id = ?',
                 [jobKey, order.scope, cardId], options);
-            await runExecute('UPDATE orbitcard_admin_orders SET card_id = ?, authorization_baseline = ?, message = ? WHERE request_id = ? AND state = \'preparing\'',
-                [cardId, Number(card.successful_order_count), '支付卡已预占，正在核对或补足卡内资金', requestId], options);
+            await runExecute('UPDATE orbitcard_admin_orders SET card_id = ?, message = ? WHERE request_id = ? AND state = \'preparing\'',
+                [cardId, '支付卡已预占，正在核对或补足卡内资金', requestId], options);
             return { ...card, active_job: jobKey };
         });
     }
@@ -341,7 +341,7 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
             history.push({ client_order_no: order.client_order_no, task_no: order.task_no, card_id: Number(order.card_id), snapshot });
             const identity = `manual-${requestId}-attempt-${history.length + 1}`;
             await runExecute(`UPDATE orbitcard_admin_orders SET client_order_no = ?, retry_history = ?, state = 'preparing',
-                card_id = 0, authorization_baseline = NULL, issue_key = NULL, task_no = NULL, snapshot = NULL, message = ? WHERE request_id = ?`,
+                card_id = 0, issue_key = NULL, task_no = NULL, snapshot = NULL, message = ? WHERE request_id = ?`,
             [identity, JSON.stringify(history), `正在准备第 ${history.length + 1} 次支付，使用其他现有卡片`, requestId], options);
             return getManualOrder(requestId, options);
         });

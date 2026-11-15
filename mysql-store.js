@@ -41,15 +41,13 @@ async function ensureLegacyColumns() {
     // Add only fields needed by this service. Existing historical tables are never dropped.
     const columns = {
         orbitcard_managed_cards: { successful_order_count: 'INT UNSIGNED NOT NULL DEFAULT 0', authorization_count: 'INT UNSIGNED NULL', authorizations_checked_at: 'DATETIME(3) NULL',
-            authorization_pending_count: 'INT UNSIGNED NULL',
             retirement_key: 'VARCHAR(80) NULL', retirement_state: 'VARCHAR(16) NULL' },
-        orbitcard_card_uses: { authorization_baseline: 'INT UNSIGNED NULL' },
         app_config: { created_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP', updated_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP' },
         cdk_codes: { is_active: 'TINYINT(1) NOT NULL DEFAULT 1', shipped_at: 'TIMESTAMP NULL', used_at: 'TIMESTAMP NULL',
             manual_redeemed_at: 'TIMESTAMP NULL', manual_redeemed_by: 'VARCHAR(255) NULL', manual_redemption_reason: 'VARCHAR(255) NULL',
             type: "VARCHAR(16) NOT NULL DEFAULT '自助'", plan_type: "VARCHAR(16) NOT NULL DEFAULT 'plus'", created_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP',
             updated_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP' },
-        orbitcard_admin_orders: { issue_key: 'VARCHAR(80) NULL', authorization_baseline: 'INT UNSIGNED NULL', retry_history: 'MEDIUMTEXT NULL' },
+        orbitcard_admin_orders: { issue_key: 'VARCHAR(80) NULL', retry_history: 'MEDIUMTEXT NULL' },
         task_logs: { token_preview: "VARCHAR(64) NOT NULL DEFAULT ''", session_payload: 'MEDIUMTEXT NULL', cdk_code: 'VARCHAR(32) NULL',
             status: "VARCHAR(32) NOT NULL DEFAULT 'running'", message: 'VARCHAR(255) NULL', progress: 'INT NOT NULL DEFAULT 0',
             display_time: "VARCHAR(64) NOT NULL DEFAULT ''",

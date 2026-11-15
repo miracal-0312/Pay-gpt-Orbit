@@ -41,7 +41,6 @@ function fixture() {
     const write = name => async () => { writes.push(name); throw Error('Diagnostics must not write'); };
     const store = { getGptApiConfig: async()=>cfg, withCardAllocationLock:write('allocation_lock'),
         cardMethods:()=>({ listCards:async()=>{ if(state.countReadError)throw state.countReadError;return state.rows; },
-            listAuthorizations:async id=>{if(state.ledgerError)throw state.ledgerError;return persisted(id);},
             syncCards:write('sync_cards'), saveAuthorizations:write('save_authorizations'), reserveCard:write('reserve_card'), retireCard:write('retire_card') }) };
     const service = createDiagnostics({store,provider,cards,audit:entry=>events.push(entry)});
     return {service,events,calls,writes,state,cfg};

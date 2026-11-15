@@ -9,9 +9,9 @@ const html = fs.readFileSync(require.resolve('../public/admin.html'), 'utf8');
 const manifestPath = '/api/admin/orbitcard/diagnostics/interfaces';
 const testPath = '/api/admin/orbitcard/diagnostics/interface-test';
 const operations = ['getAccountBalance', 'getProductCode', 'getSubscriptionPlans', 'getSubscriptionPaymentRegions',
-    'getCardList', 'cardDetail', 'cardTransaction', 'getCardFlow', 'getSubscription',
+    'getCardList', 'cardDetail', 'cardTransaction', 'getCardFlow', 'getSubscriptionList', 'getSubscription',
     'createCard', 'rechargeCard', 'deleteCard', 'createSubscription'].map((operation, index) => ({
-        operation, path: `/api/open/v1/${operation}`, label: operation, mode: index < 9 ? 'live_read' : 'local_simulation'
+        operation, path: `/api/open/v1/${operation}`, label: operation, mode: index < 10 ? 'live_read' : 'local_simulation'
     }));
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g,
     char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
@@ -61,7 +61,7 @@ test('one API test entry presents the full interface table and distinguishes liv
     assert.match(panel, /id="testAllApi"[^>]*>一键全部测试<\/button>/);
     assert.doesNotMatch(panel, /id="(?:testApi|loadCatalog|loadRegions|testResult|catalog|regionResult)"/);
     for (const id of ['apiTestSummary', 'apiInterfaceTarget', 'apiInterfaceRows']) assert.match(panel, new RegExp(`id="${id}"`));
-    assert.match(panel, /9 个查询接口使用已保存配置/);
+    assert.match(panel, /10 个查询接口使用已保存配置/);
     assert.match(panel, /4 个写接口仅在本地模拟/);
     assert.match(panel, /模拟通过不代表真实可支付/);
     assert.match(panel, /id="testTelegram"/);
@@ -70,7 +70,7 @@ test('one API test entry presents the full interface table and distinguishes liv
 test('one click tests each manifest operation once in order and only carries the selected card to dependent reads', async () => {
     const f = setup();
     await f.node('testAllApi').onclick();
-    assert.equal(f.calls.length, 14);
+    assert.equal(f.calls.length, operations.length + 1);
     assert.equal(f.calls[0].url, manifestPath);
     assert.equal(f.calls[0].body, undefined);
     assert.ok(f.calls.slice(1).every(call => call.url === testPath));
@@ -79,13 +79,13 @@ test('one click tests each manifest operation once in order and only carries the
         ? { operation: call.body.operation, card_id: 42 } : { operation: call.body.operation });
     assert.equal(f.maxActive, 1);
     assert.ok(f.calls.every(call => call.disabled));
-    assert.match(f.calls[1].progress, /正在测试 1\/13/);
-    assert.match(f.calls.at(-1).progress, /正在测试 13\/13/);
+    assert.match(f.calls[1].progress, /正在测试 1\/14/);
+    assert.match(f.calls.at(-1).progress, /正在测试 14\/14/);
     assert.match(f.node('apiInterfaceTarget').textContent, /https:\/\/saved\.test/);
     assert.doesNotMatch(JSON.stringify(f.calls), /unsaved-input/);
-    assert.match(f.node('apiTestSummary').textContent, /真实查询通过 9 项，本地模拟通过 4 项，失败 0 项，跳过 0 项/);
+    assert.match(f.node('apiTestSummary').textContent, /真实查询通过 10 项，本地模拟通过 4 项，失败 0 项，跳过 0 项/);
     assert.equal(f.node('apiTestSummary').className, 'diagnostic-output success');
-    assert.equal((f.node('apiInterfaceRows').innerHTML.match(/<tr>/g) || []).length, 13);
+    assert.equal((f.node('apiInterfaceRows').innerHTML.match(/<tr>/g) || []).length, operations.length);
     assert.equal((f.node('apiInterfaceRows').innerHTML.match(/未向平台发送/g) || []).length, 4);
     assert.equal((f.node('apiInterfaceRows').innerHTML.match(/<span class="pill success">模拟通过/g) || []).length, 4);
     assert.equal(f.node('testAllApi').disabled, false);
@@ -114,8 +114,8 @@ test('overlapping direct invocations cannot start another run and rerunning remo
     const next = f.run();
     assert.match(f.node('apiInterfaceRows').innerHTML, /正在读取本轮接口清单/);
     release(); await next;
-    assert.equal(f.calls.length, 28);
-    assert.ok(f.calls.slice(15).every(call => call.body.card_id === undefined));
+    assert.equal(f.calls.length, 2 * (operations.length + 1));
+    assert.ok(f.calls.slice(operations.length + 2).every(call => call.body.card_id === undefined));
 });
 
 test('HTTP failures, reported failures and nested failed checks count accurately while later operations continue', async () => {
@@ -128,8 +128,8 @@ test('HTTP failures, reported failures and nested failed checks count accurately
         return data;
     });
     await f.run();
-    assert.equal(f.calls.length, 14);
-    assert.match(f.node('apiTestSummary').textContent, /真实查询通过 5 项，本地模拟通过 4 项，失败 3 项，跳过 1 项/);
+    assert.equal(f.calls.length, operations.length + 1);
+    assert.match(f.node('apiTestSummary').textContent, /真实查询通过 6 项，本地模拟通过 4 项，失败 3 项，跳过 1 项/);
     assert.equal(f.node('apiTestSummary').className, 'diagnostic-output error');
     assert.match(f.node('apiInterfaceRows').innerHTML, /unavailable/);
     assert.match(f.node('apiInterfaceRows').innerHTML, /products failed/);
@@ -148,9 +148,9 @@ test('unavailable card and order context appears as skipped rather than passed a
         return data;
     });
     await f.run();
-    assert.equal(f.calls.length, 14);
+    assert.equal(f.calls.length, operations.length + 1);
     assert.ok(f.calls.slice(1).every(call => call.body.card_id === undefined));
-    assert.match(f.node('apiTestSummary').textContent, /真实查询通过 5 项，本地模拟通过 4 项，失败 0 项，跳过 4 项/);
+    assert.match(f.node('apiTestSummary').textContent, /真实查询通过 6 项，本地模拟通过 4 项，失败 0 项，跳过 4 项/);
     assert.equal(f.node('apiTestSummary').className, 'diagnostic-output warning');
 });
 
@@ -169,8 +169,8 @@ test('malformed manifests fail before posting and invalid result identities fail
         return data;
     });
     await f.run();
-    assert.equal(f.calls.length, 14);
-    assert.match(f.node('apiTestSummary').textContent, /真实查询通过 9 项，本地模拟通过 3 项，失败 1 项/);
+    assert.equal(f.calls.length, operations.length + 1);
+    assert.match(f.node('apiTestSummary').textContent, /真实查询通过 10 项，本地模拟通过 3 项，失败 1 项/);
     assert.match(f.node('apiInterfaceRows').innerHTML, /接口测试结果与请求不匹配/);
 });
 

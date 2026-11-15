@@ -22,10 +22,6 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
                 [scope,card.card_id,card.provider_status,card.product_code,card.bin || '',card.last4,card.balance,card.currency]);
             }
         }
-        async function listAuthorizations(cardId) {
-            const rows = await query('SELECT transaction_id FROM orbitcard_card_authorizations WHERE scope=? AND card_id=?', [scope,cardId]);
-            return rows.map(row => row.transaction_id);
-        }
         async function saveAuthorizations(cardId, ids) {
             if (!Number.isSafeInteger(Number(cardId)) || Number(cardId) < 1 || !Array.isArray(ids)
                 || ids.some(id => typeof id !== 'string' || !id || id.length > 128 || id.trim() !== id || /[\u0000-\u001f\u007f]/.test(id))) {
@@ -46,8 +42,6 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
                 if (!Number.isSafeInteger(count) || count < 0) throw new CardPreparationError('成功消费授权次数无效');
                 await runExecute(`UPDATE orbitcard_managed_cards SET authorization_count=?,authorizations_checked_at=UTC_TIMESTAMP(3)
                     WHERE scope=? AND card_id=?`, [count,scope,cardId], opts);
-                const [saved] = await runQuery('SELECT authorization_count,authorizations_checked_at,authorization_pending_count FROM orbitcard_managed_cards WHERE scope=? AND card_id=?', [scope,cardId], opts);
-                return saved;
             });
         }
         async function retireCard(cardId, key) {
@@ -96,7 +90,7 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
             const rows = await query('SELECT * FROM orbitcard_card_issues WHERE scope=? AND job_key=? ORDER BY created_at DESC LIMIT 1', [scope, jobKey]);
             return rows[0] || null;
         }
-        async function reserveCard(cardId, jobKey, planType, limit = poolPolicy.DEFAULT_MAX_AUTHORIZATIONS) {
+        async function reserveCard(cardId, jobKey, planType, limit = poolPolicy.DEFAULT_MAX_SUCCESSFUL_ORDERS) {
             limit = poolPolicy.validateLimit(limit);
             const plan = planFor(planType);
             return transaction(async tx => {
@@ -117,7 +111,7 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
                 }
                 if (!card || card.active_job || card.provider_status !== 'ACTIVE'
                     || !poolPolicy.eligible(card, limit)) return null;
-                await runExecute('INSERT INTO orbitcard_card_uses (job_key,scope,card_id,plan_type,state,authorization_baseline) VALUES (?,?,?,?,\'reserved\',?)', [jobKey,scope,cardId,plan,Number(card.successful_order_count)], opts);
+                await runExecute('INSERT INTO orbitcard_card_uses (job_key,scope,card_id,plan_type,state) VALUES (?,?,?,?,\'reserved\')', [jobKey,scope,cardId,plan], opts);
                 await runExecute('UPDATE orbitcard_managed_cards SET active_job=? WHERE scope=? AND card_id=?', [jobKey,scope,cardId], opts);
                 await runExecute('UPDATE task_logs SET orbitcard_card_id=? WHERE job_key=?', [cardId,jobKey], opts);
                 return { ...card, active_job: jobKey };
@@ -193,7 +187,7 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
             return query(`SELECT * FROM orbitcard_card_fundings WHERE scope=?${pending ? " AND state IN ('prepared','submitting','pending','unknown')" : ''}
                 ORDER BY updated_at ${pending ? 'ASC' : 'DESC'} LIMIT 100`, [scope]);
         }
-        return { retireCard, markRetirementSubmitted, confirmRetirement, syncCards, listCards, listSuccessfulOrders, subscriptionBindings, recordSuccessfulOrder, listAuthorizations, saveAuthorizations, reserveCard, pendingIssue, createManualIssue, updateIssue, completeIssue, listIssues, issueForJob,
+        return { retireCard, markRetirementSubmitted, confirmRetirement, syncCards, listCards, listSuccessfulOrders, subscriptionBindings, recordSuccessfulOrder, saveAuthorizations, reserveCard, pendingIssue, createManualIssue, updateIssue, completeIssue, listIssues, issueForJob,
             fundingForJob, createFunding, updateFunding, deferFunding, listFundings };
     }
 

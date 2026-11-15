@@ -13,11 +13,11 @@ function taskCount(value = 10) {
 
 // An in-memory model of one burst arriving at allocation. It shares the real
 // decision policy, but never acquires database locks or calls a write API.
-async function simulateSelection({ snapshot, count, available, planType, priceFor, jobPrefix, maxAuthorizations }) {
+async function simulateSelection({ snapshot, count, available, planType, priceFor, jobPrefix, maxSuccessfulOrders }) {
     count = taskCount(count);
     const saved = snapshot.saved.map(row => ({ ...row }));
     let remaining = available, tail = Promise.resolve(), waiting = 0;
-    const decide = jobKey => decideCards({ ...snapshot, saved, jobKey, planType, priceFor, maxAuthorizations });
+    const decide = jobKey => decideCards({ ...snapshot, saved, jobKey, planType, priceFor, maxSuccessfulOrders });
     const initial = decide(`${jobPrefix}-initial`);
     const initialCard = initial.candidates[0]?.card.card_id || null;
     const initialWaiting = Object.fromEntries([...new Set(initial.waiting.map(row => row.reason))]

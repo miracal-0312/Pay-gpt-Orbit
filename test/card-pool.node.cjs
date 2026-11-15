@@ -41,7 +41,7 @@ async function setup(counts=[0,0,0,0,0],overrides={}) {
     return {...f,service,calls,remote,ledger,advance(ms=120000){clock+=ms;}};
 }
 test('only confirmed authorization counts below the default four are eligible',()=>{
-    assert.equal(policy.DEFAULT_MAX_AUTHORIZATIONS,4);
+    assert.equal(policy.DEFAULT_MAX_SUCCESSFUL_ORDERS,4);
     assert.equal(policy.eligible({successful_order_count:3}),true);
     for(const successful_order_count of [4,7,8,null,undefined,-1,1.5,NaN,Infinity])
         assert.equal(policy.eligible({successful_order_count}),false);
@@ -51,8 +51,8 @@ test('only confirmed authorization counts below the default four are eligible',(
 });
 
 test('the authorization limit defaults to four and accepts any positive safe integer',()=>{
-    assert.equal(policy.authorizationLimit({}),4);
-    assert.equal(policy.authorizationLimit({orbitcard_max_authorizations:'12'}),12);
+    assert.equal(policy.successfulOrderLimit({}),4);
+    assert.equal(policy.successfulOrderLimit({orbitcard_max_authorizations:'12'}),12);
     assert.equal(policy.validateLimit(Number.MAX_SAFE_INTEGER),Number.MAX_SAFE_INTEGER);
     for(const value of [0,-1,1.5,NaN,Infinity,Number.MAX_SAFE_INTEGER+1,'',null,true,{},[]])
         assert.throws(()=>policy.validateLimit(value),/正安全整数/);

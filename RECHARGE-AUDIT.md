@@ -1,5 +1,25 @@
 # Orbitcard 充值链路与审计
 
+## 整体流程与阅读顺序
+
+主链路是：**确认目标账号和套餐 → 受理并占用 CDK → 选择并预占现有卡 → 必要时补差额 → 提交本次订阅一次 → 查询原单 → 事务结算 → 成功弹窗**。自助兑换与管理员开通使用同一选卡和结果判断，管理员真实测试不消耗 CDK。
+
+| 层次 | 入口及主要代码 | 负责的事情 |
+| --- | --- | --- |
+| 用户交互 | public/app.js → server.js | CDK 验证、Session 账号确认、提交和查单；成功弹窗显示原订单账号和套餐 |
+| 受理与编排 | activation-service.js、payment-service.js；管理员为 orbitcard-manual-service.js | 配置门禁、执行锁、等待位、尝试身份和最多三次尝试 |
+| 选卡与资金 | orbitcard-card-service.js → orbitcard-payment-decision.js、orbitcard-funding-service.js | 实时资料与余额、成功订单上限、事务预占、原补款恢复 |
+| 订阅与查询 | orbitcard-worker.js、orbitcard-subscription-service.js、orbitcard-query.js | 原子认领、单次提交、归属校验、成功／失败／未知结果判断 |
+| 结算与计数 | orbitcard-cdk-store.js／orbitcard-manual-store.js → orbitcard-order-usage.js | 同一事务内核销、写成功订单账本、去重计数、释放卡片 |
+| 后台恢复与同步 | order-recovery.js、orbitcard-order-sync.js、server.js 定时任务 | 查原订阅和原资金；补记 API 可见的历史成功订单；维护卡片 |
+| 独立对账与诊断 | orbitcard-authorizations.js、orbitcard-diagnostics.js、orbitcard-concurrency-simulation.js | 授权流水对账；只读预检和选卡模拟，不替代会员订单成功证据 |
+
+用户确认只存在当前页面内存中；修改 CDK 或 Session 后必须重新确认。提交后以及刷新页面查单时，成功弹窗的账号、套餐均取自原订单，不能从当前输入框推断。Session 不写数据库、日志或浏览器持久存储。
+
+需要区分三种数据：**本地任务状态**决定任务如何恢复；**卡台订阅结果**决定是否计入成功订单；**消费授权流水**仅用于对账。订单列表同步只能覆盖当前 API 可见范围，API 不可见的网页订单不计数，`order_sync.complete` 不等于全渠道完整。
+
+以下依次展开受理、等待、提交结算、重启恢复和审计。卡片细节见 [ORBITCARD-CARDS.md](ORBITCARD-CARDS.md)，服务器更新见 [DEPLOY.md](DEPLOY.md)。
+
 ## 唯一充值入口
 
 用户通过 CDK 提交完整 Session；所有新订阅都调用 Orbitcard 的 `createSubscription`。接单开关关闭、配置缺失或维护中均拒绝新任务，不调用其他支付实现。旧卡池、浏览器、代理、账单地址、支付链接和验证码求解入口已删除。
@@ -8,7 +28,8 @@
 
 ```mermaid
 flowchart TD
-    A[验证 CDK 和同账号 Session] --> B[事务占用 CDK 保存尝试身份]
+    UI[验证 CDK 读取 Session 弹窗确认账号和套餐] --> A[服务端验证 CDK 和同账号 Session]
+    A --> B[事务占用 CDK 保存尝试身份]
     B --> CAP{执行名额可用}
     CAP -->|是| C[校验套餐 地区 USD 金额和产品要求]
     CAP -->|已满| QW[申请用户与管理员共享的唯一等待位]
@@ -63,7 +84,7 @@ Session 必须是 JSON 对象，包含 `user`、`account`、字符串 `accessTok
 
 后台「Orbitcard 配置 → 单卡成功会员订单次数上限」支持全局正安全整数，默认 4 次，保存在现有 `app_config` 键 `orbitcard_max_authorizations`，不新增环境变量或数据库字段。后续选卡、事务预占复查、退役、预检、并发模拟和卡表使用该值；已排队任务在下一次实际选卡时读取最新上限，修改不改变已提交订阅身份或结果，不恢复已注销及已开始退役的卡。新安装或缺少该配置时使用默认 4 次；已手动保存的自定义值继续保留，不会被此次默认值调整覆盖。
 
-之后读取 `orbitcard_plan_prices` 套餐 USD 金额及产品最低留存，缺配置时停止，不从历史订单或 USDT 服务费推测。MySQL 命名锁保护同步和选卡，只选 ACTIVE、USD、资料完整、卡台确认的成功会员订单次数低于配置上限、未占用的现有卡，重试排除此前用过的卡。卡内足额准备订阅；不足计算“套餐金额＋最低留存－卡余额”，与账户 `available_balance` 比较，不扣其他卡余额，足够才保存意图并补一次差额。首笔准备失败安全释放无未决资金占用，重试准备失败保留 CDK 售后锁定。任何订单、后台维护和同步卡片都不自动开卡，管理员手动申请保留。释放后仅新增授权待同步的卡继续排除，冻结闲卡也排除，有其他合格卡时继续选。后台只同步和退役，不补位；成功授权按交易 ID 去重，本地订阅成功不重复加次数。详见 [ORBITCARD-CARDS.md](ORBITCARD-CARDS.md)。
+之后读取 `orbitcard_plan_prices` 套餐 USD 金额及产品最低留存，缺配置时停止，不从历史订单或 USDT 服务费推测。MySQL 命名锁保护同步和选卡，只选 ACTIVE、USD、资料完整、卡台确认的成功会员订单次数低于配置上限、未占用的现有卡，重试排除此前用过的卡。卡内足额准备订阅；不足计算“套餐金额＋最低留存－卡余额”，与账户 `available_balance` 比较，不扣其他卡余额，足够才保存意图并补一次差额。首笔准备失败安全释放无未决资金占用，重试准备失败保留 CDK 售后锁定。任何订单、后台维护和同步卡片都不自动开卡，管理员手动申请保留。卡片释放后按卡台已确认成功会员订单次数、实时状态、余额和未决资金决定能否复用，冻结闲卡排除；消费授权延迟不阻塞选卡。后台同步卡片及当前 API 可见的成功会员订单，处理退役，不补位；成功会员订单按唯一订单号去重，授权流水只作独立对账。详见 [ORBITCARD-CARDS.md](ORBITCARD-CARDS.md)。
 
 ## 共享等待与恢复
 
@@ -201,6 +222,12 @@ CDK 与订单关联记录不提供删除接口；有历史任务或使用记录�
 预检只报告现有卡选择、补款、等待及退役条件；已删除固定返回 null/false/0 的 `capacity_limit`、`auto_refill`、`open_count`、`opening_amount`，并发统计删除始终为零的 `summary.opening`。管理员产品预览改用 `manual_application`，不保留 `automatic_application`。手动申请及历史原订单的开卡、补款核对仍有独立持久化身份，不因移除自动开卡代码而丢失审计。
 
 日志读取接口要求二级验证，按文件字节游标分页，校验任务名和换行边界，不允许路径穿越。读取现有日志时再次脱敏，支持清空缓存或进程重启后继续查看；不伪造升级前不存在的步骤记录。产品推荐价依赖已移除，后台配置每档 USD 卡支付金额，按配置与实时产品留存要求计算差额补款。
+
+## 本次无用代码清理
+
+删除未被业务调用的授权 ID 列表方法、授权写入后的无用回读、旧授权基线写入、授权等待字段的建表／补列，以及选卡结果中无人读取的价格副本。内部成功订单上限统一命名为 `successfulOrderLimit` / `maxSuccessfulOrders`；已保存配置键 `orbitcard_max_authorizations` 保持兼容，不重置现有上限。
+
+新安装不创建 `authorization_pending_count` 和 `authorization_baseline`；升级不删除旧列或历史订单数据。历史开卡、补款、原订阅恢复及授权对账仍有实际入口，继续保留。只读并发模拟验证选卡决策，不等价于真实 MySQL 多连接压力测试；部署仍要求单应用实例。
 
 ## 2026-10-22 代码整理与支付复核（历史记录）
 

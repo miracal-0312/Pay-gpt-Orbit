@@ -18,7 +18,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
     const credentialHash = cfg => crypto.createHash('sha256').update(String(cfg.api_key || '').trim()).digest('hex');
     async function latestLimitConfig(cfg) {
         const latest = store.getGptApiConfig ? await store.getGptApiConfig() : cfg;
-        return { ...cfg, orbitcard_max_authorizations: poolPolicy.authorizationLimit(latest) };
+        return { ...cfg, orbitcard_max_authorizations: poolPolicy.successfulOrderLimit(latest) };
     }
     async function assertPaymentAllowed(cfg, jobKey) {
         await cfg.executionGuard?.assertOwned();
@@ -85,7 +85,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
     }
 
     async function maintainPool(cfg, locked, listed) {
-        const limit = poolPolicy.authorizationLimit(cfg);
+        const limit = poolPolicy.successfulOrderLimit(cfg);
         if (!cfg.enabled) return listed;
         const removed = new Set();
         async function retireAndRecord(card, row, isListed = true) {
@@ -203,7 +203,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
     }
 
     async function reusable(cfg, locked, jobKey, planType, liveCards, products, excludedCardIds = []) {
-        const limit = poolPolicy.authorizationLimit(cfg);
+        const limit = poolPolicy.successfulOrderLimit(cfg);
         const plan = planFor(planType), live = new Map(liveCards.map(card => [Number(card.card_id),card]));
         const saved = await locked.listCards();
         const owned=saved.filter(row=>row.active_job===jobKey);
@@ -227,7 +227,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
             throw new CardSelectionError('平台卡片列表非空但批量详情全部缺失，无法确认可用支付卡；请联系人工售后');
         }
         const decision = decideCards({ saved, listed: liveCards, detailed: [...details.values()], products,
-            jobKey, planType, priceFor: (_product, plan) => planPrice(cfg, plan), excludedCardIds, maxAuthorizations: limit });
+            jobKey, planType, priceFor: (_product, plan) => planPrice(cfg, plan), excludedCardIds, maxSuccessfulOrders: limit });
         for (const skipped of decision.skipped) record(jobKey, 'card_unavailable', '卡片已从本次支付选择中排除', skipped);
         for (const card of details.values()) await locked.syncCards([card]);
         record(jobKey, 'card_payment_decision', '支付卡准备决策', {
@@ -316,7 +316,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
                     : await fundingService.confirm(cfg,locked,originalFunding);
                 await locked.syncCards([card]);
                 const reservation = (await locked.listCards()).find(row => Number(row.card_id)===Number(originalFunding.card_id));
-                if(!reservation || reservation.active_job!==jobKey || !poolPolicy.eligible(reservation, poolPolicy.authorizationLimit(cfg))) {
+                if(!reservation || reservation.active_job!==jobKey || !poolPolicy.eligible(reservation, poolPolicy.successfulOrderLimit(cfg))) {
                     throw new CardPreparationError('原补款卡片占用归属已变更，禁止继续提交订阅');
                 }
                 const products=await cardsApi.products(cfg);
@@ -374,7 +374,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
                 await assertReconciliationAllowed(cfg, jobKey);
                 if (releaseOnly) return card.card_id;
                 const latest = (await locked.listCards()).find(row => Number(row.card_id) === Number(card.card_id));
-                if (!latest || latest.active_job !== jobKey || !poolPolicy.eligible(latest, poolPolicy.authorizationLimit(cfg))) {
+                if (!latest || latest.active_job !== jobKey || !poolPolicy.eligible(latest, poolPolicy.successfulOrderLimit(cfg))) {
                     throw new CardPreparationError('原补款卡片当前不符合支付条件，请核对原订单');
                 }
                 return card.card_id;
@@ -494,7 +494,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
             await locked.syncCards([card]);
             await locked.saveAuthorizations(id,ids);
             const saved=(await locked.listCards()).find(row => Number(row.card_id) === id);
-            return {successful_order_count:Number(saved.successful_order_count),successful_order_limit:poolPolicy.authorizationLimit(cfg),counting_basis:'confirmed_subscription_orders',card_id:id,card_status:card.provider_status,card_balance:card.balance_amount,currency:card.currency,
+            return {successful_order_count:Number(saved.successful_order_count),successful_order_limit:poolPolicy.successfulOrderLimit(cfg),counting_basis:'confirmed_subscription_orders',card_id:id,card_status:card.provider_status,card_balance:card.balance_amount,currency:card.currency,
                 authorization_count:saved?.authorization_count == null ? null : Number(saved.authorization_count),
                 authorizations_checked_at:saved?.authorizations_checked_at,
                 ...await transactionRows(cfg,id,number)};
@@ -526,7 +526,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
         const identity={...cfg,auditJobKey:jobKey};
         const [card,balance,flows]=await Promise.allSettled([
             cardsApi.cardDetail(identity,cardId),account(identity),transactionRows(identity,cardId,1)]);
-        const snapshot={card_id:cardId,successful_order_limit:poolPolicy.authorizationLimit(cfg),card_status:card.status==='fulfilled'?card.value.provider_status:null,
+        const snapshot={card_id:cardId,successful_order_limit:poolPolicy.successfulOrderLimit(cfg),card_status:card.status==='fulfilled'?card.value.provider_status:null,
             card_balance:card.status==='fulfilled'?card.value.balance_amount:null,
             account_available:balance.status==='fulfilled'?money.decimal(balance.value):null,
             observed_transactions:flows.status==='fulfilled'?flows.value.transactions.length:null,

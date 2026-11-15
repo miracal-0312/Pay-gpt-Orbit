@@ -72,7 +72,7 @@ function prepareConfig(input, existing = {}, secretAvailable = false) {
         orbitcard_product_code: String(input.orbitcard_product_code ?? existing.orbitcard_product_code ?? '').trim(),
         orbitcard_max_initial_amount: String(input.orbitcard_max_initial_amount ?? existing.orbitcard_max_initial_amount ?? '').trim(),
         orbitcard_max_authorizations: Object.hasOwn(input, 'orbitcard_max_authorizations')
-            ? cardPool.validateLimit(input.orbitcard_max_authorizations) : cardPool.authorizationLimit(existing),
+            ? cardPool.validateLimit(input.orbitcard_max_authorizations) : cardPool.successfulOrderLimit(existing),
         orbitcard_payment_regions: normalizePaymentRegions(input.orbitcard_payment_regions, existing.orbitcard_payment_regions),
         orbitcard_plan_prices: normalizePlanPrices(input.orbitcard_plan_prices, existing.orbitcard_plan_prices)
     };

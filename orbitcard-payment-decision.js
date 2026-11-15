@@ -5,8 +5,8 @@ const money = require('./orbitcard-money');
 const { planFor, CardPreparationError } = require('./orbitcard-card-policy');
 
 // Pure decisions over one platform snapshot. No network requests or persistence.
-function decideCards({ saved, listed, detailed, products, jobKey, planType, priceFor, excludedCardIds = [], maxAuthorizations = poolPolicy.DEFAULT_MAX_AUTHORIZATIONS }) {
-    maxAuthorizations = poolPolicy.validateLimit(maxAuthorizations);
+function decideCards({ saved, listed, detailed, products, jobKey, planType, priceFor, excludedCardIds = [], maxSuccessfulOrders = poolPolicy.DEFAULT_MAX_SUCCESSFUL_ORDERS }) {
+    maxSuccessfulOrders = poolPolicy.validateLimit(maxSuccessfulOrders);
     const plan = planFor(planType), live = new Map(listed.map(card => [Number(card.card_id), card]));
     const details = new Map(detailed.map(card => [Number(card.card_id), card]));
     const candidates = [], skipped = [], waiting = [];
@@ -31,7 +31,7 @@ function decideCards({ saved, listed, detailed, products, jobKey, planType, pric
         if (row.successful_order_count == null) { waiting.push({ card_id: id, reason: 'order_count_unconfirmed' }); continue; }
         const used = Number(row.successful_order_count);
         if (!Number.isSafeInteger(used) || used < 0) throw new CardPreparationError('成功会员订单次数无效，请核对订单账本');
-        if (!poolPolicy.eligible(row, maxAuthorizations)) { skipped.push({ card_id: id, reason: 'limit_reached', successful_uses: used, limit: maxAuthorizations }); continue; }
+        if (!poolPolicy.eligible(row, maxSuccessfulOrders)) { skipped.push({ card_id: id, reason: 'limit_reached', successful_uses: used, limit: maxSuccessfulOrders }); continue; }
         if (!detail) {
             if (owned) throw new CardPreparationError('已预占卡片的实时详情缺失，请核对原补款及管理员订单');
             skipped.push({ card_id: id, reason: 'invalid_detail' }); continue;
@@ -47,7 +47,7 @@ function decideCards({ saved, listed, detailed, products, jobKey, planType, pric
             if (!price || !product || card.currency !== 'USD' || card.balance_amount == null) throw new CardPreparationError('支付资料不完整');
             const target = money.units(price) + money.units(product.min_retained_balance);
             const difference = target - money.units(card.balance_amount), deficit = difference > 0n ? difference : 0n;
-            candidates.push({ card, row, price: money.units(price), target, deficit, action: deficit ? 'fund' : 'pay' });
+            candidates.push({ card, row, target, deficit, action: deficit ? 'fund' : 'pay' });
         } catch (error) {
             if (!(error instanceof CardPreparationError)) throw error;
             if (owned) throw new CardPreparationError('已预占卡片的支付价格或余额资料异常，请核对原订单');

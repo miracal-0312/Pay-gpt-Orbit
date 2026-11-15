@@ -29,9 +29,9 @@ module.exports = function fixture({ enqueueRedemption, now: externalNow } = {}) 
             const task=db.tasks.find(t => t.job_key===p[0]);
             return task ? structuredClone(db.issues.filter(i => i.job_key===task.job_key || i.issue_key===task.orbitcard_issue_key).slice(0,2)) : [];
         }
-        if (q.includes('FROM orbitcard_card_authorizations')) {
+        if (q.startsWith('SELECT COUNT(*) AS total FROM orbitcard_card_authorizations')) {
             const rows = db.authorizations.filter(row => row.scope === p[0] && row.card_id === Number(p[1]));
-            return q.startsWith('SELECT COUNT(*)') ? [{total: rows.length}] : structuredClone(rows);
+            return [{total: rows.length}];
         }
         if (q.includes('FROM orbitcard_managed_cards')) return structuredClone(db.cards.filter(c => c.scope === p[0] && (!/card_id\s*=\s*\?/.test(q) || c.card_id === Number(p[1]))).sort((a,b) => b.authorization_count-a.authorization_count || a.card_id-b.card_id));
         if (q.includes('FROM orbitcard_card_uses')) return structuredClone(db.uses.filter(u => q.includes('WHERE scope=')
@@ -69,12 +69,6 @@ module.exports = function fixture({ enqueueRedemption, now: externalNow } = {}) 
             Object.assign(card, {authorization_count:p[0], authorizations_checked_at:new Date().toISOString()});
             return {affectedRows:1};
         }
-        if (q.startsWith('UPDATE orbitcard_managed_cards SET authorization_pending_count=')) {
-            const card = db.cards.find(c => c.scope === p[1] && c.card_id === Number(p[2]));
-            if (!card) return {affectedRows:0};
-            card.authorization_pending_count = Math.max(card.authorization_pending_count || 0, p[0]);
-            return {affectedRows:1};
-        }
         if (q.startsWith('UPDATE orbitcard_managed_cards SET retirement_key=')) {
             const card = db.cards.find(c => c.scope === p[1] && c.card_id === p[2]);
             if (!card || card.active_job || card.retirement_key) return {affectedRows:0};
@@ -100,10 +94,10 @@ module.exports = function fixture({ enqueueRedemption, now: externalNow } = {}) 
             if(!['ready','failed'].includes(funding.state)) Object.assign(funding,{state:p[0],order_no:p[1] || funding.order_no,provider_status:p[2] ?? funding.provider_status,fee_snapshot:p[3] ?? funding.fee_snapshot,retry_at:Math.max(Number(funding.retry_at || 0),p[4] || 0),message:p[5]});
         } else if (q.startsWith('INSERT INTO orbitcard_managed_cards')) {
             let card = db.cards.find(c => c.scope === p[0] && c.card_id === p[1]);
-            if (!card) { card = { scope:p[0],card_id:p[1],successful_order_count:0,authorization_count:null,authorizations_checked_at:null,authorization_pending_count:null,retirement_key:null,retirement_state:null,active_job:null,source:'imported' }; db.cards.push(card); }
+            if (!card) { card = { scope:p[0],card_id:p[1],successful_order_count:0,authorization_count:null,authorizations_checked_at:null,retirement_key:null,retirement_state:null,active_job:null,source:'imported' }; db.cards.push(card); }
             Object.assign(card,{ provider_status:p[2],product_code:p[3] || card.product_code || '',card_bin:p[4] || card.card_bin || '',last4:p[5] || card.last4 || '',balance:p[6],currency:p[7] });
         } else if (q.startsWith('INSERT INTO orbitcard_card_uses')) {
-            assert.ok(!db.uses.some(u => u.job_key === p[0])); db.uses.push({ job_key:p[0],scope:p[1],card_id:p[2],plan_type:p[3],state:'reserved',authorization_baseline:p[4] });
+            assert.ok(!db.uses.some(u => u.job_key === p[0])); db.uses.push({ job_key:p[0],scope:p[1],card_id:p[2],plan_type:p[3],state:'reserved' });
         } else if (q.startsWith('INSERT INTO orbitcard_card_issues')) {
             assert.match(q,/VALUES \(\?,\?,NULL,/);
             assert.ok(!db.issues.some(i => i.issue_key === p[0])); db.issues.push({ issue_key:p[0],scope:p[1],job_key:null,plan_type:p[2],product_code:p[3],amount:p[4],credential_hash:p[5],request_body:p[6],state:'prepared',retry_at:0 });

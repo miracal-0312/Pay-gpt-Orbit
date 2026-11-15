@@ -8,7 +8,7 @@
 
 订单账本 `orbitcard_successful_orders` 按平台 scope 与客户订单号唯一，平台订单号也设唯一约束。重复查询、重启、历史同步与正常结算只记一次；卡片行锁保护计数，自助和管理员结算在原事务内写账本、增加计数并释放占用。只保存脱敏结果证据，不保存 Session。旧授权统计保留在独立账本，不与订单数相加。
 
-卡台确认订阅成功后即可释放本次占用；成功订单数低于上限、卡片 ACTIVE/USD、资料及实时余额满足要求且没有其他占用或未决资金操作时可再次分配。旧 `authorization_pending_count` 与 `reuse_after_ms` 不再阻止复用，消费授权延迟或接口失败不阻塞选卡。
+卡台确认订阅成功后即可释放本次占用；成功订单数低于上限、卡片 ACTIVE/USD、资料及实时余额满足要求且没有其他占用或未决资金操作时可再次分配。旧 `authorization_pending_count`、`authorization_baseline` 和 `reuse_after_ms` 已无运行时读写，新建表及启动迁移不再创建，现有库保留历史列；这些字段不再阻止复用，消费授权延迟或接口失败不阻塞选卡。
 
 卡片冻结、资料不完整、订单结果未知或未决资金仍按原保护处理。未知订阅保留原任务占用，只查原单；无合格现有卡时停止，不自动开卡。
 
@@ -52,7 +52,7 @@ getCardList 完整分页读取卡片；cardDetail 以 card_ids 分批读取，�
 
 “查看交易”保留 `cardTransaction` 完整分页、授权 ID 去重和脱敏展示，只供对账；不会修改成功会员订单数。“实时选卡预检”和并发模拟使用相同的已确认订单计数及当前上限，不写数据库、不预占或操作资金。
 
-启动自动新增 `successful_order_count` 和 `orbitcard_successful_orders`。历史补记只读取已保存且能验证来源与归属的卡台成功响应，不看本地任务成功/失败标记；无证据记录等待从卡台重新读取，不用旧授权数量替代。启动补记可重复执行，不重置已有计数。卡台之外、API 不可见或无法关联卡片的历史订单无法自动统计；上线后在后台执行“同步卡片与订单”并核对 `order_sync.complete` 和待核对记录。
+启动自动新增 `successful_order_count` 和 `orbitcard_successful_orders`。历史补记只读取已保存且能验证来源与归属的卡台成功响应，不看本地任务成功/失败标记；无证据记录等待从卡台重新读取，不用旧授权数量替代。启动补记可重复执行，不重置已有计数。卡台之外、API 不可见或无法关联卡片的历史订单无法自动统计；上线后在后台执行“同步卡片与订单”并核对 `order_sync.complete` 和待核对记录。`complete` 只覆盖本次 API 可见的订单，不代表网页等全部渠道均已统计；当前 API 查不到的网页订单不能凭截图或本地成功标记直接加次数。
 
 ## 平台 API 与权限
 
@@ -64,7 +64,7 @@ docker compose exec -T app node scripts/inspect-card-transactions.cjs 19531519
 
 输出交易 ID、类型、原始状态、金额及币种，不输出完整卡号、CVV、密钥或个人信息。最后可加页码，例如 `19531519 2`。此命令不写计数、不删卡、不调用订阅或资金接口；未知状态应据输出核对后补充明确映射，不能当作成功或零次。
 
-沿用 HTTPS 和 HMAC V1 凭据。除原有 subscriptions:read/create、account:read、cards:create/read/fund、products:read 外，卡池删卡需要 cards:manage；计次、选卡和交易对账需要 transactions:read。
+沿用 HTTPS 和 HMAC V1 凭据。除原有 subscriptions:read/create、account:read、cards:create/read/fund、products:read 外，卡池删卡需要 cards:manage；会员订单同步计次需要 subscriptions:read，消费授权及资金流水对账需要 transactions:read。
 
 | POST 接口 | 用途 |
 | --- | --- |
@@ -85,7 +85,7 @@ API 约定见 [平台协议](Orbitcard-Open-API-V1.md) 和 [订阅协议](orbitc
 
 | 接口 | 行为 |
 | --- | --- |
-| GET /api/admin/orbitcard/cards | 本地卡片快照、authorization_count / authorization_limit（当前配置上限）、开卡和补款记录 |
+| GET /api/admin/orbitcard/cards | 本地卡片快照、successful_order_count / successful_order_limit（当前配置上限），以及独立的 authorization_count、开卡和补款记录 |
 | POST /api/admin/orbitcard/cards/sync | 刷新平台卡片资料和成功会员订单记录、处理退役，不自动开卡 |
 | POST /api/admin/orbitcard/cards/apply，Body `{}` | 二级验证后为共享卡池申请一张卡，或确认唯一原手动申请；申请冲突或原删卡未确认时拒绝，不接收旧 `plan_type` |
 | GET /api/admin/orbitcard/cards/:cardId/transactions?page=1 | 完整读取授权流水独立对账，并展示指定页最多 50 条脱敏交易 |

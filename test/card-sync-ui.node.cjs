@@ -31,15 +31,16 @@ test('local refresh labels cached balances and does not show green live ACTIVE',
     assert.match(f.$('cardRows').innerHTML,/本地快照/);
     assert.doesNotMatch(f.$('cardRows').innerHTML,/card-provider-status active/);
     assert.match(f.$('cardSyncState').textContent,/不会调用平台/);
+    assert.match(f.$('cardSyncState').textContent,/API 不可见的网页订单不计入/);
 });
 
-test('an idle card below its configured authorization limit remains available',async()=>{
+test('an idle card below its configured successful order limit remains available',async()=>{
     const f=setup(()=>{});
     f.card.successful_order_count=2;
     await f.api.loadCards();
     assert.match(f.$('cardRows').innerHTML,/空闲/);
     assert.doesNotMatch(f.$('cardRows').innerHTML,/暂不分配|停止分配/);
-    assert.match(f.$('cardRows').innerHTML,/按卡台确认成功的会员订单去重累计/);
+    assert.match(f.$('cardRows').innerHTML,/按当前 API 可读取的卡台成功会员订单去重累计/);
 });
 
 test('deleted and unavailable cards are omitted from rows after local refresh',async()=>{

@@ -2,7 +2,7 @@
 
 const cardsApi = require('./orbitcard-cards-client');
 const api = require('./orbitcard-client');
-const { authorizationLimit } = require('./orbitcard-pool');
+const { successfulOrderLimit } = require('./orbitcard-pool');
 const { CardPreparationError } = require('./orbitcard-card-policy');
 const { PLAN_TYPES: CANONICAL_PLAN_TYPES, PROVIDER_PLANS } = require('./plan-registry');
 
@@ -18,7 +18,7 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
         const cards = (await methods.listCards()).map(card => ({
             card_id: Number(card.card_id), active_job: card.active_job,
             authorization_count: card.authorization_count == null ? null : Number(card.authorization_count),
-            successful_order_count: card.successful_order_count == null ? null : Number(card.successful_order_count), successful_order_limit: authorizationLimit(cfg),
+            successful_order_count: card.successful_order_count == null ? null : Number(card.successful_order_count), successful_order_limit: successfulOrderLimit(cfg),
             counting_basis: 'confirmed_subscription_orders', authorizations_checked_at: card.authorizations_checked_at,
             retiring: Boolean(card.retirement_key),
             provider_status: card.provider_status, product_code: card.product_code, last4: card.last4,
@@ -88,7 +88,7 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
             throw new CardPreparationError('共享卡池开卡不接收套餐或自定义参数，请提交空请求');
         }
         const cfg = await config(), card = await cardService.apply(cfg);
-        res.json({ success: true, card, message: `开卡成功，首充 20 USD；成功会员订单满 ${authorizationLimit(cfg)} 次后停止分配` });
+        res.json({ success: true, card, message: `开卡成功，首充 20 USD；成功会员订单满 ${successfulOrderLimit(cfg)} 次后停止分配` });
     }));
     app.post('/api/admin/orbitcard/issues/refresh', handler(async (req, res) => {
         await cardService.recover(await config());

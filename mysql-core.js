@@ -115,7 +115,7 @@ async function ensureGptApiConfigDefaults() {
         const defaults = { gpt_api_enabled: '0', gpt_api_base_url: orbitcardConfig.DEFAULT_BASE_URL,
             orbitcard_max_fee: '',
             orbitcard_product_code: '', orbitcard_max_initial_amount: '',
-            orbitcard_max_authorizations: String(cardPool.DEFAULT_MAX_AUTHORIZATIONS),
+            orbitcard_max_authorizations: String(cardPool.DEFAULT_MAX_SUCCESSFUL_ORDERS),
             orbitcard_payment_regions: '{}',
             orbitcard_plan_prices: '{}',
         };
@@ -147,7 +147,7 @@ async function getGptApiConfig() {
         orbitcard_max_fee: String(map.orbitcard_max_fee || ''),
         orbitcard_product_code: String(map.orbitcard_product_code || ''),
         orbitcard_max_initial_amount: String(map.orbitcard_max_initial_amount || ''),
-        orbitcard_max_authorizations: cardPool.authorizationLimit(map),
+        orbitcard_max_authorizations: cardPool.successfulOrderLimit(map),
         orbitcard_payment_regions: orbitcardConfig.normalizePaymentRegions(JSON.parse(map.orbitcard_payment_regions || '{}')),
         orbitcard_plan_prices: orbitcardConfig.normalizePlanPrices(JSON.parse(map.orbitcard_plan_prices || '{}'))
     };
