@@ -79,7 +79,7 @@ docker compose exec -T app node scripts/inspect-card-transactions.cjs 19531519
 
 API 约定见 [平台协议](Orbitcard-Open-API-V1.md) 和 [订阅协议](orbitcard-subscription-api-v1.md)。HTTP 429 使用账户级限流等待和 Retry-After；权限不足、未知返回值和资金不足会停止相关动作，保留日志供核对。
 
-产品接口按当前 `data.list` 读取产品、库存和最低金额。后台返回 `products`、`manual_application` 和 `application_error`；`manual_application` 仅预览管理员手动申请的产品及固定首充参数。旧 `automatic_application` 与 `products[].plans` 不再输出；套餐 USD 配置只用于实际代充准备资金。只读预检维护摘要不再保留 `capacity_limit`、`auto_refill`、`open_count`、`opening_amount`，并发统计不再返回 `summary.opening`；现有卡选择、补款、等待和退役提示继续提供。
+产品接口按当前 `data.list` 读取产品、库存和最低金额。产品信息由手动开卡和支付准备内部按需读取，管理员无需先查询产品才能申请或支付。独立预览按钮、参数展示和 `/api/admin/orbitcard/products` 接口已移除；如需排查产品目录，使用“调试与日志 → 接口查询”的 `getProductCode` 只读测试。套餐 USD 配置只用于实际代充准备资金。只读预检维护摘要不再保留 `capacity_limit`、`auto_refill`、`open_count`、`opening_amount`，并发统计不再返回 `summary.opening`；现有卡选择、补款、等待和退役提示继续提供。
 
 ## 本项目管理 API
 

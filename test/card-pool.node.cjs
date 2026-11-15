@@ -196,6 +196,25 @@ test('unconfirmed counts and unknown platform status continue to block an openin
     }
 });
 
+test('selection matches each product reserve and excludes prior, busy and exhausted cards',()=>{
+    const {decideCards}=require('../orbitcard-payment-decision'),money=require('../orbitcard-money');
+    const listed=[41,42,43,44,45].map(card_id=>({card_id,provider_status:'ACTIVE',currency:'USD',
+        product_code:card_id===41?'higher-reserve':'no-reserve',balance_amount:'20.00'}));
+    const saved=listed.map(card=>({card_id:card.card_id,successful_order_count:card.card_id===45?4:0,
+        active_job:card.card_id===44?'other-order':null}));
+    const decision=decideCards({saved,listed,detailed:[...listed].reverse(),jobKey:'new-job',planType:'plus',
+        products:[{product_code:'no-reserve',min_retained_balance:'0.00'},
+            {product_code:'higher-reserve',min_retained_balance:'8.00'}],
+        excludedCardIds:['42'],priceFor:()=>'16.00'});
+    assert.equal(decision.action,'pay');
+    assert.deepEqual(decision.candidates.map(candidate=>candidate.card.card_id),[43,41]);
+    assert.equal(decision.candidates[1].target,money.units('24.00'));
+    assert.equal(decision.candidates[1].deficit,money.units('4.00'));
+    assert.ok(decision.skipped.some(card=>card.card_id===42 && card.reason==='previous_payment_attempt'));
+    assert.ok(decision.skipped.some(card=>card.card_id===45 && card.reason==='limit_reached'));
+    assert.deepEqual(decision.waiting,[{card_id:44,reason:'busy'}]);
+});
+
 test('allocation uses an existing funded card without requiring money to fill the pool',async()=>{
     const f=await setup([0],{getAccountBalance:async()=>({success:true,data:{available_balance:'0.00'}})});
     const task=await f.claim();

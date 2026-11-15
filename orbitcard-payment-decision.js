@@ -9,10 +9,12 @@ function decideCards({ saved, listed, detailed, products, jobKey, planType, pric
     maxSuccessfulOrders = poolPolicy.validateLimit(maxSuccessfulOrders);
     const plan = planFor(planType), live = new Map(listed.map(card => [Number(card.card_id), card]));
     const details = new Map(detailed.map(card => [Number(card.card_id), card]));
+    const excluded = new Set(excludedCardIds.map(Number));
+    const productByCode = new Map(products.map(product => [product.product_code, product]));
     const candidates = [], skipped = [], waiting = [];
     for (const row of saved) {
         const id = Number(row.card_id), owned = row.active_job === jobKey;
-        if (excludedCardIds.map(Number).includes(id)) { skipped.push({ card_id: id, reason: 'previous_payment_attempt' }); continue; }
+        if (excluded.has(id)) { skipped.push({ card_id: id, reason: 'previous_payment_attempt' }); continue; }
         if (!live.has(id)) { skipped.push({ card_id: id, reason: 'missing_from_platform_list' }); continue; }
         // An unresolved owner still blocks a replacement, including when the
         // platform has frozen its card or its quota is already exhausted.
@@ -42,7 +44,7 @@ function decideCards({ saved, listed, detailed, products, jobKey, planType, pric
             if (owned) throw new CardPreparationError('已预占卡片状态异常，请核对原补款及管理员订单');
             skipped.push({ card_id: id, reason: 'inactive', status: card.provider_status }); continue;
         }
-        const product = products.find(item => item.product_code === card.product_code), price = priceFor(product, plan);
+        const product = productByCode.get(card.product_code), price = priceFor(product, plan);
         try {
             if (!price || !product || card.currency !== 'USD' || card.balance_amount == null) throw new CardPreparationError('支付资料不完整');
             const target = money.units(price) + money.units(product.min_retained_balance);

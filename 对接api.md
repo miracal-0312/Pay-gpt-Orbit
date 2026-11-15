@@ -16,7 +16,7 @@
 
 订阅调用需要 `subscriptions:read`、`subscriptions:create` 权限，余额查询另需 `account:read`。卡池还需 `cards:create`、`cards:read`、`cards:manage`、`products:read`、`cards:fund`；交易对账另需 `transactions:read`，不需要敏感卡资料。接口一键测试仅向平台发送读取请求，财务写操作只做本地参数与幂等键模拟，不创建订阅或开卡。卡片协议见 [Open API](Orbitcard-Open-API-V1.md)。
 
-管理员手动申请时，服务端组装 `{product_code,amount:"20.00",quantity:1}`；产品码来自最新 `getProductCode` 的 `data.list`，不额外提交身份资料或卡号。产品查询返回 `manual_application` 作为手动申请参数预览，以及 `application_error`；旧 `automatic_application` 与 `products[].plans` 已移除。手动申请不要求会员价格，CDK 代充需已配置套餐 USD 金额。历史自动申请仅在有平台 order_no 时按原平台、API Key、正文和幂等键核对；无订单号的未知申请不重发，prepared 未发送意图关闭为失败。详见 [开卡参数](ORBITCARD-CARDS.md#次数与卡池规则)。
+管理员手动申请时，服务端组装 `{product_code,amount:"20.00",quantity:1}`；产品码来自最新 `getProductCode` 的 `data.list`，不额外提交身份资料或卡号。卡片页面不再提供独立的开卡产品预览入口，`GET /api/admin/orbitcard/products` 已移除；产品查询在开卡和支付准备内自动完成，接口诊断仍保留 `getProductCode`。手动申请不要求会员价格，CDK 代充需已配置套餐 USD 金额。历史自动申请仅在有平台 order_no 时按原平台、API Key、正文和幂等键核对；无订单号的未知申请不重发，prepared 未发送意图关闭为失败。详见 [开卡参数](ORBITCARD-CARDS.md#次数与卡池规则)。
 
 项目向平台发送 `POST /api/open/v1/<operation>`，使用 HMAC-SHA256-V1 对精确请求字节、主机、路径、时间戳、随机数及幂等键签名，不使用旧充值 Bearer 协议。
 

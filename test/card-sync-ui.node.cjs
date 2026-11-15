@@ -3,7 +3,7 @@ const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
-function setup(syncResponse, transactionResponse, localResponse) {
+function setup(syncResponse, transactionResponse, localResponse, applicationResponse) {
     const source=fs.readFileSync(path.join(__dirname,'../public/admin.js'),'utf8');
     const block=source.slice(source.indexOf('function renderCardRow('),source.indexOf('async function loadCdkPlans('));
     const nodes=new Map();
@@ -12,18 +12,19 @@ function setup(syncResponse, transactionResponse, localResponse) {
         return nodes.get(id);
     };
     const card={card_id:42,provider_status:'ACTIVE',balance:'20.00',currency:'USD',successful_order_count:null,successful_order_limit:7,last4:'4139'};
-    const calls=[];
-    const request=async url=>{
+    const calls=[],notices=[];
+    const request=async (url,body)=>{
         calls.push(url);
+        if(url.endsWith('/apply'))return applicationResponse(body);
         if(url.endsWith('/sync'))return syncResponse();
         if(url.includes('/transactions?'))return transactionResponse(card);
         if(localResponse)return localResponse(card);
         return {cards:[card],issues:[],fundings:[]};
     };
     const escapeHtml=value=>String(value ?? '').replaceAll('<','&lt;').replaceAll('>','&gt;');
-    const api=new Function('$','request','escapeHtml','cardPlans','Option','notice',block+'\nreturn {loadCards,synchronizeCards,loadCardTransactions};')(
-        $,request,escapeHtml,{plus:'Plus'},function(){},()=>{});
-    return {api,$,card,calls};
+    const api=new Function('$','request','escapeHtml','cardPlans','Option','notice',block+'\nreturn {loadCards,synchronizeCards,loadCardTransactions,applyCard};')(
+        $,request,escapeHtml,{plus:'Plus'},function(){},(text,type)=>notices.push({text,type}));
+    return {api,$,card,calls,notices};
 }
 test('local refresh labels cached balances and does not show green live ACTIVE',async()=>{
     const f=setup(()=>{throw new Error('must not call platform');});
@@ -124,32 +125,44 @@ test('manual usage editor is removed',()=>{
     assert.doesNotMatch(source,/async function saveCardUsage|data-bind-card|data-update-card-usage|cardHistoryState|data-open-card-history|data-manage-card-history/);
 });
 
-test('manual card application preview displays the proposed parameters without submitting an application',async()=>{
-    const source=fs.readFileSync(path.join(__dirname,'../public/admin.js'),'utf8');
-    const line=source.split(/\r?\n/).find(line=>line.startsWith("$('loadProducts').onclick"));
-    const nodes={loadProducts:{},products:{textContent:''}},calls=[];
-    const data={manual_application:{product_code:'shared',quantity:1,amount:'20.00'},
-        application_error:null,products:[{product_code:'shared'}]};
-    new Function('$','perform','request',line)(id=>nodes[id],action=>action(),async url=>{calls.push(url);return data;});
-    await nodes.loadProducts.onclick();
-    assert.deepEqual(calls,['/api/admin/orbitcard/products']);
-    assert.deepEqual(JSON.parse(nodes.products.textContent),data);
+test('an uncertain card application preserves its original error even when the record refresh fails',async()=>{
+    for(const refreshFails of [false,true]) {
+        const original=Object.assign(Error('original application pending'),{httpStatus:400});
+        const f=setup(null,null,refreshFails?()=>{throw Error('local unavailable');}:undefined,async body=>{
+            assert.deepEqual(body,{});throw original;
+        });
+        await assert.rejects(f.api.applyCard(),error=>error===original);
+        assert.deepEqual(f.calls,['/api/admin/orbitcard/cards/apply','/api/admin/orbitcard/cards']);
+        assert.match(f.$('cardApplicationState').textContent,/original application pending.*确认原开卡/);
+        if(refreshFails)assert.match(f.$('cardApplicationState').textContent,/本地记录刷新失败.*local unavailable/);
+        assert.deepEqual(f.notices,[],'an uncertain application must not display success');
+    }
 });
 
-test('shared-pool card application submits no plan and refreshes original records after an uncertain result',async()=>{
-    const source=fs.readFileSync(path.join(__dirname,'../public/admin.js'),'utf8');
-    const html=fs.readFileSync(path.join(__dirname,'../public/admin.html'),'utf8');
-    assert.doesNotMatch(html,/id="applyPlan"|申请关联套餐/);
-    const line=source.split(/\r?\n/).find(line=>line.startsWith("form('applyCardForm',"));
-    let submit;
-    const calls=[];
-    new Function('form','request','notice','loadCards',line)(
-        (name,handler)=>{assert.equal(name,'applyCardForm');submit=handler;},
-        async(url,body)=>{calls.push({url,body});throw Error('original application pending');},
-        ()=>{throw Error('an uncertain application must not display success');},
-        async()=>{calls.push({refresh:true});});
-    await assert.rejects(submit(),/original application pending/);
-    assert.deepEqual(calls,[{url:'/api/admin/orbitcard/cards/apply',body:{}},{refresh:true}]);
+test('a successful card application stays successful if refreshing the local list fails',async()=>{
+    for(const refreshFails of [false,true]) {
+        const result={success:true,message:'开卡成功，首充 20 USD',card:{card_id:77}};
+        const f=setup(null,null,refreshFails?()=>{throw Error('local unavailable');}:undefined,async body=>{
+            assert.deepEqual(body,{});return result;
+        });
+        assert.equal(await f.api.applyCard(),result);
+        assert.deepEqual(f.calls,['/api/admin/orbitcard/cards/apply','/api/admin/orbitcard/cards']);
+        assert.match(f.$('cardApplicationState').textContent,/开卡成功，首充 20 USD/);
+        if(refreshFails) {
+            assert.match(f.$('cardApplicationState').textContent,/刷新失败.*刷新本地记录/);
+            assert.match(f.$('cardSyncState').textContent,/当前列表未更新/);
+        }
+        assert.equal(f.notices.length,1);assert.equal(f.notices[0].type,'success');
+    }
+});
+
+test('a completed synchronization is not reported as a platform failure when local refresh fails',async()=>{
+    const f=setup(()=>({message:'已同步 1 张卡片详情；会员订单新增 2 笔',failed_ids:[]}),null,()=>{throw Error('local unavailable');});
+    await f.api.synchronizeCards();
+    assert.deepEqual(f.calls,['/api/admin/orbitcard/cards/sync','/api/admin/orbitcard/cards']);
+    assert.match(f.$('cardSyncState').textContent,/已同步 1 张.*新增 2 笔.*本地列表刷新失败.*刷新本地记录/);
+    assert.doesNotMatch(f.$('cardSyncState').textContent,/平台同步失败/);
+    assert.equal(f.$('syncCards').disabled,false);assert.equal(f.$('loadCards').disabled,false);
 });
 
 test('viewing transactions refreshes authorization counts without maintaining the pool',async()=>{

@@ -365,17 +365,6 @@ test('plan-free manual opening never creates a new card around owned or multiple
     }
 });
 
-test('admin product query previews generated opening fields without writing an order or exposing credentials',async t => {
-    const express=require('express'),{once}=require('node:events'),app=express(),f=serviceFixture();
-    const register=load('orbitcard-card-http.js',{'./orbitcard-cards-client':f.api});
-    register(app,{store:{getGptApiConfig:async()=>cfg},cardService:{},requireSecondaryAuth:(req,res,next)=>next(),audit(){}});
-    const server=app.listen(0,'127.0.0.1');await once(server,'listening');t.after(async()=>{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));});
-    const data=await (await fetch(`http://127.0.0.1:${server.address().port}/api/admin/orbitcard/products`)).json();
-    assert.deepEqual(data.manual_application,{product_code:'p1',amount:'20.00',quantity:1});assert.equal(data.application_error,null);
-    assert.ok(data.products.every(product=>!Object.hasOwn(product,'prices') && !Object.hasOwn(product,'plans')));
-    assert.deepEqual(f.calls.map(c=>c.operation),['getProductCode']);assert.ok(!JSON.stringify(data).includes('api_key'));
-});
-
 test('admin region choices are read separately for each plan and expose only valid codes',async t => {
     const express=require('express'),{once}=require('node:events'),app=express(),calls=[];
     const plans={plus:'gpt-plus',pro100:'gpt-pro-5x',pro200:'gpt-pro-20x',pro500:'gpt-pro-25x'};

@@ -253,11 +253,18 @@ async function synchronizeCards() {
     $('syncCards').disabled = true;
     $('loadCards').disabled = true;
     $('cardSyncState').textContent = '正在同步卡片信息和卡台成功会员订单…';
+    let result;
     try {
-        const result = await request('/api/admin/orbitcard/cards/sync', {});
+        result = await request('/api/admin/orbitcard/cards/sync', {});
         await loadCards(result);
         notice(result.message, result.failed_ids.length ? 'error' : 'success');
     } catch (error) {
+        if (result) {
+            const message = `${result.message}；本地列表刷新失败：${error.message}。请点击“刷新本地记录”，当前列表未更新。`;
+            $('cardSyncState').textContent = message;
+            notice(message, 'error');
+            return;
+        }
         await loadCards({failed: true, message: error.message}).catch(() => {
             $('cardRows').innerHTML = '<tr><td colspan="5">同步及本地记录读取失败，请重新查询。</td></tr>';
             $('cardSyncState').textContent = `平台同步失败：${error.message}。本地记录也读取失败，无法确认当前卡片信息。`;
@@ -267,6 +274,26 @@ async function synchronizeCards() {
         $('syncCards').disabled = false;
         $('loadCards').disabled = false;
     }
+}
+async function applyCard() {
+    const state = $('cardApplicationState');
+    state.textContent = '正在处理开卡申请，请等待原申请结果…';
+    let result, applicationError;
+    try {
+        result = await request('/api/admin/orbitcard/cards/apply', {});
+        state.textContent = result.message;
+    } catch (error) {
+        applicationError = error;
+        state.textContent = `开卡申请未确认成功：${error.message}。请先查看开卡申请记录，待确认时使用“确认原开卡 / 补款”查询原申请。`;
+    }
+    try { await loadCards(); }
+    catch (error) {
+        state.textContent += ` 本地记录刷新失败：${error.message}。请点击“刷新本地记录”。`;
+        $('cardSyncState').textContent = '本地记录刷新失败，当前列表未更新；开卡结果请查看“申请卡片”。';
+    }
+    if (applicationError) throw applicationError;
+    notice(state.textContent, 'success');
+    return result;
 }
 async function loadCdkPlans() {
     const data = await request('/api/admin/cdks/plans');
@@ -699,9 +726,8 @@ $('refreshCardIds').onclick = () => perform(loadCardIdPreview);
 $('loadCards').onclick = () => perform(loadCards);
 $('loadTransactions').onclick = () => perform(loadCardTransactions);
 $('syncCards').onclick = () => perform(synchronizeCards);
-$('loadProducts').onclick = () => perform(async () => { const data = await request('/api/admin/orbitcard/products'); $('products').textContent = JSON.stringify({ manual_application:data.manual_application, application_error:data.application_error, products:data.products }, null, 2); });
 $('refreshIssues').onclick = () => perform(async () => { notice((await request('/api/admin/orbitcard/issues/refresh', {})).message, 'success'); await loadCards(); });
-form('applyCardForm', async () => { try { notice((await request('/api/admin/orbitcard/cards/apply', {})).message, 'success'); } finally { await loadCards(); } });
+form('applyCardForm', applyCard);
 form('configForm', async () => { const result = await request('/api/admin/config', { max_concurrent_activations: Number($('maxConcurrent').value), maintenance_mode: $('maintenance').checked }); notice(result.message, 'success'); });
 form('twofaModeForm', async () => { const result = await request('/api/admin/security/2fa-mode', { mode: $('twofaMode').value }); notice(result.message, 'success'); await loadSecurity(); });
 $('setupTotp').onclick = () => perform(async () => { const data = await request('/api/admin/2fa/setup', {}); $('totpSecret').hidden = false; $('totpSecret').textContent = `请在 Authenticator 中手工添加密钥：\n${data.secret}\n\n${data.otpauthUrl}`; });

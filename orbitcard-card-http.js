@@ -48,13 +48,6 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
         res.set('Cache-Control', 'no-store');
         res.json({ success: true, ...result, message: `已同步 ${result.count} 张卡片详情；会员订单新增 ${result.order_sync?.added || 0} 笔${result.order_sync?.complete ? '' : `（${result.order_sync?.error || `有 ${result.order_sync?.unresolved?.length || 0} 笔会员订单结果或卡片归属待核对`}）`}${result.removed_ids?.length ? `，${result.removed_ids.length} 张已注销或平台列表中不存在的卡片已移出列表` : ''}${result.failed_ids.length ? `，${result.failed_ids.length} 张详情读取失败，仅保留旧快照` : ''}` });
     }));
-    app.get('/api/admin/orbitcard/products', handler(async (req, res) => {
-        const cfg = await config(), products = await cardsApi.products(cfg);
-        let application=null,applicationError=null;
-        try {application=cardsApi.createCardBody(cardsApi.chooseOpeningProduct(products,cfg));}
-        catch (error) {if(!(error instanceof CardPreparationError))throw error;applicationError=error.message;}
-        res.json({ success: true, products, manual_application:application, application_error:applicationError });
-    }));
     app.get('/api/admin/orbitcard/payment-regions', handler(async (req, res) => {
         const cfg=await config(), regions={};
         const requested=String(req.query?.plan || '').trim();

@@ -99,7 +99,7 @@ docker compose logs --tail=100 app
 
 旧浏览器、验证码、卡池、代理、本地支付链接调试和本地账单接口已移除。当前 Orbitcard 调试与日志统一在新入口；刷新后台缓存，前端资源与镜像一并发布。
 
-手动开卡统一为共享卡池申请，`POST /api/admin/orbitcard/cards/apply` 只接收 `{}`，旧 `plan_type` 被拒绝；未确认历史申请按原 key 和 Body 核对。产品预览返回 `manual_application` 和 `application_error`，不再返回旧 `automatic_application` 或 `products[].plans`。只读预检维护摘要删除自动补满和开卡的固定占位字段 `capacity_limit`、`auto_refill`、`open_count`、`opening_amount`；并发模拟统计不再返回始终为零的 `summary.opening`。管理客户端使用 `Authorization: Bearer`，不把令牌放 URL；`gpt-api/status` 不附带 `recent_orders`，订单查询仍保留。无需删除历史订单、卡片或迁移记录。
+手动开卡统一为共享卡池申请，`POST /api/admin/orbitcard/cards/apply` 只接收 `{}`，旧 `plan_type` 被拒绝；未确认历史申请按原 key 和 Body 核对。独立产品预览按钮和 `/api/admin/orbitcard/products` 接口已移除。手动申请时自动读取产品并校验库存、固定首充及配置上限；支付准备仍读取产品最低留存余额。产品只读排查统一使用“调试与日志 → 接口查询”。只读预检维护摘要删除自动补满和开卡的固定占位字段 `capacity_limit`、`auto_refill`、`open_count`、`opening_amount`；并发模拟统计不再返回始终为零的 `summary.opening`。管理客户端使用 `Authorization: Bearer`，不把令牌放 URL；`gpt-api/status` 不附带 `recent_orders`，订单查询仍保留。无需删除历史订单、卡片或迁移记录。
 
 ## 环境更新与存储
 
