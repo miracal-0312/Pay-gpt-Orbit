@@ -8,7 +8,7 @@ const BASE = 'https://orbitcard.test';
 module.exports = function fixture({ enqueueRedemption, now: externalNow } = {}) {
     let clock = Date.now();
     const now = externalNow || (() => clock);
-    const db = { cards: [], authorizations: [], uses: [], issues: [], fundings:[], tasks: [], cdks: [], failRelease: false };
+    const db = { successfulOrders: [], cards: [], authorizations: [], uses: [], issues: [], fundings:[], tasks: [], cdks: [], failRelease: false };
     let tail = Promise.resolve(), allocationTail = Promise.resolve(), sequence = 0;
     async function withTransaction(fn) {
         const pending = tail.then(async () => {
@@ -17,9 +17,11 @@ module.exports = function fixture({ enqueueRedemption, now: externalNow } = {}) 
         });
         tail = pending.catch(() => {}); return pending;
     }
+    const orderUsageDb = require('./order-usage-db.cjs')(db);
     const clean = sql => sql.replace(/\s+/g, ' ').trim();
     async function runQuery(sql, p = []) {
         const q = clean(sql);
+        const usageResult = orderUsageDb.query(q,p); if (usageResult !== undefined) return usageResult;
         if(q.includes('FROM orbitcard_card_fundings')) return structuredClone(db.fundings.filter(f =>
             (q.includes('WHERE job_key=')?f.job_key===p[0]:f.scope===p[0] && (!q.includes('job_key=?') || f.job_key===p[1]))
                 && (!q.includes('state IN') || ['prepared','submitting','pending','unknown'].includes(f.state))));
@@ -55,6 +57,7 @@ module.exports = function fixture({ enqueueRedemption, now: externalNow } = {}) 
     }
     async function runExecute(sql, p = []) {
         const q = clean(sql);
+        const usageResult = orderUsageDb.execute(q,p); if (usageResult !== undefined) return usageResult;
         if (q.startsWith('INSERT IGNORE INTO orbitcard_card_authorizations')) {
             for (let i=0;i<p.length;i+=3) if (!db.authorizations.some(row => row.scope===p[i] && row.card_id===Number(p[i+1]) && row.transaction_id===p[i+2]))
                 db.authorizations.push({scope:p[i],card_id:Number(p[i+1]),transaction_id:p[i+2]});
@@ -97,7 +100,7 @@ module.exports = function fixture({ enqueueRedemption, now: externalNow } = {}) 
             if(!['ready','failed'].includes(funding.state)) Object.assign(funding,{state:p[0],order_no:p[1] || funding.order_no,provider_status:p[2] ?? funding.provider_status,fee_snapshot:p[3] ?? funding.fee_snapshot,retry_at:Math.max(Number(funding.retry_at || 0),p[4] || 0),message:p[5]});
         } else if (q.startsWith('INSERT INTO orbitcard_managed_cards')) {
             let card = db.cards.find(c => c.scope === p[0] && c.card_id === p[1]);
-            if (!card) { card = { scope:p[0],card_id:p[1],authorization_count:null,authorizations_checked_at:null,authorization_pending_count:null,retirement_key:null,retirement_state:null,active_job:null,source:'imported' }; db.cards.push(card); }
+            if (!card) { card = { scope:p[0],card_id:p[1],successful_order_count:0,authorization_count:null,authorizations_checked_at:null,authorization_pending_count:null,retirement_key:null,retirement_state:null,active_job:null,source:'imported' }; db.cards.push(card); }
             Object.assign(card,{ provider_status:p[2],product_code:p[3] || card.product_code || '',card_bin:p[4] || card.card_bin || '',last4:p[5] || card.last4 || '',balance:p[6],currency:p[7] });
         } else if (q.startsWith('INSERT INTO orbitcard_card_uses')) {
             assert.ok(!db.uses.some(u => u.job_key === p[0])); db.uses.push({ job_key:p[0],scope:p[1],card_id:p[2],plan_type:p[3],state:'reserved',authorization_baseline:p[4] });
@@ -165,6 +168,7 @@ module.exports = function fixture({ enqueueRedemption, now: externalNow } = {}) 
         const card={card_id:id,provider_status:'ACTIVE',product_code:'p1',bin:'55565979',last4:'1234',balance:100,currency:'USD'};
         const methods=cardStore.cardMethods(BASE);
         await methods.syncCards([card]);
+        db.cards.find(row=>row.card_id===id).successful_order_count=used;
         if(confirmed) await methods.saveAuthorizations(id,Array.from({length:used},(_,i)=>String(i)));
         return card;
     }
@@ -175,6 +179,8 @@ module.exports = function fixture({ enqueueRedemption, now: externalNow } = {}) 
         return structuredClone(row);
     }
     const settle=(task,state) => cdkStore.settleOrbitcardTask(task.jobKey,{status:state==='success'?'success':['failed','rejected'].includes(state)?'failed':state==='manual'?'manual':'running',orbitcardState:state,progress:90,message:state,
+        ...(state==='success'?{gptApiOrderId:`sub-${task.jobKey}`,gptApiRaw:JSON.stringify({task_no:`sub-${task.jobKey}`,client_order_no:task.orbitcardClientOrderNo,
+            card_id:db.tasks.find(row=>row.job_key===task.jobKey)?.orbitcard_card_id,status:'succeeded',subscription_succeeded:true,query_source:'upstream'})}:{}),
         ...(state==='submitting'?{expectedState:'prepared',expectedClientOrderNo:task.orbitcardClientOrderNo}:{})});
-    return {db,store,claim,addCard,seedHistoricalIssue,settle,now,advance:(ms=300000)=>{clock+=ms;},base:BASE,scope:cardScope(BASE)};
+    return {db,store,claim,addCard,seedHistoricalIssue,settle,now,runQuery,runExecute,withTransaction,advance:(ms=300000)=>{clock+=ms;},base:BASE,scope:cardScope(BASE)};
 };

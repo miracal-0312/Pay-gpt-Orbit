@@ -5,6 +5,7 @@ const { cardScope, planFor, FUNDING_POLL_MS } = require('./orbitcard-card-policy
 const { MAX_PAYMENT_ATTEMPTS, confirmedFailure, manualHistory } = require('./payment-retry-policy');
 
 module.exports = function createManualStore({ runQuery, runExecute, withTransaction, enqueueRedemption = async () => {} }) {
+    const usage = require('./orbitcard-order-usage')({ runQuery, runExecute, withTransaction });
     async function getManualOrder(requestId, options) {
         const rows = await runQuery('SELECT * FROM orbitcard_admin_orders WHERE request_id = ? LIMIT 1', [requestId], options);
         return rows[0] || null;
@@ -86,7 +87,7 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
             await runExecute('UPDATE orbitcard_managed_cards SET active_job = ? WHERE scope = ? AND card_id = ?',
                 [jobKey, order.scope, cardId], options);
             await runExecute('UPDATE orbitcard_admin_orders SET card_id = ?, authorization_baseline = ?, message = ? WHERE request_id = ? AND state = \'preparing\'',
-                [cardId, Number(card.authorization_count), '支付卡已预占，正在核对或补足卡内资金', requestId], options);
+                [cardId, Number(card.successful_order_count), '支付卡已预占，正在核对或补足卡内资金', requestId], options);
             return { ...card, active_job: jobKey };
         });
     }
@@ -303,12 +304,9 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
                 const [card] = await runQuery('SELECT * FROM orbitcard_managed_cards WHERE scope = ? AND card_id = ? FOR UPDATE',
                     [order.scope, order.card_id], options);
                 if (!card || card.active_job !== order.client_order_no) throw new Error('管理员订单的支付卡占用记录不一致');
-                if (state === 'success' && order.authorization_baseline != null) {
-                    const pending = Number(order.authorization_baseline) + 1;
-                    if (!Number.isSafeInteger(pending) || pending < 1) throw new Error('原管理员订单消费授权基准无效');
-                    const updated = await runExecute(`UPDATE orbitcard_managed_cards SET authorization_pending_count=GREATEST(COALESCE(authorization_pending_count,0),?)
-                        WHERE scope=? AND card_id=?`, [pending,order.scope,order.card_id], options);
-                    if (updated.affectedRows !== 1) throw new Error('原管理员订单卡片不存在，不能确认消费授权待同步状态');
+                if (state === 'success') {
+                    await usage.recordSuccess({ scope: order.scope, cardId: order.card_id,
+                        clientOrderNo: order.client_order_no, orderId: safeTaskNo, snapshot }, options);
                 }
                 await runExecute(`UPDATE orbitcard_managed_cards SET active_job = NULL
                     WHERE scope = ? AND card_id = ? AND active_job = ?`,

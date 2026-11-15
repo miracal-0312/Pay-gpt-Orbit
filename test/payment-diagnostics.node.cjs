@@ -14,9 +14,9 @@ function fixture() {
         orbitcard_plan_prices:Object.fromEntries(Object.keys(PROVIDER_PLANS).map(plan=>[plan,'16.00'])) };
     const product = { product_code: 'p1', min_initial_amount: '10.00', min_retained_balance: '0.00', remaining: 10 };
     const live = [{ card_id: 42, provider_status: 'ACTIVE', product_code: 'p1', currency: 'USD', balance_amount: '20.00' }];
-    const rows = [{ card_id: 42, authorization_count: 0 }];
+    const rows = [{ card_id: 42, successful_order_count: 0 }];
     const state = { available: '100.00', live, rows, details: live, product, transactions:new Map(), savedIds:new Map(), singleDetails:new Map() };
-    const persisted=id=>state.savedIds.get(id)||Array.from({length:Number(state.rows.find(row=>row.card_id===id)?.authorization_count)||0},(_,i)=>'saved-'+id+'-'+i);
+    const persisted=id=>state.savedIds.get(id)||Array.from({length:Number(state.rows.find(row=>row.card_id===id)?.successful_order_count)||0},(_,i)=>'saved-'+id+'-'+i);
     const provider = { fetchPlans: async config => { calls.push(['getSubscriptionPlans',config.auditJobKey]); return { success:true, plans:Object.values(PROVIDER_PLANS).map(type=>({type,name:type})) }; },
         request: async (config, operation, body) => {
             calls.push([operation,config.auditJobKey,body]);
@@ -51,7 +51,7 @@ function managedPool(count=5,balance='20.00') {
     const f=fixture();f.cfg.enabled=true;
     f.state.live=Array.from({length:count},(_,i)=>({...f.state.live[0],card_id:42+i,balance_amount:balance}));
     f.state.details=f.state.live;
-    f.state.rows=f.state.live.map(card=>({card_id:card.card_id,authorization_count:0}));
+    f.state.rows=f.state.live.map(card=>({card_id:card.card_id,successful_order_count:0}));
     return f;
 }
 
@@ -75,24 +75,24 @@ test('concurrent preflight assigns distinct cards and admits just one waiting ta
     assert.equal(sim.budget.remaining, '74.00000000');
     assert.equal(f.calls.filter(([op]) => op === 'getCardList').length, 1);
     assert.equal(f.calls.filter(([op]) => op === 'cardDetail').length, 1);
-    assert.equal(f.calls.filter(([op]) => op === 'cardTransaction').length, 3);
+    assert.equal(f.calls.filter(([op]) => op === 'cardTransaction').length, 0);
     assert.deepEqual(f.state.rows, before); assert.deepEqual(f.writes, []);
     assert.ok(!JSON.stringify([f.calls, f.events, result]).includes('must-not-read-or-forward-this-session'));
 });
 
 test('preflight and simulation use the current authorization limit for eligibility, displayed counts and retirement', async () => {
     const f=managedPool(2);
-    f.state.rows[0].authorization_count=4;
-    f.state.rows[1].authorization_count=1;
+    f.state.rows[0].successful_order_count=4;
+    f.state.rows[1].successful_order_count=1;
     const run=()=>f.service.preflight({stage:'cards',plan_type:'plus'});
     const initial=(await run()).result.selection;
     assert.equal(initial.card_id,43);
-    assert.equal(initial.cards[0].authorization_limit,4);
+    assert.equal(initial.cards[0].successful_order_limit,4);
     assert.deepEqual(initial.maintenance.retire_card_ids,[42]);
     f.cfg.orbitcard_max_authorizations=6;
     const raised=(await run()).result.selection;
     assert.equal(raised.card_id,42);
-    assert.ok(raised.cards.every(card=>card.authorization_limit===6));
+    assert.ok(raised.cards.every(card=>card.successful_order_limit===6));
     assert.deepEqual(raised.maintenance.retire_card_ids,[]);
     const simulation=async()=> (await f.service.preflight({stage:'concurrency',plan_type:'plus',concurrent_tasks:5})).result.concurrency;
     assert.equal((await simulation()).summary.assigned,2);
@@ -137,8 +137,8 @@ test('concurrent simulation preserves real owners, ignores historical cooldowns 
     assert.deepEqual(f.state.rows, before); assert.deepEqual(f.writes, []);
 });
 
-test('concurrent diagnostics stop on unreadable authorizations or missing details without declaring a clean simulation', async () => {
-    for (const failure of ['authorizations', 'details']) {
+test('concurrent diagnostics stop on missing details without declaring a clean simulation', async () => {
+    for (const failure of ['details']) {
         const f = managedPool(1);
         if (failure === 'authorizations') f.state.transactionError = 42;
         else f.state.details = [];
@@ -175,17 +175,17 @@ test('full preflight checks all four plans with readonly authorization queries',
         const output=JSON.stringify([result,f.events]);
         for(const secret of ['never-log-access','never-log-session','preview@example.test','prices','16.00'])assert.ok(!output.includes(secret));
         assert.equal(f.state.rows[0].active_job,undefined);assert.deepEqual(f.writes,[]);
-        assert.equal(f.calls.filter(([operation])=>operation==='cardTransaction').length,1);
+        assert.equal(f.calls.filter(([operation])=>operation==='cardTransaction').length,0);
     }
 });
 test('preflight models funding and rejects exhausted-card replacement',async()=>{
     const fund=fixture();fund.state.details=[{...fund.state.live[0],balance_amount:'2.00'}];
     const funding=await fund.service.preflight({stage:'cards',plan_type:'plus'});
     assert.equal(funding.result.selection.action,'fund');assert.equal(funding.result.selection.funding_amount,'14.00');
-    const open=fixture();open.state.rows[0].authorization_count=7;
+    const open=fixture();open.state.rows[0].successful_order_count=7;
     const opening=await open.service.preflight({stage:'cards',plan_type:'plus'});
     assert.equal(opening.passed,false);assert.equal(opening.result.selection.action,'unavailable');assert.equal(opening.result.selection.opening,undefined);
-    assert.equal(opening.result.selection.skipped[0].reason,'limit_reached');assert.equal(open.state.rows[0].authorization_count,7);
+    assert.equal(opening.result.selection.skipped[0].reason,'limit_reached');assert.equal(open.state.rows[0].successful_order_count,7);
     assert.deepEqual(open.writes,[]);
 });
 
@@ -226,7 +226,7 @@ test('enabled preflight budgets only the selected deficit regardless of pool siz
 });
 
 test('enabled preflight requires no replacement funds when another card can pay',async()=>{
-    const f=managedPool();f.state.rows[0].authorization_count=7;f.state.available='0.00';
+    const f=managedPool();f.state.rows[0].successful_order_count=7;f.state.available='0.00';
     const before=structuredClone(f.state.rows);
     const ready=await f.service.preflight({stage:'cards',plan_type:'plus'});
     assert.equal(ready.passed,true);assert.equal(ready.result.selection.action,'pay');
@@ -269,43 +269,43 @@ test('preflight confirms an unknown deletion readonly before skipping its unavai
     assert.ok(!f.calls.some(([op,,body])=>op==='cardTransaction'&&body.card_id===42));
     assert.deepEqual(f.state.rows,before);assert.deepEqual(f.writes,[]);
 });
-test('preflight imports observable external card history in memory without exposing transactions',async()=>{
+test('preflight does not infer subscription counts from external authorization history without exposing transactions',async()=>{
     const f=fixture();f.state.rows=[];f.state.transactions.set(42,[authorization('private-transaction-one'),authorization('private-transaction-two')]);
     Object.assign(f.state.live[0],{card_number:'5556597912341234',cvv:'private-cvv',merchant:'private-merchant'});
     const result=await f.service.preflight({stage:'cards',plan_type:'plus'});
     assert.equal(result.passed,true);assert.equal(result.result.selection.action,'pay');
-    const card=result.result.selection.cards[0];assert.equal(card.card_id,42);assert.equal(card.authorization_count,2);assert.equal(card.authorization_limit,4);
-    assert.ok(Date.parse(card.authorizations_checked_at));assert.deepEqual(f.state.rows,[]);assert.deepEqual(f.writes,[]);
+    const card=result.result.selection.cards[0];assert.equal(card.card_id,42);assert.equal(card.successful_order_count,0);assert.equal(card.successful_order_limit,4);
+    assert.equal(card.counting_basis,'confirmed_subscription_orders');assert.deepEqual(f.state.rows,[]);assert.deepEqual(f.writes,[]);
     const output=JSON.stringify([result,f.events]);
     for(const secret of ['5556597912341234','private-cvv','private-merchant','private-transaction'])assert.ok(!output.includes(secret));
 });
-test('preflight follows the default four-authorization boundary using all transaction pages',async()=>{
+test('preflight follows the default four-order boundary using confirmed platform order counts',async()=>{
     for(const [count,action] of [[0,'pay'],[3,'pay'],[4,'unavailable'],[102,'unavailable']]) {
-        const f=fixture();f.state.transactions.set(42,Array.from({length:count},(_,i)=>authorization('live-'+i)));
+        const f=fixture();f.state.rows[0].successful_order_count=count;
         const before=structuredClone(f.state.rows), result=await f.service.preflight({stage:'cards',plan_type:'plus'});
-        assert.equal(result.passed,count<4);assert.equal(result.result.selection.action,action);assert.equal(result.result.selection.cards[0].authorization_count,count);
+        assert.equal(result.passed,count<4);assert.equal(result.result.selection.action,action);assert.equal(result.result.selection.cards[0].successful_order_count,count);
         assert.deepEqual(f.state.rows,before);assert.deepEqual(f.writes,[]);
-        if(count===102)assert.deepEqual(f.calls.filter(([operation])=>operation==='cardTransaction').map(call=>call[2].page),[1,2]);
+        assert.equal(f.calls.filter(([operation])=>operation==='cardTransaction').length,0);
     }
 });
-test('persisted authorization IDs survive settlement conversion and merge new authorizations once',async()=>{
-    const f=fixture();f.state.rows[0].authorization_count=6;
+test('authorization changes do not alter the subscription quota',async()=>{
+    const f=fixture();f.state.rows[0].successful_order_count=6;
     f.state.transactions.set(42,[{...authorization('saved-42-0'),transaction_type:'Settlement'},authorization('saved-42-1'),authorization('new-authorization')]);
     const result=await f.service.preflight({stage:'cards',plan_type:'plus'});
-    assert.equal(result.result.selection.cards[0].authorization_count,7);assert.equal(result.result.selection.action,'unavailable');
-    assert.equal(f.state.rows[0].authorization_count,6);assert.deepEqual(f.writes,[]);
+    assert.equal(result.result.selection.cards[0].successful_order_count,6);assert.equal(result.result.selection.action,'unavailable');
+    assert.equal(f.state.rows[0].successful_order_count,6);assert.deepEqual(f.writes,[]);
 });
 test('preflight reads busy but not deleted cards without leaking active job identifiers',async()=>{
     const f=fixture();f.state.live.push({...f.state.live[0],card_id:43},{...f.state.live[0],card_id:44,provider_status:'DELETED'});
-    f.state.rows.push({card_id:43,authorization_count:3,active_job:'private-active-job'},{card_id:44,authorization_count:7});f.state.rows[0].authorization_count=7;
+    f.state.rows.push({card_id:43,successful_order_count:3,active_job:'private-active-job'},{card_id:44,successful_order_count:7});f.state.rows[0].successful_order_count=7;
     const result=await f.service.preflight({stage:'cards',plan_type:'plus'});
     assert.equal(result.passed,false);assert.equal(result.result.selection.action,'wait');
-    assert.deepEqual(result.result.selection.cards.map(card=>[card.card_id,card.authorization_count,card.busy]),[[42,7,false],[43,3,true],[44,null,false]]);
-    assert.deepEqual(f.calls.filter(([op])=>op==='cardTransaction').map(call=>call[2].card_id),[42,43]);
+    assert.deepEqual(result.result.selection.cards.map(card=>[card.card_id,card.successful_order_count,card.busy]),[[42,7,false],[43,3,true],[44,7,false]]);
+    assert.deepEqual(f.calls.filter(([op])=>op==='cardTransaction').map(call=>call[2].card_id),[]);
     assert.ok(!JSON.stringify([result,f.events]).includes('private-active-job'));assert.deepEqual(f.writes,[]);
 });
-test('database count and authorization ledger failures never imply zero usage',async()=>{
-    for(const type of ['countReadError','ledgerError']) {
+test('database count read failures never imply zero usage',async()=>{
+    for(const type of ['countReadError']) {
         const f=fixture();f.state[type]=Error('private-db-connection-info');const before=structuredClone(f.state.rows);
         const result=await f.service.preflight({stage:'full',plan_type:'plus',session});
         assert.equal(result.passed,false);assert.equal(result.ready,false);
@@ -313,39 +313,25 @@ test('database count and authorization ledger failures never imply zero usage',a
         assert.ok(!f.calls.some(([operation])=>operation==='cardDetail'));assert.deepEqual(f.state.rows,before);assert.deepEqual(f.writes,[]);
     }
 });
-test('one unreadable card halts pool preview even when another card could pay',async()=>{
-    const f=fixture();f.state.live.push({...f.state.live[0],card_id:43});f.state.rows.push({card_id:43,authorization_count:0});
-    f.state.transactions.set(42,Array.from({length:5},(_,i)=>authorization('live-'+i)));f.state.transactionError=43;
-    const result=await f.service.preflight({stage:'cards',plan_type:'plus'});
-    assert.equal(result.passed,false);assert.equal(result.result.selection.action,'wait');assert.equal(result.result.selection.card_id,null);
-    assert.deepEqual(result.result.selection.cards.map(card=>card.authorization_count),[5,null]);
-    assert.deepEqual(result.result.selection.waiting,[{card_id:43,reason:'authorizations_unconfirmed'}]);
-    assert.ok(!f.calls.some(([operation])=>operation==='cardDetail'));assert.deepEqual(f.writes,[]);
+test('authorization failures do not prevent readonly selection of an otherwise eligible card',async()=>{
+const f=fixture();f.state.transactionError=42;const r=await f.service.preflight({stage:'cards',plan_type:'plus'});assert.equal(r.passed,true);assert.equal(r.result.selection.card_id,42);assert.deepEqual(f.writes,[]);assert.ok(!f.calls.some(([op])=>op==='cardTransaction'));
 });
-test('unknown authorization statuses and inconsistent saved counts stop preflight',async()=>{
-    const unknown=fixture();unknown.state.transactions.set(42,[{...authorization('unknown'),status:'unrecognized'}]);
-    assert.equal((await unknown.service.preflight({stage:'cards',plan_type:'plus'})).passed,false);
-    const corrupt=fixture();corrupt.state.rows[0].authorization_count=2;corrupt.state.savedIds.set(42,['only-one']);
-    assert.equal((await corrupt.service.preflight({stage:'cards',plan_type:'plus'})).passed,false);assert.deepEqual(corrupt.writes,[]);
+
+test('invalid subscription counts stop preflight without making financial calls',async()=>{
+for(const count of [null,-1,1.5,NaN]){const f=fixture();f.state.rows[0].successful_order_count=count;const r=await f.service.preflight({stage:'cards',plan_type:'plus'});assert.equal(r.passed,false);assert.deepEqual(f.writes,[]);}
 });
+
 test('authorization IDs added after the card snapshot do not cause a false count mismatch',async()=>{
-    const f=fixture();f.state.rows[0].authorization_count=0;
+    const f=fixture();f.state.rows[0].successful_order_count=0;
     f.state.savedIds.set(42,['authorization-added-after-snapshot']);
     f.state.transactions.set(42,[]);
     const result=await f.service.preflight({stage:'cards',plan_type:'plus'});
     assert.equal(result.passed,true);assert.equal(result.result.selection.action,'pay');
-    assert.equal(result.result.selection.cards[0].authorization_count,1);
-    assert.equal(f.state.rows[0].authorization_count,0);assert.deepEqual(f.writes,[]);
+    assert.equal(result.result.selection.cards[0].successful_order_count,0);
+    assert.equal(f.state.rows[0].successful_order_count,0);assert.deepEqual(f.writes,[]);
 });
-test('an idle card awaiting authorization stays excluded without automatic replacement',async()=>{
-    const f=fixture();f.state.rows[0].authorization_pending_count=1;
-    const waiting=await f.service.preflight({stage:'cards',plan_type:'plus'});
-    assert.equal(waiting.passed,false);assert.equal(waiting.result.selection.action,'unavailable');assert.equal(waiting.result.selection.cards[0].authorization_pending,true);
-    assert.equal(waiting.result.selection.card_id,null);assert.equal(waiting.result.selection.skipped[0].reason,'authorization_pending');
-    f.state.transactions.set(42,[authorization('new')]);
-    const ready=await f.service.preflight({stage:'cards',plan_type:'plus'});
-    assert.equal(ready.passed,true);assert.equal(ready.result.selection.action,'pay');assert.equal(ready.result.selection.cards[0].authorization_pending,false);
-    assert.equal(f.state.rows[0].authorization_count,0);assert.deepEqual(f.writes,[]);
+test('legacy authorization pending flags do not block the confirmed subscription quota',async()=>{
+const f=fixture();f.state.rows[0].authorization_pending_count=99;const r=await f.service.preflight({stage:'cards',plan_type:'plus'});assert.equal(r.passed,true);assert.equal(r.result.selection.card_id,42);assert.equal(r.result.selection.cards[0].successful_order_count,0);assert.deepEqual(f.writes,[]);
 });
 
 test('preflight ignores historical cooldown once authorization is synchronized',async()=>{

@@ -42,12 +42,12 @@ async function setup(counts=[0,0,0,0,0],overrides={}) {
 }
 test('only confirmed authorization counts below the default four are eligible',()=>{
     assert.equal(policy.DEFAULT_MAX_AUTHORIZATIONS,4);
-    assert.equal(policy.eligible({authorization_count:3}),true);
-    for(const authorization_count of [4,7,8,null,undefined,-1,1.5,NaN,Infinity])
-        assert.equal(policy.eligible({authorization_count}),false);
-    assert.equal(policy.eligible({authorization_count:0,retirement_key:'pending'}),false);
-    assert.equal(policy.eligible({authorization_count:6,authorization_pending_count:7}),false);
-    assert.equal(policy.eligible({authorization_count:2,authorization_pending_count:2}),true);
+    assert.equal(policy.eligible({successful_order_count:3}),true);
+    for(const successful_order_count of [4,7,8,null,undefined,-1,1.5,NaN,Infinity])
+        assert.equal(policy.eligible({successful_order_count}),false);
+    assert.equal(policy.eligible({successful_order_count:0,retirement_key:'pending'}),false);
+    assert.equal(policy.eligible({successful_order_count:6,authorization_pending_count:7}),false);
+    assert.equal(policy.eligible({successful_order_count:2,authorization_pending_count:2}),true);
 });
 
 test('the authorization limit defaults to four and accepts any positive safe integer',()=>{
@@ -56,10 +56,10 @@ test('the authorization limit defaults to four and accepts any positive safe int
     assert.equal(policy.validateLimit(Number.MAX_SAFE_INTEGER),Number.MAX_SAFE_INTEGER);
     for(const value of [0,-1,1.5,NaN,Infinity,Number.MAX_SAFE_INTEGER+1,'',null,true,{},[]])
         assert.throws(()=>policy.validateLimit(value),/正安全整数/);
-    assert.equal(policy.eligible({authorization_count:8},9),true);
-    assert.equal(policy.eligible({authorization_count:8},8),false);
-    assert.equal(policy.eligible({authorization_count:8,authorization_pending_count:9},20),false);
-    assert.equal(policy.eligible({authorization_count:0,retirement_key:'original-delete'},20),false);
+    assert.equal(policy.eligible({successful_order_count:8},9),true);
+    assert.equal(policy.eligible({successful_order_count:8},8),false);
+    assert.equal(policy.eligible({successful_order_count:8,authorization_pending_count:9},20),true);
+    assert.equal(policy.eligible({successful_order_count:0,retirement_key:'original-delete'},20),false);
 });
 
 test('configured authorization limits govern selection and transaction reservation without a fixed seven-use cap',async()=>{
@@ -108,7 +108,7 @@ test('a synchronized authorization permits immediate reuse using the live balanc
     f.ledger.get(42).push(authorization('new'));
     // The platform still reports the pre-payment card balance.
     const second=await f.claim();assert.equal(await f.service.allocate(cfg,second.jobKey,'plus'),42);
-    assert.equal(f.db.cards[0].authorization_count,1);
+    assert.equal(f.db.cards[0].successful_order_count,1);
     assert.equal(f.remote[0].balance,100);
     assert.equal(f.calls.filter(c=>['rechargeCard','createCard'].includes(c.operation)).length,0);
 });
@@ -122,27 +122,16 @@ test('historical future cooldown timestamps do not block live card selection',as
     assert.equal(f.calls.slice(before).filter(c=>['rechargeCard','createCard'].includes(c.operation)).length,0);
 });
 
-test('delayed authorization keeps the old card ineligible without automatically opening a replacement',async()=>{
-    const f=await setup([0]),first=await f.claim();
-    assert.equal(await f.service.allocate(cfg,first.jobKey,'plus'),42);await f.settle(first,'success');
-    const next=await f.claim();await assert.rejects(f.service.allocate(cfg,next.jobKey,'plus'),/自动开卡已禁用/);
-    f.advance(300000);await assert.rejects(f.service.allocate(cfg,next.jobKey,'plus'),/自动开卡已禁用/);
-    assert.equal(f.db.cards[0].authorization_pending_count,1);assert.equal(policy.eligible(f.db.cards[0]),false);
-    assert.equal(f.calls.filter(call=>['createCard','rechargeCard','deleteCard'].includes(call.operation)).length,0);
+test('platform-confirmed success permits immediate reuse without authorization synchronization',async()=>{
+ const f=await setup([0]),first=await f.claim();await f.service.allocate(cfg,first.jobKey,'plus');await f.settle(first,'success');
+ f.db.cards[0].authorization_pending_count=99;const next=await f.claim();assert.equal(await f.service.allocate(cfg,next.jobKey,'plus'),42);
+ assert.equal(f.db.cards[0].successful_order_count,1);assert.equal(f.calls.filter(c=>c.operation==='cardTransaction').length,0);
 });
 
-test('an existing queued request continues waiting for authorization sync but fresh requests cannot bypass it',async()=>{
-    const {CardBusyError}=require('../orbitcard-card-policy');
-    const f=await setup([0]),first=await f.claim(),second=await f.claim();
-    assert.equal(await f.service.allocate(cfg,first.jobKey,'plus'),42);
-    await assert.rejects(f.service.allocate(cfg,second.jobKey,'plus'),CardBusyError);
-    await f.settle(first,'success');
-    await assert.rejects(f.service.allocate(cfg,second.jobKey,'plus'),error=>!(error instanceof CardBusyError));
-    await assert.rejects(f.service.allocate(cfg,second.jobKey,'plus',{waitForAvailability:true}),CardBusyError);
-    assert.equal(f.db.cards[0].active_job,null);
-    f.ledger.get(42).push(authorization('prior-success'));
-    assert.equal(await f.service.allocate(cfg,second.jobKey,'plus',{waitForAvailability:true}),42);
-    assert.equal(f.calls.filter(call=>['createCard','rechargeCard'].includes(call.operation)).length,0);
+test('queued requests continue after original settlement without waiting for authorizations',async()=>{
+ const f=await setup([0]),first=await f.claim(),next=await f.claim();await f.service.allocate(cfg,first.jobKey,'plus');
+ await assert.rejects(f.service.allocate(cfg,next.jobKey,'plus'),require('../orbitcard-card-policy').CardBusyError);
+ await f.settle(first,'success');assert.equal(await f.service.allocate(cfg,next.jobKey,'plus',{waitForAvailability:true}),42);assert.equal(f.db.cards[0].successful_order_count,1);
 });
 
 test('a busy card remains a waiting candidate alongside another card with unknown provider status',async()=>{
@@ -155,12 +144,12 @@ test('a busy card remains a waiting candidate alongside another card with unknow
     assert.equal(f.calls.filter(call=>['createCard','rechargeCard'].includes(call.operation)).length,0);
 });
 
-test('a settled card waiting for authorization never causes opening while another funded card is usable',async()=>{
+test('a settled card with delayed authorization never causes opening while another funded card is usable',async()=>{
     const f=await setup([0,0]),first=await f.claim();
     assert.equal(await f.service.allocate(cfg,first.jobKey,'plus'),42);await f.settle(first,'success');f.advance(300000);
-    const next=await f.claim();assert.equal(await f.service.allocate(cfg,next.jobKey,'plus'),43);
+    const next=await f.claim();assert.equal(await f.service.allocate(cfg,next.jobKey,'plus'),42);
     assert.equal(f.calls.filter(call=>['createCard','rechargeCard'].includes(call.operation)).length,0);
-    assert.equal(f.db.cards[0].authorization_pending_count,1);
+    assert.equal(f.db.cards[0].successful_order_count,1);
 });
 
 test('frozen idle cards with pending authorizations cannot cause automatic opening',async()=>{
@@ -185,23 +174,23 @@ test('unresolved owners and original ownership still prevent replacement of a fr
         await f.store.cardMethods(f.base).reserveCard(42,task.jobKey,'plus');
         if(owner==='other') f.db.cards[0].active_job='other-job';
         f.db.cards[0].authorization_pending_count=1;
-        await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),owner==='other'?/正在使用/:/原订单已预占/);
+        await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),owner==='other'?/正在使用/:/已预占/);
         assert.equal(f.calls.filter(call=>['createCard','rechargeCard','deleteCard'].includes(call.operation)).length,0);
     }
 });
 
-test('delayed authorization cannot bypass another unresolved opening',async()=>{
+test('an unrelated issue does not block an available existing card',async()=>{
     const f=await setup([0]);f.db.cards[0].authorization_pending_count=1;
     f.db.issues.push({issue_key:'unresolved-opening',scope:f.scope,job_key:'other-job',plan_type:'pro100',state:'unknown'});
     const task=await f.claim();
-    await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/自动开卡已禁用/);
+    assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),42);
     assert.equal(f.calls.filter(call=>['createCard','rechargeCard'].includes(call.operation)).length,0);
 });
 
 test('unconfirmed counts and unknown platform status continue to block an opening',()=>{
     const {decideCards}=require('../orbitcard-payment-decision');
-    for(const [status,count,reason] of [['ACTIVE',null,'authorizations_unconfirmed'],['UNRECOGNIZED',0,'status_unconfirmed']]) {
-        const decision=decideCards({saved:[{card_id:42,authorization_count:count,authorization_pending_count:1}],
+    for(const [status,count,reason] of [['ACTIVE',null,'order_count_unconfirmed'],['UNRECOGNIZED',0,'status_unconfirmed']]) {
+        const decision=decideCards({saved:[{card_id:42,successful_order_count:count,authorization_pending_count:1}],
             listed:[{card_id:42,provider_status:status}],detailed:[],products:[],jobKey:'new-job',planType:'plus',priceFor:()=>20});
         assert.equal(decision.action,'wait');assert.equal(decision.waiting[0].reason,reason);
     }
@@ -275,58 +264,22 @@ test('seven successful authorizations retire without replenishment; six authoriz
     assert.equal(f.calls.filter(c=>c.operation==='deleteCard').length,1);
     assert.equal(f.calls.filter(c=>c.operation==='createCard').length,0);
     assert.equal(f.remote.filter(c=>c.status!=='DELETED').length,4);
-    assert.equal(f.db.cards.find(c=>c.card_id===43).authorization_count,6);
+    assert.equal(f.db.cards.find(c=>c.card_id===43).successful_order_count,6);
     await f.service.synchronize(cfg);
     assert.equal(f.calls.filter(c=>c.operation==='createCard').length,0);
 });
 
-test('seven successful authorizations without amounts retire once without opening a replacement',async()=>{
-    const f=await setup();
-    const withoutAmount=id=>({transaction_id:`external-${id}`,card_id:42,transaction_type:'Authorization',status:'SUCCESS'});
-    f.ledger.set(42,Array.from({length:6},(_,i)=>withoutAmount(i)));
-    await f.service.synchronize(cfg);
-    const oldCard=f.db.cards.find(card=>card.card_id===42);
-    assert.equal(oldCard.authorization_count,6);
-    assert.equal(oldCard.provider_status,'ACTIVE');
-    assert.equal(policy.eligible(oldCard,7),true);
-    assert.equal(f.calls.filter(c=>['deleteCard','createCard'].includes(c.operation)).length,0);
-    f.ledger.get(42).push(withoutAmount(6));
-    await f.service.synchronize(cfg);
-    assert.equal(oldCard.authorization_count,7);
-    assert.equal(oldCard.provider_status,'DELETED');
-    assert.equal(policy.eligible(oldCard),false);
-    assert.deepEqual(f.calls.filter(c=>['deleteCard','createCard'].includes(c.operation)).map(c=>c.operation),['deleteCard']);
-    assert.deepEqual(f.calls.filter(c=>c.operation==='deleteCard').map(c=>c.body.card_id),[42]);
-    assert.equal(f.remote.filter(card=>card.status!=='DELETED').length,4);
-    assert.equal(f.db.cards.find(card=>card.card_id===100),undefined);
-    await f.service.synchronize(cfg);
-    assert.equal(oldCard.authorization_count,7);
-    assert.equal(f.calls.filter(c=>c.operation==='deleteCard').length,1);
-    assert.equal(f.calls.filter(c=>c.operation==='createCard').length,0);
-    assert.equal(f.remote.filter(card=>card.status!=='DELETED').length,4);
+test('authorization history does not consume the successful subscription quota',async()=>{
+const f=await setup([0]);f.ledger.set(42,Array.from({length:8},(_,i)=>authorization(i)));await f.service.transactions(cfg,42);await f.service.synchronize(cfg);
+ assert.equal(f.db.cards[0].authorization_count,8);assert.equal(f.db.cards[0].successful_order_count,0);assert.equal(policy.eligible(f.db.cards[0]),true);assert.equal(f.calls.filter(c=>c.operation==='deleteCard').length,0);
 });
 
-test('the seventh success waits for its authorization and retires only after the provider confirms seven',async()=>{
-    const f=await setup([6,0,0,0,0]);
-    const task=await f.claim();assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),42);
-    await Promise.all([f.settle(task,'success'),f.settle(task,'success')]);
-    assert.equal(f.db.cards[0].authorization_count,6);
-    assert.equal(f.db.cards[0].authorization_pending_count,7);
-    const next=await f.claim('pro100');
-    assert.equal(await f.store.cardMethods(f.base).reserveCard(42,next.jobKey,'pro100'),null);
-    await f.service.synchronize(cfg);
-    assert.equal(f.calls.filter(call=>call.operation==='deleteCard').length,0);
-    assert.equal(f.db.cards[0].authorization_count,6);
-    f.ledger.get(42).push(authorization(6));
-    await f.service.synchronize(cfg);
-    assert.equal(f.db.cards[0].provider_status,'DELETED');
-    assert.equal(f.db.cards.find(card=>card.card_id===100),undefined);
-    assert.equal(f.remote.filter(card=>card.status!=='DELETED').length,4);
-    await f.service.synchronize(cfg);
-    assert.equal(f.calls.filter(call=>call.operation==='deleteCard').length,1);
-    assert.equal(f.calls.filter(call=>call.operation==='createCard').length,0);
-    assert.ok(f.calls.some(call=>call.operation==='cardTransaction'));
+test('the seventh confirmed subscription retires once without requiring authorization history',async()=>{
+const f=await setup([6]);const task=await f.claim();await f.service.allocate(cfg,task.jobKey,'plus');await Promise.all([f.settle(task,'success'),f.settle(task,'success')]);
+ assert.equal(f.db.cards[0].successful_order_count,7);assert.equal(f.db.cards[0].authorization_count,6);await f.service.synchronize(cfg);await f.service.synchronize(cfg);
+ assert.equal(f.calls.filter(c=>c.operation==='deleteCard').length,1);assert.equal(f.calls.filter(c=>c.operation==='cardTransaction').length,0);
 });
+
 test('empty and sparse pools never open or fund cards across concurrent background synchronizations',async()=>{
     for(const count of [0,1,4]) {
         const f=await setup(Array(count).fill(0));
@@ -430,34 +383,31 @@ test('missing card after unknown delete requires confirmed DELETED detail withou
     f.remote[0].status='DELETED';await f.service.synchronize(cfg);
     assert.equal(f.calls.filter(c=>c.operation==='createCard').length,0);
 });
-test('transaction API failures stop all lifecycle writes without erasing confirmed counts',async()=>{
-    const f=await setup([7,0,0,0,0],{cardTransaction:async()=>{throw Error('transactions unavailable');}});
-    await assert.rejects(f.service.synchronize(cfg));
-    assert.equal(f.db.cards[0].authorization_count,7);
-    assert.equal(f.calls.filter(c=>c.operation==='cardTransaction').length,1);
-    assert.equal(f.calls.filter(c=>['createCard','deleteCard'].includes(c.operation)).length,0);
-    assert.equal(f.remote.filter(c=>c.status!=='DELETED').length,5);
+test('transaction API failures do not block card metadata or confirmed-order maintenance',async()=>{
+const f=await setup([7,0],{cardTransaction:async()=>{throw Error('unavailable');}});await f.service.synchronize(cfg);
+ assert.equal(f.db.cards[0].successful_order_count,7);assert.equal(f.calls.filter(c=>c.operation==='deleteCard').length,1);assert.equal(f.calls.filter(c=>c.operation==='cardTransaction').length,0);
 });
-test('unknown authorization status prevents lifecycle writes and never assumes zero',async()=>{
-    const f=await setup([0,0,0,0]);f.db.cards[0].authorization_count=null;
+
+test('unknown order count prevents lifecycle writes and never assumes zero',async()=>{
+    const f=await setup([0,0,0,0]);f.db.cards[0].successful_order_count=null;
     f.ledger.set(42,[{...authorization(1),status:17}]);
-    await assert.rejects(f.service.synchronize(cfg),/未知消费授权状态/);
-    assert.equal(f.db.cards[0].authorization_count,null);
+    await assert.rejects(f.service.synchronize(cfg),/成功会员订单次数尚未确认/);
+    assert.equal(f.db.cards[0].successful_order_count,null);
     assert.equal(f.calls.filter(c=>['createCard','deleteCard'].includes(c.operation)).length,0);
 });
 test('viewing transactions imports external successful authorizations without double counting their settlement',async()=>{
     const f=await setup([0]);
     f.ledger.set(42,[authorization(1),settlement(1)]);
     const result=await f.service.transactions(cfg,42);
-    assert.equal(result.authorization_count,1);assert.equal(result.authorization_limit,7);
-    assert.equal(result.transactions.length,2);assert.equal(f.db.cards[0].authorization_count,1);
+    assert.equal(result.authorization_count,1);assert.equal(result.successful_order_limit,7);
+    assert.equal(result.transactions.length,2);assert.equal(f.db.cards[0].successful_order_count,0);
     await f.service.transactions(cfg,42);
-    assert.equal(f.db.cards[0].authorization_count,1);
+    assert.equal(f.db.cards[0].successful_order_count,0);
     assert.equal(f.calls.filter(c=>['createCard','deleteCard'].includes(c.operation)).length,0);
 });
 test('disabled configuration imports authorization counts without opening or deleting',async()=>{
     const f=await setup([7]);await f.service.synchronize({...cfg,enabled:false});
-    assert.equal(f.db.cards[0].authorization_count,7);
+    assert.equal(f.db.cards[0].successful_order_count,7);
     assert.equal(f.calls.filter(c=>['createCard','deleteCard'].includes(c.operation)).length,0);
 });
 test('synchronization keeps more than five cards and retires only exhausted cards',async()=>{
@@ -469,12 +419,12 @@ test('synchronization keeps more than five cards and retires only exhausted card
     assert.equal(f.calls.filter(c=>['freezeCard','createCard'].includes(c.operation)).length,0);
 });
 
-test('allocation refreshes authorizations and ignores obsolete activation counters',async()=>{
+test('allocation uses verified order counts and ignores obsolete activation counters',async()=>{
     const f=await setup([6,0,0,0,0]);f.db.cards[0].activation_count=99;
     const task=await f.claim();assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),42);
-    assert.equal(f.db.cards[0].authorization_count,6);assert.equal(f.db.cards[0].active_job,task.jobKey);
+    assert.equal(f.db.cards[0].successful_order_count,6);assert.equal(f.db.cards[0].active_job,task.jobKey);
     assert.equal(f.calls.filter(c=>c.operation==='createCard').length,0);
-    assert.ok(f.calls.some(call=>call.operation==='cardTransaction'));
+    assert.ok(!f.calls.some(call=>call.operation==='cardTransaction'));
 });
 
 test('settled authorizations remain counted and later distinct authorizations still increase the total',async()=>{

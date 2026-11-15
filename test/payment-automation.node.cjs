@@ -71,7 +71,7 @@ test('direct failure settlement after handoff retains CDK ownership while succes
         assert.ok(f.db.cdks[0].used_at);
         assert.equal(f.db.cards[0].active_job, null);
         assert.equal(f.db.cards[0].authorization_count, 0);
-        assert.equal(f.db.cards[0].authorization_pending_count, state === 'success' ? 1 : null);
+        assert.equal(f.db.cards[0].successful_order_count, state === 'success' ? 1 : 0);
         assert.equal(f.db.uses[0].state, state === 'success' ? 'consumed' : 'released');
     }
 });

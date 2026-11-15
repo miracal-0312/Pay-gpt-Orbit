@@ -38,7 +38,7 @@ function fixture({ unknown = false, pendingAllocation = false, now = Date.now, q
         listManualOrders: async () => [...orders.values()],
         listRecoverableManualOrders: async () => [...orders.values()].filter(x => ['submitting','pending','manual'].includes(x.state)),
         noteManualQueryAttempt: async () => {},
-        cardMethods: () => ({ listCards: async () => [{ card_id: 12, authorization_count: 0,
+        cardMethods: () => ({ listCards: async () => [{ card_id: 12, successful_order_count: 0, authorization_count: 0,
             active_job: null }] }),
         withCardAllocationLock: async (_url, action) => action({ syncCards: async () => {} }),
         prepareManualOrder: async input => {
@@ -549,14 +549,16 @@ test('pending funding hands the administrator order to reconciliation and repeat
 function storeFixture({ enqueueRedemption } = {}) {
     let clock = Date.parse('2026-11-10T08:00:00Z');
     const scope = cardScope('https://orbitcard.cc');
-    const db = { orders: [], fundings: [], issues: [], cdks: [{ cdk_code: 'KC-READY', is_active: 1, type: '自助',
-        plan_type: 'plus', used_at: null }], card: { scope, card_id: 12, authorization_count: 0,
+    const db = { successfulOrders: [], orders: [], fundings: [], issues: [], cdks: [{ cdk_code: 'KC-READY', is_active: 1, type: '自助',
+        plan_type: 'plus', used_at: null }], card: { scope, card_id: 12, successful_order_count: 0, authorization_count: 0,
         active_job: null, provider_status: 'ACTIVE', currency: 'USD', reuse_after_ms: 0 } };
+    const orderUsageDb = require('./helpers/order-usage-db.cjs')(db);
     const clean = sql => sql.replace(/\s+/g, ' ').trim();
     let inTransaction = false;
     const runQuery = async (sql, p = [], options) => {
         if (inTransaction) assert.equal(options?.connection?.transaction, true, 'transactional reads must retain their connection');
         const q = clean(sql);
+        const usageResult = orderUsageDb.query(q,p); if (usageResult !== undefined) return usageResult;
         if (q.startsWith('SELECT * FROM orbitcard_admin_orders WHERE request_id')) return db.orders.filter(o => o.request_id === p[0]
             && (!q.includes("state = 'prepared'") || o.state === 'prepared')).map(o => structuredClone(o));
         if (q.startsWith('SELECT request_id FROM orbitcard_admin_orders WHERE scope')) return db.orders.filter(o => o.scope === p[0]
@@ -576,6 +578,7 @@ function storeFixture({ enqueueRedemption } = {}) {
     };
     const runExecute = async (sql, p = []) => {
         const q = clean(sql);
+        const usageResult = orderUsageDb.execute(q,p); if (usageResult !== undefined) return usageResult;
         if (q.startsWith('INSERT INTO orbitcard_admin_orders') && q.includes("0,?,'preparing'")) db.orders.push({
             request_id: p[0], client_order_no: p[1], scope: p[2], api_key_hash: p[3],
             mode: p[4], cdk_code: p[5], plan_type: p[6], plan_name: p[7],
@@ -611,7 +614,7 @@ function storeFixture({ enqueueRedemption } = {}) {
         }
         else if (q.startsWith('UPDATE orbitcard_managed_cards SET authorization_pending_count=')) {
             if (db.card.scope !== p[1] || db.card.card_id !== p[2]) return { affectedRows: 0 };
-            db.card.authorization_pending_count = Math.max(db.card.authorization_pending_count || 0, p[0]);
+            db.card.authorization_pending_count = Math.max(db.card.successful_order_count, p[0]);
         } else if (q.startsWith('UPDATE orbitcard_managed_cards SET active_job = ?')) {
             db.card.active_job = p[0];
         } else if (q.startsWith("UPDATE orbitcard_admin_orders SET state = 'submitting'")) {
@@ -828,7 +831,7 @@ test('waiting progress checks the original identity and a prepared waiting timeo
 
 test('administrator card reservation rechecks its supplied authorization limit within the transaction',async()=>{
     const {db,store}=storeFixture(),input=manualInput(id);
-    db.card.authorization_count=8;
+    db.card.successful_order_count=8;
     const order=await store.prepareManualOrder(input);
     assert.equal(await store.reserveManualCard(id,12,order.client_order_no,input.planType),null);
     assert.equal(await store.reserveManualCard(id,12,order.client_order_no,input.planType,8),null);
@@ -836,7 +839,7 @@ test('administrator card reservation rechecks its supplied authorization limit w
     assert.equal(db.orders[0].authorization_baseline,8);
     await store.markManualPrepared(id,order.client_order_no,12);await store.claimManualSubmission(id);
     await store.settleManualOrder(id,{state:'success',message:'confirmed'});
-    assert.equal(db.orders[0].state,'success');assert.equal(db.card.authorization_pending_count,9);
+    assert.equal(db.orders[0].state,'success');assert.equal(db.card.successful_order_count,8);
 });
 
 test('durable administrator retry keeps exactly three different cards and rejects duplicate claims and stale results', async () => {
@@ -962,7 +965,7 @@ test('manual fulfillment emits a receipt atomically, while test orders and failu
         await store.settleManualOrder(id, { state: 'success', message: 'success' });
         await store.settleManualOrder(id, { state: 'success', message: 'success' });
         assert.equal(db.card.authorization_count, 0);
-        assert.equal(db.card.authorization_pending_count, 1);
+        assert.equal(db.card.successful_order_count, 0);
         assert.equal(receipts.length, mode === 'fulfillment' ? 1 : 0);
     }
     const { store } = storeFixture({ enqueueRedemption: async () => { throw Error('failed order must not emit'); } });
@@ -994,11 +997,11 @@ test('manual CDK and card reservation settle atomically on verified success or f
     assert.equal(db.cdks[0].used_at, 'reserved');
     assert.equal(db.card.active_job, null);
     assert.equal(db.card.authorization_count, 3);
-    assert.equal(db.card.authorization_pending_count, 4);
+    assert.equal(db.card.successful_order_count, 0);
     await store.settleManualOrder(next, { state: 'failed', message: 'stale failure' });
     assert.equal(db.cdks[0].used_at, 'reserved');
     assert.equal(db.card.authorization_count, 3);
-    assert.equal(db.card.authorization_pending_count, 4);
+    assert.equal(db.card.successful_order_count, 0);
 });
 
 test('only an explicitly rejected unaccepted subscription releases the CDK without payment',async()=>{
@@ -1056,7 +1059,7 @@ test('manual original-order refresh settles terminal upstream snapshots and rele
         assert.equal(db.card.active_job, null);
         assert.equal(db.card.balance, 91);
         assert.equal(db.card.authorization_count, 0);
-        assert.equal(db.card.authorization_pending_count || 0, status === 'succeeded' ? 1 : 0);
+        assert.equal(db.card.successful_order_count, status === 'succeeded' ? 1 : 0);
         assert.equal(db.card.reuse_after_ms, 0);
         assert.equal(db.cdks[0].used_at, mode === 'test' ? null : 'reserved');
         assert.equal(events.find(event => event.event === 'subscription_result_checked').data.state,
@@ -1096,33 +1099,13 @@ test('manual snapshots with missing provenance, mismatched ownership or query er
     }
 });
 
-test('administrator success waits for its authorization; seven observed authorizations stop further allocations', async () => {
-    const { db, store, advance } = storeFixture();
-    for (let count = 0; count < 7; count++) {
-        const requestId = `00000000-0000-4000-8000-${String(count).padStart(12, '0')}`;
-        const input = manualInput(requestId, { mode: 'test', cdkCode: null });
-        await prepareOrder(store, input);
-        await store.claimManualSubmission(requestId);
-        await store.settleManualOrder(requestId, { state: 'pending', message: 'pending' });
-        assert.equal(db.card.authorization_count, count);
-        await store.settleManualOrder(requestId, { state: 'success', message: 'confirmed success' });
-        await store.settleManualOrder(requestId, { state: 'success', message: 'duplicate query' });
-        await store.settleManualOrder(requestId, { state: 'failed', message: 'stale failure' });
-        assert.equal(db.card.authorization_count, count);
-        assert.equal(db.card.authorization_pending_count, count + 1);
-        assert.equal(db.card.active_job, null);
-        const waitingId = `10000000-0000-4000-8000-${String(count).padStart(12, '0')}`;
-        const waiting = await store.prepareManualOrder(manualInput(waitingId, { mode: 'test', cdkCode: null }));
-        assert.equal(await store.reserveManualCard(waitingId,12,waiting.client_order_no,'gpt-plus'),null);
-        await store.failManualPreparation(waitingId,waiting.client_order_no,'still awaiting authorization');
-        // This fixture stands in for a successful transaction-ID synchronization.
-        db.card.authorization_count = count + 1;
-    }
-    const eighth = manualInput(id, { mode: 'test', cdkCode: null });
-    const order = await store.prepareManualOrder(eighth);
-    assert.equal(await store.reserveManualCard(id, 12, order.client_order_no, eighth.planType), null);
-    assert.equal(db.card.authorization_count, 7);
-    assert.equal(db.card.active_job, null);
+test('administrator platform-confirmed orders count once and stop allocations at seven',async()=>{
+const {db,store}=storeFixture();for(let count=0;count<7;count++){
+ const requestId='00000000-0000-4000-8000-'+String(count).padStart(12,'0');await prepareOrder(store,manualInput(requestId,{mode:'test',cdkCode:null}));await store.claimManualSubmission(requestId);
+ const order=await store.getManualOrder(requestId),snapshot={task_no:'sub-'+requestId,client_order_no:order.client_order_no,card_id:12,status:'succeeded',subscription_succeeded:true,query_source:'upstream'};
+ await store.settleManualOrder(requestId,{state:'success',taskNo:snapshot.task_no,snapshot});await store.settleManualOrder(requestId,{state:'success',taskNo:snapshot.task_no,snapshot});
+ assert.equal(db.card.successful_order_count,count+1);assert.equal(db.card.authorization_count,0);assert.equal(db.card.active_job,null);
+ }const next=await store.prepareManualOrder(manualInput(id,{mode:'test',cdkCode:null}));assert.equal(await store.reserveManualCard(id,12,next.client_order_no,'gpt-plus',7),null);
 });
 
 test('administrator cards can be reused immediately when the authorization is synchronized despite legacy cooldown metadata', async () => {
@@ -1145,14 +1128,14 @@ test('administrator cards can be reused immediately when the authorization is sy
     }
 });
 
-test('administrator cards still require the successful authorization to be visible', async () => {
+test('administrator reservations ignore delayed authorization records', async () => {
     const { db, store, advance } = storeFixture();
     await prepareOrder(store, manualInput(id, { mode: 'test', cdkCode: null }));
     await store.claimManualSubmission(id);
     await store.settleManualOrder(id, { state: 'success', message: 'confirmed' });
     const nextId = '36aad0bb-5eb7-4771-93f5-1ebd049b29e0';
     const next = await store.prepareManualOrder(manualInput(nextId, { mode: 'test', cdkCode: null }));
-    assert.equal(await store.reserveManualCard(nextId, 12, next.client_order_no, 'gpt-plus'), null);
+    assert.ok(await store.reserveManualCard(nextId, 12, next.client_order_no, 'gpt-plus'));
     db.card.authorization_count = 1;
     assert.ok(await store.reserveManualCard(nextId, 12, next.client_order_no, 'gpt-plus'));
 });
@@ -1165,7 +1148,7 @@ test('administrator settlement never writes the retired cooldown column', async 
     assert.equal(db.orders[0].state, 'success');
     assert.equal(db.card.active_job, null);
     assert.equal(db.card.reuse_after_ms, 0);
-    assert.equal(db.card.authorization_pending_count, 1);
+    assert.equal(db.card.successful_order_count, 0);
     assert.equal(db.cdks[0].used_at, 'reserved');
 });
 
@@ -1177,11 +1160,11 @@ test('a lost transaction snapshot does not change an order result or invent a co
     await store.settleManualOrder(id, { state: 'success', message: 'confirmed success' });
     assert.equal(db.orders[0].state, 'success');
     assert.equal(db.card.authorization_count, null);
-    assert.equal(db.card.authorization_pending_count, 1);
+    assert.equal(db.card.successful_order_count, 0);
     assert.equal(db.card.active_job, null);
     const nextId = '36aad0bb-5eb7-4771-93f5-1ebd049b29e0';
     const next = await store.prepareManualOrder(manualInput(nextId,{mode:'test',cdkCode:null}));
-    assert.equal(await store.reserveManualCard(nextId,12,next.client_order_no,'gpt-plus'),null);
+    assert.ok(await store.reserveManualCard(nextId,12,next.client_order_no,'gpt-plus'));
 });
 
 test('a replayed manual reservation keeps its original authorization baseline', async () => {
@@ -1194,7 +1177,7 @@ test('a replayed manual reservation keeps its original authorization baseline', 
     assert.equal(db.orders[0].authorization_baseline,0);
     await store.markManualPrepared(id,order.client_order_no,12);await store.claimManualSubmission(id);
     await store.settleManualOrder(id,{state:'success',message:'confirmed'});
-    assert.equal(db.card.authorization_pending_count,1);
+    assert.equal(db.card.successful_order_count,0);
     const nextId='36aad0bb-5eb7-4771-93f5-1ebd049b29e0';
     const next=await store.prepareManualOrder(manualInput(nextId,{mode:'test',cdkCode:null}));
     assert.ok(await store.reserveManualCard(nextId,12,next.client_order_no,'gpt-plus'));
@@ -1254,7 +1237,7 @@ test('automatic manual preparation reserves its CDK before card funding and bind
     assert.equal(await store.claimManualSubmission(id), true);
     await store.settleManualOrder(id, { state: 'success', message: 'confirmed success' });
     assert.equal(db.card.authorization_count, 0);
-    assert.equal(db.card.authorization_pending_count, 1);
+    assert.equal(db.card.successful_order_count, 0);
     assert.equal(db.card.active_job, null);
     assert.equal(db.cdks[0].used_at, 'reserved');
 });

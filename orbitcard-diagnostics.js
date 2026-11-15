@@ -1,6 +1,5 @@
 'use strict';
 const poolPolicy = require('./orbitcard-pool');
-const { readAuthorizations } = require('./orbitcard-authorizations');
 
 const crypto = require('node:crypto');
 const { parseSession } = require('./session-input');
@@ -74,11 +73,11 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
             const existing = await methods.listCards();
             const saved = existing.map(row => ({ ...row }));
             for (const card of listed) if (!saved.some(row => Number(row.card_id) === card.card_id)) {
-                saved.push({ card_id: card.card_id, authorization_count: null });
+                saved.push({ card_id: card.card_id, successful_order_count: 0 });
             }
             const summaries = listed.map(card => ({ card_id: card.card_id, status: card.provider_status,
-                authorization_count: null, authorization_limit: poolPolicy.authorizationLimit(cfg),
-                authorizations_checked_at: null, authorization_pending: false,
+                successful_order_count: saved.find(row => Number(row.card_id) === card.card_id)?.successful_order_count,
+                successful_order_limit: poolPolicy.authorizationLimit(cfg), counting_basis: 'confirmed_subscription_orders',
                 busy: Boolean(saved.find(row => Number(row.card_id) === card.card_id)?.active_job),
                 balance: null, currency: card.currency || null }));
             result.selection = { action: 'wait', card_id: null, candidate_count: 0, skipped: [], waiting: [],
@@ -101,33 +100,7 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
                 if (summary) summary.status = 'DELETED';
             }
             result.selection.waiting = [];
-            // Merge observed authorization identities in temporary copies only.
-            // A later settlement must neither double count nor erase an observed authorization.
             const readable = listed.filter(card => card.provider_status !== 'DELETED' && !retired.has(Number(card.card_id)));
-            for (const card of readable) {
-                const row = saved.find(row => Number(row.card_id) === card.card_id);
-                const summary = summaries.find(item => item.card_id === card.card_id);
-                try {
-                    const persisted = await methods.listAuthorizations(card.card_id);
-                    // A concurrent sync may commit new IDs after listCards returned.
-                    // Older cached counts may lag this ledger; missing persisted IDs still fail closed.
-                    if (!Array.isArray(persisted) || (row.authorization_count != null
-                        && (!Number.isSafeInteger(Number(row.authorization_count)) || Number(row.authorization_count) < 0
-                            || Number(row.authorization_count) > new Set(persisted).size))) {
-                        throw new CardPreparationError('已保存的消费授权次数与交易记录不一致，请检查数据库');
-                    }
-                    const observed = await readAuthorizations(provider, cfg, card.card_id);
-                    row.authorization_count = new Set([...persisted, ...observed]).size;
-                    row.authorizations_checked_at = new Date().toISOString();
-                    Object.assign(summary, { authorization_count: row.authorization_count,
-                        authorizations_checked_at: row.authorizations_checked_at,
-                        authorization_pending: row.authorization_pending_count != null && row.authorization_count < Number(row.authorization_pending_count) });
-                } catch (error) {
-                    result.selection.waiting = summaries.filter(item => item.status !== 'DELETED' && item.authorization_count == null)
-                        .map(item => ({ card_id: item.card_id, reason: 'authorizations_unconfirmed' }));
-                    throw error;
-                }
-            }
             const snapshotNow = Date.now();
             const relevant = saved.filter(row => readable.some(card => card.card_id === Number(row.card_id)
                 && !['DELETED','CANCELLED','FROZEN'].includes(card.provider_status))
@@ -162,10 +135,10 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
                 result.selection.funding_amount = money.cents(selected.deficit);
             } else if (decision.action === 'unavailable') {
                 throw new CardPreparationError('没有可用的现有支付卡，自动开卡已禁用，请管理员手动申请或补充卡片');
-            } else throw new CardPreparationError('卡片被占用或消费授权仍待同步，实际支付需要等待处理；共享等待位最多 1 个');
+            } else throw new CardPreparationError('卡片被占用或成功会员订单计数尚未确认，实际支付需要等待处理；共享等待位最多 1 个');
             const required = funding;
             if (cfg.enabled) {
-                const retiring = saved.filter(row => !row.active_job && Number(row.authorization_count) >= poolPolicy.authorizationLimit(cfg)
+                const retiring = saved.filter(row => !row.active_job && Number(row.successful_order_count) >= poolPolicy.authorizationLimit(cfg)
                     && readable.some(card => card.card_id === Number(row.card_id)));
                 result.selection.maintenance = { current_size:readable.length,
                     retire_card_ids:retiring.map(row => Number(row.card_id)), funding_amount:money.cents(funding),
@@ -193,7 +166,7 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
         const actions = stage === 'full' ? ['plans','balance','regions','cards']
             : ['cards','concurrency'].includes(stage) ? ['plans','balance',stage] : [stage];
         const handlers = { plans, balance, regions, cards: selection, concurrency };
-        const titles = { plans: '核对卡台已开放套餐', balance: '读取账户可用余额', regions: '核对本套餐默认支付地区', cards: '读取实时卡片和成功消费授权记录，模拟选卡与补款决策',
+        const titles = { plans: '核对卡台已开放套餐', balance: '读取账户可用余额', regions: '核对本套餐默认支付地区', cards: '读取实时卡片和已确认的成功会员订单次数，模拟选卡与补款决策',
             concurrency: `读取实时快照，模拟 ${concurrentTasks} 个任务同时进入选卡` };
         for (const name of actions) if (!await step(name, titles[name], handlers[name])) break;
         return finish();

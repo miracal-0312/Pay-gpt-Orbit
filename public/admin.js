@@ -196,7 +196,7 @@ async function loadCardIdPreview() {
 }
 function apiInput() {
     const authorizationLimit = Number($('cardAuthorizationLimit').value);
-    if (!Number.isSafeInteger(authorizationLimit) || authorizationLimit < 1) throw new Error('单卡成功授权次数上限必须是有效的正整数');
+    if (!Number.isSafeInteger(authorizationLimit) || authorizationLimit < 1) throw new Error('单卡成功会员订单次数上限必须是有效的正整数');
     return { enabled: $('apiEnabled').checked, base_url: $('baseUrl').value.trim(),
     orbitcard_max_authorizations: authorizationLimit,
     orbitcard_product_code: $('productCode').value.trim(), orbitcard_max_initial_amount: $('maxInitialAmount').value.trim(),
@@ -206,11 +206,11 @@ function apiInput() {
 }
 function renderCardRow(card, sync = null) {
     const id = escapeHtml(card.card_id);
-    const usage = `${escapeHtml(card.authorization_count ?? '待同步')} / ${escapeHtml(card.authorization_limit)} 次成功消费授权`;
+    const usage = `${escapeHtml(card.successful_order_count ?? '待同步')} / ${escapeHtml(card.successful_order_limit)} 笔成功会员订单`;
     const history = card.retiring ? '待确认删卡'
-        : card.authorization_count != null && Number(card.authorization_count) >= Number(card.authorization_limit) ? '达到上限，停止分配'
-            : card.authorization_pending ? '等待授权同步，暂不分配' : '平台成功消费授权自动累计';
-    const countedAt = card.authorizations_checked_at ? `授权统计时间：${escapeHtml(card.authorizations_checked_at)}` : '尚未完成授权统计';
+        : card.successful_order_count != null && Number(card.successful_order_count) >= Number(card.successful_order_limit) ? '达到上限，停止分配'
+            : '按卡台确认成功的会员订单去重累计';
+    const countedAt = '授权流水仅供对账，不影响订单计数';
     const last4 = card.last4 ? `****${escapeHtml(card.last4)}` : '尾号未提供';
     const confirmed = sync?.synced_ids?.includes(Number(card.card_id));
     const snapshot = confirmed ? `本次同步：${sync.checked_at}` : sync?.failed ? '同步失败 · 以下为旧快照'
@@ -238,7 +238,7 @@ async function loadCardTransactions() {
     const id = Number($('transactionCardId').value), page = Number($('transactionPage').value);
     if (!Number.isSafeInteger(id) || id < 1 || !Number.isSafeInteger(page) || page < 1) throw new Error('请输入有效卡 ID 和页码');
     $('loadTransactions').disabled = true;
-    $('cardTransactions').textContent = '正在读取交易记录并更新成功消费授权次数…';
+    $('cardTransactions').textContent = '正在读取消费授权流水，仅供对账…';
     let result;
     try {
         result = await request(`/api/admin/orbitcard/cards/${id}/transactions?page=${page}`);
@@ -252,7 +252,7 @@ async function loadCardTransactions() {
 async function synchronizeCards() {
     $('syncCards').disabled = true;
     $('loadCards').disabled = true;
-    $('cardSyncState').textContent = '正在读取平台卡片状态、余额和成功消费授权记录并维护卡池…';
+    $('cardSyncState').textContent = '正在同步卡片信息和卡台成功会员订单…';
     try {
         const result = await request('/api/admin/orbitcard/cards/sync', {});
         await loadCards(result);

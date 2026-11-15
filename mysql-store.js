@@ -40,7 +40,7 @@ async function initializeBaseData() {
 async function ensureLegacyColumns() {
     // Add only fields needed by this service. Existing historical tables are never dropped.
     const columns = {
-        orbitcard_managed_cards: { authorization_count: 'INT UNSIGNED NULL', authorizations_checked_at: 'DATETIME(3) NULL',
+        orbitcard_managed_cards: { successful_order_count: 'INT UNSIGNED NOT NULL DEFAULT 0', authorization_count: 'INT UNSIGNED NULL', authorizations_checked_at: 'DATETIME(3) NULL',
             authorization_pending_count: 'INT UNSIGNED NULL',
             retirement_key: 'VARCHAR(80) NULL', retirement_state: 'VARCHAR(16) NULL' },
         orbitcard_card_uses: { authorization_baseline: 'INT UNSIGNED NULL' },
@@ -62,8 +62,7 @@ async function ensureLegacyColumns() {
             created_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP', updated_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP' }
     };
     for (const [table, fields] of Object.entries(columns)) for (const [name, definition] of Object.entries(fields)) await ensureColumn(table, name, definition);
-    // A new or upgraded card stays unconfirmed until a complete provider transaction read.
-    // Local subscription successes and old settlement totals are not authorization records.
+    // Authorization records remain independent from confirmed subscription usage.
     const [cdkPlan] = await runQuery(`SELECT CHARACTER_MAXIMUM_LENGTH AS length FROM information_schema.columns
         WHERE table_schema = DATABASE() AND table_name = 'cdk_codes' AND column_name = 'plan_type'`);
     if (cdkPlan && Number(cdkPlan.length) < 64) {
@@ -92,6 +91,7 @@ async function recoverHistoricalTasks() {
 async function ensureReady() {
     await runQuery(fs.readFileSync(path.join(__dirname, 'mysql-schema.sql'), 'utf8'));
     await ensureLegacyColumns();
+    await require('./orbitcard-order-usage')({ runQuery, runExecute, withTransaction }).backfill();
     await initializeBaseData();
     await core.ensureGptApiConfigDefaults();
     await recoverHistoricalTasks();

@@ -5,6 +5,7 @@ const { CardPreparationError } = require('./orbitcard-card-policy');
 const { cardScope, planFor, settlementState } = require('./orbitcard-card-policy');
 
 module.exports = function createCardStore({ runQuery, runExecute, withTransaction, openLockConnection }) {
+    const usage = require('./orbitcard-order-usage')({ runQuery, runExecute, withTransaction });
     function methods(baseUrl, connection = null) {
         const scope = cardScope(baseUrl), options = connection ? { connection } : {};
         const query = (sql, args = []) => runQuery(sql, args, options);
@@ -78,7 +79,18 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
             });
         }
         async function listCards() {
-            return query('SELECT * FROM orbitcard_managed_cards WHERE scope = ? ORDER BY authorization_count DESC, card_id', [scope]);
+            return query('SELECT * FROM orbitcard_managed_cards WHERE scope = ? ORDER BY successful_order_count DESC, card_id', [scope]);
+        }
+        async function listSuccessfulOrders() {
+            return query('SELECT * FROM orbitcard_successful_orders WHERE scope=?', [scope]);
+        }
+        async function subscriptionBindings() {
+            return query(`SELECT orbitcard_client_order_no AS client_order_no, gpt_api_order_id AS order_no,
+                orbitcard_card_id AS card_id FROM task_logs WHERE orbitcard_base_url=? AND orbitcard_card_id > 0
+                UNION ALL SELECT client_order_no, task_no AS order_no, card_id FROM orbitcard_admin_orders WHERE scope=? AND card_id > 0`, [baseUrl, scope]);
+        }
+        async function recordSuccessfulOrder(order) {
+            return transaction(async connection => usage.recordSuccess({ ...order, scope }, { connection }));
         }
         async function issueForJob(jobKey) {
             const rows = await query('SELECT * FROM orbitcard_card_issues WHERE scope=? AND job_key=? ORDER BY created_at DESC LIMIT 1', [scope, jobKey]);
@@ -105,7 +117,7 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
                 }
                 if (!card || card.active_job || card.provider_status !== 'ACTIVE'
                     || !poolPolicy.eligible(card, limit)) return null;
-                await runExecute('INSERT INTO orbitcard_card_uses (job_key,scope,card_id,plan_type,state,authorization_baseline) VALUES (?,?,?,?,\'reserved\',?)', [jobKey,scope,cardId,plan,Number(card.authorization_count)], opts);
+                await runExecute('INSERT INTO orbitcard_card_uses (job_key,scope,card_id,plan_type,state,authorization_baseline) VALUES (?,?,?,?,\'reserved\',?)', [jobKey,scope,cardId,plan,Number(card.successful_order_count)], opts);
                 await runExecute('UPDATE orbitcard_managed_cards SET active_job=? WHERE scope=? AND card_id=?', [jobKey,scope,cardId], opts);
                 await runExecute('UPDATE task_logs SET orbitcard_card_id=? WHERE job_key=?', [cardId,jobKey], opts);
                 return { ...card, active_job: jobKey };
@@ -181,7 +193,7 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
             return query(`SELECT * FROM orbitcard_card_fundings WHERE scope=?${pending ? " AND state IN ('prepared','submitting','pending','unknown')" : ''}
                 ORDER BY updated_at ${pending ? 'ASC' : 'DESC'} LIMIT 100`, [scope]);
         }
-        return { retireCard, markRetirementSubmitted, confirmRetirement, syncCards, listCards, listAuthorizations, saveAuthorizations, reserveCard, pendingIssue, createManualIssue, updateIssue, completeIssue, listIssues, issueForJob,
+        return { retireCard, markRetirementSubmitted, confirmRetirement, syncCards, listCards, listSuccessfulOrders, subscriptionBindings, recordSuccessfulOrder, listAuthorizations, saveAuthorizations, reserveCard, pendingIssue, createManualIssue, updateIssue, completeIssue, listIssues, issueForJob,
             fundingForJob, createFunding, updateFunding, deferFunding, listFundings };
     }
 
@@ -208,14 +220,12 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
         const uses = await runQuery('SELECT * FROM orbitcard_card_uses WHERE job_key=? FOR UPDATE', [jobKey], options);
         const current = uses[0], next = settlementState(current.state, orbitcardState);
         if (next === current.state) return;
-        if (next === 'consumed' && current.authorization_baseline != null) {
-            // A successful order may finish before its authorization is visible. Keep
-            // the next allocation waiting; only provider transaction IDs raise usage.
-            const pending = Number(current.authorization_baseline) + 1;
-            if (!Number.isSafeInteger(pending) || pending < 1) throw new CardPreparationError('原订单消费授权基准无效');
-            const updated = await runExecute(`UPDATE orbitcard_managed_cards SET authorization_pending_count=GREATEST(COALESCE(authorization_pending_count,0),?)
-                WHERE scope=? AND card_id=?`, [pending,current.scope,current.card_id], options);
-            if (updated.affectedRows !== 1) throw new CardPreparationError('原订单卡片不存在，不能确认消费授权待同步状态');
+        if (next === 'consumed') {
+            const [task] = await runQuery('SELECT * FROM task_logs WHERE job_key=?', [jobKey], options);
+            let snapshot;
+            try { snapshot = JSON.parse(task?.gpt_api_raw); } catch { /* no verified platform result */ }
+            await usage.recordSuccess({ scope: current.scope, cardId: current.card_id,
+                clientOrderNo: task?.orbitcard_client_order_no, orderId: task?.gpt_api_order_id || null, snapshot }, options);
         }
         await runExecute('UPDATE orbitcard_card_uses SET state=? WHERE job_key=?', [next,jobKey], options);
         await runExecute('UPDATE orbitcard_managed_cards SET active_job=NULL WHERE scope=? AND card_id=? AND active_job=?',

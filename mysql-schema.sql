@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS admin_login_logs (
 CREATE TABLE IF NOT EXISTS orbitcard_managed_cards (
     scope CHAR(64) NOT NULL,
     card_id BIGINT UNSIGNED NOT NULL,
+    successful_order_count INT UNSIGNED NOT NULL DEFAULT 0,
     authorization_count INT UNSIGNED NULL,
     authorizations_checked_at DATETIME(3) NULL,
     authorization_pending_count INT UNSIGNED NULL,
@@ -121,6 +122,18 @@ CREATE TABLE IF NOT EXISTS orbitcard_managed_cards (
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (scope, card_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS orbitcard_successful_orders (
+    scope CHAR(64) NOT NULL,
+    client_order_no VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+    order_no VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL,
+    card_id BIGINT UNSIGNED NOT NULL,
+    result_snapshot TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (scope, client_order_no),
+    UNIQUE KEY uq_oc_successful_order (scope, order_no),
+    KEY idx_oc_successful_card (scope, card_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS orbitcard_card_authorizations (

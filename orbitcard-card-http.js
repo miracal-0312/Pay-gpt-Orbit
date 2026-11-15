@@ -18,9 +18,8 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
         const cards = (await methods.listCards()).map(card => ({
             card_id: Number(card.card_id), active_job: card.active_job,
             authorization_count: card.authorization_count == null ? null : Number(card.authorization_count),
-            authorization_limit: authorizationLimit(cfg), authorizations_checked_at: card.authorizations_checked_at,
-            authorization_pending: card.authorization_pending_count != null
-                && (card.authorization_count == null || Number(card.authorization_count) < Number(card.authorization_pending_count)),
+            successful_order_count: card.successful_order_count == null ? null : Number(card.successful_order_count), successful_order_limit: authorizationLimit(cfg),
+            counting_basis: 'confirmed_subscription_orders', authorizations_checked_at: card.authorizations_checked_at,
             retiring: Boolean(card.retirement_key),
             provider_status: card.provider_status, product_code: card.product_code, last4: card.last4,
             balance: card.balance, currency: card.currency, source: card.source, updated_at: card.updated_at
@@ -47,7 +46,7 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
     app.post('/api/admin/orbitcard/cards/sync', handler(async (req, res) => {
         const result = await cardService.synchronize(await config());
         res.set('Cache-Control', 'no-store');
-        res.json({ success: true, ...result, message: `已同步 ${result.count} 张卡片详情${result.removed_ids?.length ? `，${result.removed_ids.length} 张已注销或平台列表中不存在的卡片已移出列表` : ''}${result.failed_ids.length ? `，${result.failed_ids.length} 张详情读取失败，仅保留旧快照` : ''}` });
+        res.json({ success: true, ...result, message: `已同步 ${result.count} 张卡片详情；会员订单新增 ${result.order_sync?.added || 0} 笔${result.order_sync?.complete ? '' : `（${result.order_sync?.error || `有 ${result.order_sync?.unresolved?.length || 0} 笔会员订单结果或卡片归属待核对`}）`}${result.removed_ids?.length ? `，${result.removed_ids.length} 张已注销或平台列表中不存在的卡片已移出列表` : ''}${result.failed_ids.length ? `，${result.failed_ids.length} 张详情读取失败，仅保留旧快照` : ''}` });
     }));
     app.get('/api/admin/orbitcard/products', handler(async (req, res) => {
         const cfg = await config(), products = await cardsApi.products(cfg);
@@ -89,7 +88,7 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
             throw new CardPreparationError('共享卡池开卡不接收套餐或自定义参数，请提交空请求');
         }
         const cfg = await config(), card = await cardService.apply(cfg);
-        res.json({ success: true, card, message: `开卡成功，首充 20 USD；成功消费授权满 ${authorizationLimit(cfg)} 次后停止分配` });
+        res.json({ success: true, card, message: `开卡成功，首充 20 USD；成功会员订单满 ${authorizationLimit(cfg)} 次后停止分配` });
     }));
     app.post('/api/admin/orbitcard/issues/refresh', handler(async (req, res) => {
         await cardService.recover(await config());

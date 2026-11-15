@@ -205,5 +205,5 @@ test('self-service settlement records exactly one receipt in its transaction and
     assert.deepEqual(receipts, [{ cdk: f.db.cdks[0].cdk_code, orderId: task.jobKey }]);
     assert.equal(f.db.tasks[0].orbitcard_state, 'success');
     assert.equal(f.db.cards[0].authorization_count, 0);
-    assert.equal(f.db.cards[0].authorization_pending_count, 1);
+    assert.equal(f.db.cards[0].successful_order_count, 1);
 });

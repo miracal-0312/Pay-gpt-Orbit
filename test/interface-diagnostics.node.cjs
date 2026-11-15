@@ -31,6 +31,7 @@ function fixture(overrides = {}) {
         calls.push({ operation, body });
         if (state.response) return state.response(operation, body);
         const data = {
+            getSubscriptionList: {items:[],total:0},
             getAccountBalance: { available_balance: '15.00000000' }, getProductCode: { list: [{ product_code: 'SAVE' }] },
             getSubscriptionPlans: { enabled: true, plans: Object.values(PROVIDER_PLANS).map(type => ({ type })) },
             getSubscriptionPaymentRegions: { plan_type: body.plan_type, payment_regions: [{ code: 'US' }] },
@@ -43,11 +44,11 @@ function fixture(overrides = {}) {
     return { service: createDiagnostics({ store, provider }), store, calls, queries, state, configReads: () => configReads };
 }
 
-test('manifest covers exactly 13 registered interfaces, uses saved target and orders card dependencies', async () => {
+test('manifest covers exactly 14 registered interfaces, uses saved target and orders card dependencies', async () => {
     const f = fixture(), result = await f.service.manifest();
     assert.equal(result.success, true); assert.equal(result.target, cfg.base_url);
     assert.deepEqual(result.operations.map(row => row.operation).sort(), Object.keys(OPERATIONS).sort());
-    assert.equal(result.operations.filter(row => row.mode === 'live_read').length, 9);
+    assert.equal(result.operations.filter(row => row.mode === 'live_read').length, 10);
     assert.equal(result.operations.filter(row => row.mode === 'local_simulation').length, 4);
     for (const row of result.operations) { assert.equal(row.path, OPERATIONS[row.operation].path); assert.ok(row.label); }
     assert.ok(result.operations.findIndex(row => row.operation === 'getCardList') < result.operations.findIndex(row => row.operation === 'cardDetail'));
@@ -65,7 +66,7 @@ test('each registered read is called exactly once except the four explicit regio
         if (operation === 'getSubscriptionPaymentRegions') assert.deepEqual(result.result.checks.map(row => row.plan_type), Object.values(PROVIDER_PLANS));
         else { assert.equal(result.result.http_status, 200); assert.equal(result.result.platform_code, 0); }
     }
-    assert.equal(f.configReads(), 9);
+    assert.equal(f.configReads(), 10);
     assert.deepEqual(f.calls.find(call => call.operation === 'cardDetail').body, { card_id: 42, reveal_sensitive: false });
     assert.deepEqual(f.calls.find(call => call.operation === 'getCardFlow').body, { card_id: 42, type: 'recharge', page: 1, page_size: 100 });
     assert.deepEqual(f.calls.find(call => call.operation === 'getSubscription').body, { task_no: 'original-task' });
@@ -217,7 +218,7 @@ test('new HTTP routes use saved config without secondary auth and preserve exist
     t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
     const base = `http://127.0.0.1:${server.address().port}/api/admin/orbitcard/diagnostics`;
     const manifest = await fetch(`${base}/interfaces`); assert.equal(manifest.status, 200);
-    assert.equal(manifest.headers.get('cache-control'), 'no-store'); assert.equal((await manifest.json()).operations.length, 13);
+    assert.equal(manifest.headers.get('cache-control'), 'no-store'); assert.equal((await manifest.json()).operations.length, 14);
     const send = body => fetch(`${base}/interface-test`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const simulation = await send({ operation: 'deleteCard' }); assert.equal(simulation.status, 200);
     assert.equal((await simulation.json()).result.mode, 'local_simulation'); assert.equal(f.calls.length, 0);

@@ -55,10 +55,10 @@ test('card_pending confirms the acknowledged original issue without authorizing 
         assert.equal(f.db.issues[0].card_id, 42);
         assert.equal(f.db.tasks[0].orbitcard_state, 'card_pending', 'task settlement belongs to order recovery');
         assert.equal(f.db.cards[0].active_job, null);
-        assert.deepEqual(f.calls.map(call => call.operation), ['createCard', 'cardDetail', 'cardTransaction']);
+        assert.deepEqual(f.calls.map(call => call.operation), ['createCard', 'cardDetail']);
         assert.deepEqual(f.calls[0], { operation: 'createCard', body: f.body, key: 'original-key' });
         await f.service.recover(cfg);
-        assert.equal(f.calls.length, 3, 'terminal issues must never be replayed');
+        assert.equal(f.calls.length, 2, 'terminal issues must never be replayed');
     }
 });
 

@@ -87,10 +87,10 @@ test('saving uses the existing configuration endpoint and preserves the edited v
 test('card rows display the server supplied authorization limit and apply it to the status label', () => {
     const block = source.slice(source.indexOf('function renderCardRow('), source.indexOf('async function loadCards('));
     const renderCardRow = new Function('escapeHtml', block + '\nreturn renderCardRow;')(value => String(value ?? ''));
-    const card = { card_id: 42, authorization_count: 7, authorization_limit: 12, provider_status: 'ACTIVE' };
-    assert.match(renderCardRow(card), /7 \/ 12 次成功消费授权/);
+    const card = { card_id: 42, successful_order_count: 7, successful_order_limit: 12, provider_status: 'ACTIVE' };
+    assert.match(renderCardRow(card), /7 \/ 12 笔成功会员订单/);
     assert.doesNotMatch(renderCardRow(card), /达到上限，停止分配/);
-    card.authorization_limit = 3;
-    assert.match(renderCardRow(card), /7 \/ 3 次成功消费授权/);
+    card.successful_order_limit = 3;
+    assert.match(renderCardRow(card), /7 \/ 3 笔成功会员订单/);
     assert.match(renderCardRow(card), /达到上限，停止分配/);
 });

@@ -8,7 +8,7 @@ const { validOrder } = require('./orbitcard-cdk');
 const { normalizeCard } = require('./orbitcard-cards-client');
 
 const LABELS = Object.freeze({ getAccountBalance: '账户余额', getProductCode: '开卡产品',
-    getSubscriptionPlans: '订阅套餐', getSubscriptionPaymentRegions: '四档支付地区', getSubscription: '原订阅订单',
+    getSubscriptionPlans: '订阅套餐', getSubscriptionPaymentRegions: '四档支付地区', getSubscription: '原订阅订单', getSubscriptionList: '会员订单列表',
     getCardList: '卡片列表', cardDetail: '卡片详情', cardTransaction: '消费交易', getCardFlow: '卡片充值流水',
     createCard: '手动开卡', rechargeCard: '卡片补款', deleteCard: '卡片注销', createSubscription: '创建订阅' });
 const CARD_OPERATIONS = new Set(['cardDetail', 'cardTransaction', 'getCardFlow']);
@@ -24,7 +24,7 @@ const amount = value => typeof value === 'string' && /^\d{1,14}(?:\.\d{1,8})?$/.
 const operationRow = operation => ({ operation, path: OPERATIONS[operation].path, label: LABELS[operation],
     mode: OPERATIONS[operation].write ? 'local_simulation' : 'live_read' });
 const OPERATION_ORDER = ['getAccountBalance', 'getProductCode', 'getSubscriptionPlans', 'getSubscriptionPaymentRegions',
-    'getCardList', 'cardDetail', 'cardTransaction', 'getCardFlow', 'getSubscription',
+    'getCardList', 'cardDetail', 'cardTransaction', 'getCardFlow', 'getSubscriptionList', 'getSubscription',
     'createCard', 'rechargeCard', 'deleteCard', 'createSubscription'];
 
 // Diagnostics deliberately bypass payment services: querying must never reserve,
@@ -151,6 +151,7 @@ module.exports = function createInterfaceDiagnostics({ store, provider = require
                 message: '四档套餐各查询一次；每档结果见明细', checks });
         }
         let body = {}, expected;
+        if (operation === 'getSubscriptionList') body = { page: 1, page_size: 20, service_code: 'all' };
         if (operation === 'getCardList') body = { page: 1, page_size: 100 };
         if (CARD_OPERATIONS.has(operation)) {
             const cardId = await selectedCard(cfg, input);
