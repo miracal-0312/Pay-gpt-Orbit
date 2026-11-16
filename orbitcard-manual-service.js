@@ -7,7 +7,8 @@ const { cardScope, CardPreparationError, CardBusyError, FundingAwaitingError, FU
 const { PaymentStoppedError } = require('./payment-automation');
 const { PROVIDER_TO_PLAN: CDK_PLAN } = require('./plan-registry');
 const { manualLockKeys } = require('./payment-execution-lock');
-const { manualHistory } = require('./payment-retry-policy');
+const { manualHistory, retryableFailure } = require('./payment-retry-policy');
+const { classifyFailure } = require('./orbitcard-error-policy');
 
 const REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PLAN_ID = /^[a-z][a-z0-9_-]{0,63}$/;
@@ -421,9 +422,18 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
             await cfg.executionGuard?.assertOwned();
             const snapshot = result.snapshot;
             if (result.rejected) {
+                if (result.cardRejected) {
+                    const failed = await store.settleManualOrder(order.request_id, { state: 'failed', snapshot,
+                        expectedClientOrderNo: identity, retryAllowed: true,
+                        message: '卡台确认支付卡不可用，已停用并安排补开' });
+                    record(order, 'manual_card_rejected', '卡台确认支付卡不可用，已保存停用及补开记录', { card_id: Number(order.card_id) });
+                    if (failed?.state === 'retry_waiting') await retryPayment(failed, cfg);
+                    return;
+                }
                 await store.settleManualOrder(order.request_id, { state: 'rejected', snapshot,
                     expectedClientOrderNo: identity,
-                    message: 'Orbitcard 明确拒绝提交；支付卡已释放，请核对 Session 与配置' });
+                    message: result.message || result.disposition?.message || 'Orbitcard 明确拒绝提交；支付卡已释放，请核对 Session 与配置' });
+                retrySessions.delete(order.request_id);
                 record(order, 'manual_order_rejected', '卡台明确拒绝管理员订单');
                 return;
             }
@@ -431,7 +441,7 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
             await store.settleManualOrder(order.request_id, { state: 'pending',
                 expectedClientOrderNo: identity,
                 taskNo: result.orderId || null, snapshot,
-                message: '已提交或结果待确认；只查询原订单，不重复创建' });
+                message: result.message || '已提交或结果待确认；只查询原订单，不重复创建' });
             record(order, 'manual_order_submitted', '管理员订单已提交或状态待确认',
                 { plan_type: order.plan_type, card_id: Number(order.card_id), client_order_no: identity });
             await refreshOwned(order.request_id, cfg);
@@ -448,6 +458,21 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
     }
 
     async function retryPayment(order, cfg, handoff = null) {
+        // Recheck persisted evidence before credentials, plan queries or card
+        // allocation, including retry_waiting rows created by older versions.
+        await cfg.executionGuard?.assertOwned();
+        if (store.reviewManualRetry) order = await store.reviewManualRetry(order.request_id, order.client_order_no);
+        if (!order || order.state !== 'retry_waiting') {
+            if (order) retrySessions.delete(order.request_id);
+            return publicOrder(order);
+        }
+        let snapshot;
+        try { snapshot = JSON.parse(order.snapshot || '{}'); } catch (_) { snapshot = null; }
+        if (!retryableFailure(snapshot, { clientOrderNo: order.client_order_no, orderId: order.task_no,
+            cardId: order.card_id, planType: order.plan_type, email: order.target_email })) {
+            retrySessions.delete(order.request_id);
+            return publicOrder(order);
+        }
         const entry = retrySessions.get(order.request_id);
         if (!entry || entry.until <= now()) { retrySessions.delete(order.request_id); return publicOrder(order); }
         try { parseSession(entry.session); } catch (_) { retrySessions.delete(order.request_id); return publicOrder(order); }
@@ -560,13 +585,13 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
                 orderId: order.task_no, clientOrderNo: order.client_order_no,
                 planType: order.plan_type, email: order.target_email, cardId: Number(order.card_id) });
             await cfg.executionGuard?.assertOwned();
-            nextQueryAt.set(requestId, now() + Math.max(5000, result.retryAfterMs || 0));
+            nextQueryAt.set(requestId, now() + Math.max(result.stopTracking ? 300000 : 5000, result.retryAfterMs || 0));
             if (!result.success) {
                 challenges.delete(requestId);
                 record(order, 'manual_order_query_unconfirmed', '原管理员订单尚未返回可核对的归属结果');
                 return publicOrder(await store.settleManualOrder(requestId, { state: 'pending',
                     expectedClientOrderNo: order.client_order_no,
-                    message: '原订单查询暂不可确认；保留支付卡占用，勿重新付款' }));
+                    message: `${result.error || '原订单查询暂不可确认'}；保留原订单与支付卡占用，勿重新付款` }));
             }
             const state = result.state;
             const next = state === 'success' ? 'success' : state === 'failed' ? 'failed' : 'pending';
@@ -576,10 +601,13 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
             else challenges.delete(requestId);
             const updated = await store.settleManualOrder(requestId, {
                 state: next, taskNo: result.orderId,
-                retryAllowed: true, expectedClientOrderNo: order.client_order_no,
+                retryAllowed: next === 'failed' && retryableFailure(result.snapshot, {
+                    orderId: result.orderId || order.task_no, clientOrderNo: order.client_order_no,
+                    cardId: order.card_id, planType: order.plan_type, email: order.target_email
+                }), expectedClientOrderNo: order.client_order_no,
                 snapshot: result.snapshot,
                 message: next === 'success' ? 'Orbitcard 已确认开通成功' : next === 'failed'
-                    ? 'Orbitcard 已确认开通失败；支付卡已释放，CDK 保持锁定，请人工售后处理' : captcha
+                    ? `${classifyFailure(result.snapshot).message}；原订单已确认失败，支付卡释放，保留原记录供核对` : captcha
                         ? '需要完成人机验证，然后继续查询原订单' : 'Orbitcard 仍在处理；继续查询原订单'
             });
             record(order, 'manual_order_query', '管理员原订单查询完成', { state: next, task_no: updated.task_no });

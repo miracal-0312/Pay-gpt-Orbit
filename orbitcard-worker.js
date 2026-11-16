@@ -32,7 +32,9 @@ async function run({ cfg, planType, session, setProgress, onSubmission, broadcas
     let last = created.snapshot;
     // Nonzero create codes may still carry an accepted order. Never infer failure from HTTP/code.
     if (created.rejected) {
-        await setProgress('failed', 0, 'Orbitcard 已确认拒绝提交，CDK 已释放，请检查配置和 Session 后重试', {
+        if (created.cardRejected && onConfirmedFailure) return onConfirmedFailure({
+            clientOrderNo: identity, cardId, orderId: null, raw: JSON.stringify(last) });
+        await setProgress('failed', 0, created.message || 'Orbitcard 已确认拒绝提交，请修复原因后重试', {
             orbitcardState: 'rejected', gptApiOrderId: orderId, gptApiRaw: JSON.stringify(last)
         });
         return true;
@@ -42,6 +44,7 @@ async function run({ cfg, planType, session, setProgress, onSubmission, broadcas
     });
     const deadline = Date.now() + 15 * 60 * 1000;
     let delay = Math.max(5000, intervalMs, created.retryAfterMs || 0);
+    let queryFailureMessage = '';
     for (let poll = 0; poll < maxPolls && Date.now() < deadline; poll++) {
         await cfg.paymentGuard?.assertAllowed();
         await sleep(Math.min(delay, Math.max(0, deadline - Date.now())));
@@ -49,6 +52,7 @@ async function run({ cfg, planType, session, setProgress, onSubmission, broadcas
         if (Date.now() >= deadline) break;
         const result = await subscription.query(cfg, { ...prepared.expected, orderId });
         if (!result.success) {
+            queryFailureMessage = result.error;
             broadcast(null);
             delay = Math.max(5000, Math.min(delay * 2, 30000), result.retryAfterMs || 0);
             if (result.ownershipMismatch) require('./runtime-log').push({ jobKey: cfg.auditJobKey || '', source: 'orbitcard',
@@ -58,6 +62,7 @@ async function run({ cfg, planType, session, setProgress, onSubmission, broadcas
         }
         orderId = result.orderId;
         last = result.snapshot;
+        queryFailureMessage = '';
         const status = result.state;
         broadcast(result.captcha);
         if (status !== 'pending') {
@@ -66,7 +71,7 @@ async function run({ cfg, planType, session, setProgress, onSubmission, broadcas
                     raw: JSON.stringify(last) });
             }
             await setProgress(status, status === 'success' ? 100 : 99,
-                status === 'success' ? 'Orbitcard 订阅成功，CDK 已核销' : 'Orbitcard 已确认订阅失败，CDK 已释放，可更新 Session 后重试',
+                status === 'success' ? 'Orbitcard 订阅成功，CDK 已核销' : result.disposition?.message || 'Orbitcard 已确认订阅失败，请核对失败原因后处理',
                 { orbitcardState: status, gptApiOrderId: orderId, gptApiRaw: JSON.stringify(last) });
             return status === 'failed';
         }
@@ -76,7 +81,7 @@ async function run({ cfg, planType, session, setProgress, onSubmission, broadcas
         delay = Math.max(5000, intervalMs, result.retryAfterMs || 0);
     }
     broadcast(null);
-    await setProgress('running', 99, 'Orbitcard 结果待确认，后台将按原订单号持续查询；保留 CDK 和支付卡，请勿重复充值',
+    await setProgress('running', 99, queryFailureMessage || 'Orbitcard 结果待确认，后台将按原订单号持续查询；保留 CDK 和支付卡，请勿重复充值',
         { orbitcardState: 'pending', gptApiOrderId: orderId, gptApiRaw: JSON.stringify(last) });
     return false;
 }

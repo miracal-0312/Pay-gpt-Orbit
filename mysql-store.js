@@ -41,7 +41,10 @@ async function ensureLegacyColumns() {
     // Add only fields needed by this service. Existing historical tables are never dropped.
     const columns = {
         orbitcard_managed_cards: { successful_order_count: 'INT UNSIGNED NOT NULL DEFAULT 0', authorization_count: 'INT UNSIGNED NULL', authorizations_checked_at: 'DATETIME(3) NULL',
-            retirement_key: 'VARCHAR(80) NULL', retirement_state: 'VARCHAR(16) NULL' },
+            retirement_key: 'VARCHAR(80) NULL', retirement_state: 'VARCHAR(16) NULL',
+            disabled_at: 'DATETIME(3) NULL', disabled_code: 'VARCHAR(128) NULL',
+            disabled_reason: 'VARCHAR(255) NULL', disabled_job_key: 'VARCHAR(128) NULL' },
+        orbitcard_card_issues: { replacement_for_card_id: 'BIGINT UNSIGNED NULL', replacement_for_job_key: "VARCHAR(128) NOT NULL DEFAULT ''" },
         app_config: { created_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP', updated_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP' },
         cdk_codes: { is_active: 'TINYINT(1) NOT NULL DEFAULT 1', shipped_at: 'TIMESTAMP NULL', used_at: 'TIMESTAMP NULL',
             manual_redeemed_at: 'TIMESTAMP NULL', manual_redeemed_by: 'VARCHAR(255) NULL', manual_redemption_reason: 'VARCHAR(255) NULL',
@@ -60,6 +63,8 @@ async function ensureLegacyColumns() {
             created_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP', updated_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP' }
     };
     for (const [table, fields] of Object.entries(columns)) for (const [name, definition] of Object.entries(fields)) await ensureColumn(table, name, definition);
+    const [replacementIndex] = await runQuery('SELECT COUNT(*) AS total FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?', ['orbitcard_card_issues', 'idx_oc_issue_replacement']);
+    if (!Number(replacementIndex?.total)) await runQuery('ALTER TABLE orbitcard_card_issues ADD UNIQUE INDEX idx_oc_issue_replacement (scope, replacement_for_card_id, replacement_for_job_key)');
     // Authorization records remain independent from confirmed subscription usage.
     const [cdkPlan] = await runQuery(`SELECT CHARACTER_MAXIMUM_LENGTH AS length FROM information_schema.columns
         WHERE table_schema = DATABASE() AND table_name = 'cdk_codes' AND column_name = 'plan_type'`);

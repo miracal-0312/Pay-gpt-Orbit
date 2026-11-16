@@ -13,11 +13,11 @@ function taskCount(value = 10) {
 
 // An in-memory model of one burst arriving at allocation. It shares the real
 // decision policy, but never acquires database locks or calls a write API.
-async function simulateSelection({ snapshot, count, available, planType, priceFor, jobPrefix, maxSuccessfulOrders }) {
+async function simulateSelection({ snapshot, count, available, planType, priceFor, jobPrefix }) {
     count = taskCount(count);
     const saved = snapshot.saved.map(row => ({ ...row }));
     let remaining = available, tail = Promise.resolve(), waiting = 0;
-    const decide = jobKey => decideCards({ ...snapshot, saved, jobKey, planType, priceFor, maxSuccessfulOrders });
+    const decide = jobKey => decideCards({ ...snapshot, saved, jobKey, planType, priceFor });
     const initial = decide(`${jobPrefix}-initial`);
     const initialCard = initial.candidates[0]?.card.card_id || null;
     const initialWaiting = Object.fromEntries([...new Set(initial.waiting.map(row => row.reason))]
@@ -45,7 +45,7 @@ async function simulateSelection({ snapshot, count, available, planType, priceFo
                 waiting++;
                 return { ...row, action: 'wait', reason: reasons.length === 1 ? reasons[0] : 'multiple_waiting', reasons };
             }
-            return { ...row, action: 'blocked', reason: 'automatic_opening_disabled', message: '没有可用的现有卡，自动开卡已禁用' };
+            return { ...row, action: 'blocked', reason: 'no_available_card', message: '快照中没有可用支付卡，请核对卡片及补开记录' };
         });
         tail = pending;
         return pending;

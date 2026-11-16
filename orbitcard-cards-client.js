@@ -200,10 +200,14 @@ function openingSelection(product) {
     return { product_code: product.product_code,
         amount: amount.toFixed(2), min_retained_balance: product.min_retained_balance };
 }
-function chooseOpeningProduct(rows, cfg = {}) {
-    const candidates = rows.filter(row => !cfg.orbitcard_product_code || row.product_code === cfg.orbitcard_product_code)
+function chooseOpeningProduct(rows, cfg = {}, previousProductCode = '') {
+    const codes = cfg.orbitcard_product_codes ?? (cfg.orbitcard_product_code ? [cfg.orbitcard_product_code] : []);
+    const bins = cfg.orbitcard_bins || [];
+    const candidates = rows.filter(row => (!codes.length || codes.includes(row.product_code))
+            && (!bins.length || bins.includes(row.bin)))
         .map(openingSelection).filter(Boolean).sort((a, b) => a.product_code.localeCompare(b.product_code));
-    const selected = candidates[0];
+    const previousIndex = candidates.findIndex(product => product.product_code === previousProductCode);
+    const selected = candidates[(previousIndex + 1) % candidates.length];
     if (!selected) throw new CardPreparationError('没有符合条件的开卡产品，请检查库存及产品最低首充是否不高于 20 USD');
     if (cfg.orbitcard_max_initial_amount && Number(selected.amount) > Number(cfg.orbitcard_max_initial_amount)) throw new CardPreparationError('所需首充超过后台设置的单卡金额上限');
     return selected;

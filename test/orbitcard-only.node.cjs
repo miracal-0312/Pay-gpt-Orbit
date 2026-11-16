@@ -95,7 +95,7 @@ test('new installs default to Orbitcard and remain disabled until configured', a
     assert.equal(values.gpt_api_enabled, '0');
     assert.equal(values.gpt_api_base_url, config.DEFAULT_BASE_URL);
     assert.equal(values.gpt_api_protocol_version, config.PROTOCOL_VERSION);
-    assert.equal(values.orbitcard_max_authorizations, '4');
+    assert.equal(values.orbitcard_product_codes, '[]'); assert.equal(values.orbitcard_bins, '[]');
 });
 
 test('enabling requires environment Key, HTTPS root URL and server Secret; card selection is automatic', () => {

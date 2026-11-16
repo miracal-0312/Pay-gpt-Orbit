@@ -44,7 +44,7 @@ test('concurrency UI sends one readonly request without Session and renders mode
     assert.match(f.$('diagSteps').innerHTML, /完成模拟/);
     assert.match(f.$('diagConcurrencySummary').textContent, /等待 1 个（最多 1 个），未分配 8 个.*模型内重复分配 0 次/);
     assert.match(f.$('diagConcurrencyRows').innerHTML, /等待队列已满，请 10 分钟后再下单/);
-    assert.match(f.$('diagConcurrencyBudget').textContent, /不代表真实并发压测通过/);
+    assert.match(f.$('diagConcurrencyBudget').textContent, /快照模拟结果/);
     assert.match(f.$('diagConcurrencyRows').innerHTML, /已被其他任务占用/);
     assert.ok(f.buttons.every(button => !button.disabled));
 });

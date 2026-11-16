@@ -42,7 +42,9 @@ module.exports = function fixture({ enqueueRedemption, now: externalNow } = {}) 
             return structuredClone(db.issues.filter(i => (byOwnerOrKey ? i.job_key===p[0] || i.issue_key===p[1]
                 : byKeyOrOwner ? i.issue_key===p[0] || i.job_key===p[1]
                 : (q.includes('WHERE issue_key=') ? i.issue_key === p[0] : i.scope === p[0])
-                    && (!q.includes('plan_type=?') || i.plan_type === p[1]) && (!q.includes('job_key=?') || i.job_key === p[1]))
+                    && (!q.includes('plan_type=?') || i.plan_type === p[1]) && (!/(?:WHERE|AND) job_key\s*=\s*\?/.test(q) || i.job_key === p[1])
+                    && (!q.includes('replacement_for_card_id=?') || Number(i.replacement_for_card_id) === Number(p[1]))
+                    && (!q.includes('replacement_for_job_key=?') || i.replacement_for_job_key === p[2]))
                 && (!q.includes('state IN') || ['prepared','submitting','pending','unknown'].includes(i.state))));
         }
         if (q.includes('FROM cdk_codes')) return structuredClone(db.cdks.filter(c => c.cdk_code === p[0]));
@@ -57,6 +59,23 @@ module.exports = function fixture({ enqueueRedemption, now: externalNow } = {}) 
     }
     async function runExecute(sql, p = []) {
         const q = clean(sql);
+        if (q.startsWith('UPDATE orbitcard_managed_cards SET disabled_at = COALESCE')) {
+            const card = db.cards.find(card => card.scope === p[3] && card.card_id === p[4]);
+            if (!card) return { affectedRows: 0 };
+            card.disabled_at ||= new Date(now()).toISOString();
+            card.disabled_code ??= p[0]; card.disabled_reason ??= p[1]; card.disabled_job_key ??= p[2];
+            return { affectedRows: 1 };
+        }
+        if (q.startsWith('UPDATE orbitcard_managed_cards SET disabled_at = UTC_TIMESTAMP')) {
+            const card = db.cards.find(card => card.scope === p[1] && card.card_id === p[2]);
+            Object.assign(card, { disabled_at: new Date(now()).toISOString(), disabled_code: 'manual', disabled_reason: p[0], disabled_job_key: null });
+            return { affectedRows: 1 };
+        }
+        if (q.startsWith('UPDATE orbitcard_managed_cards SET disabled_at = NULL')) {
+            const card = db.cards.find(card => card.scope === p[0] && card.card_id === p[1]);
+            Object.assign(card, { disabled_at: null, disabled_code: null, disabled_reason: null, disabled_job_key: null });
+            return { affectedRows: 1 };
+        }
         const usageResult = orderUsageDb.execute(q,p); if (usageResult !== undefined) return usageResult;
         if (q.startsWith('INSERT IGNORE INTO orbitcard_card_authorizations')) {
             for (let i=0;i<p.length;i+=3) if (!db.authorizations.some(row => row.scope===p[i] && row.card_id===Number(p[i+1]) && row.transaction_id===p[i+2]))
@@ -100,7 +119,9 @@ module.exports = function fixture({ enqueueRedemption, now: externalNow } = {}) 
             assert.ok(!db.uses.some(u => u.job_key === p[0])); db.uses.push({ job_key:p[0],scope:p[1],card_id:p[2],plan_type:p[3],state:'reserved' });
         } else if (q.startsWith('INSERT INTO orbitcard_card_issues')) {
             assert.match(q,/VALUES \(\?,\?,NULL,/);
-            assert.ok(!db.issues.some(i => i.issue_key === p[0])); db.issues.push({ issue_key:p[0],scope:p[1],job_key:null,plan_type:p[2],product_code:p[3],amount:p[4],credential_hash:p[5],request_body:p[6],state:'prepared',retry_at:0 });
+            assert.ok(!db.issues.some(i => i.issue_key === p[0]));
+            assert.ok(!p[7] || !db.issues.some(issue => issue.scope === p[1] && issue.replacement_for_card_id === p[7] && issue.replacement_for_job_key === p[8]));
+            db.issues.push({ issue_key:p[0],scope:p[1],job_key:null,plan_type:p[2],product_code:p[3],amount:p[4],credential_hash:p[5],request_body:p[6],replacement_for_card_id:p[7] || null,replacement_for_job_key:p[8] || '',state:'prepared',retry_at:0 });
         } else if (q.startsWith('UPDATE orbitcard_managed_cards SET active_job=NULL')) {
             if (db.failRelease) throw new Error('injected card release failure');
             const card=db.cards.find(c=>c.scope===p[0] && c.card_id===p[1]);
@@ -173,8 +194,9 @@ module.exports = function fixture({ enqueueRedemption, now: externalNow } = {}) 
         return structuredClone(row);
     }
     const settle=(task,state) => cdkStore.settleOrbitcardTask(task.jobKey,{status:state==='success'?'success':['failed','rejected'].includes(state)?'failed':state==='manual'?'manual':'running',orbitcardState:state,progress:90,message:state,
-        ...(state==='success'?{gptApiOrderId:`sub-${task.jobKey}`,gptApiRaw:JSON.stringify({task_no:`sub-${task.jobKey}`,client_order_no:task.orbitcardClientOrderNo,
-            card_id:db.tasks.find(row=>row.job_key===task.jobKey)?.orbitcard_card_id,status:'succeeded',subscription_succeeded:true,query_source:'upstream'})}:{}),
+        ...(['success','failed'].includes(state)?{gptApiOrderId:`sub-${task.jobKey}`,gptApiRaw:JSON.stringify({task_no:`sub-${task.jobKey}`,client_order_no:task.orbitcardClientOrderNo,
+            plan_type:require('../../plan-registry').PROVIDER_PLANS[db.tasks.find(row=>row.job_key===task.jobKey)?.orbitcard_plan_type || 'plus'],
+            card_id:db.tasks.find(row=>row.job_key===task.jobKey)?.orbitcard_card_id,status:state==='success'?'succeeded':'failed',subscription_succeeded:state==='success',query_source:'upstream'})}:{}),
         ...(state==='submitting'?{expectedState:'prepared',expectedClientOrderNo:task.orbitcardClientOrderNo}:{})});
     return {db,store,claim,addCard,seedHistoricalIssue,settle,now,runQuery,runExecute,withTransaction,advance:(ms=300000)=>{clock+=ms;},base:BASE,scope:cardScope(BASE)};
 };

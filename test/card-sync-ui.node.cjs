@@ -41,7 +41,7 @@ test('an idle card below its configured successful order limit remains available
     await f.api.loadCards();
     assert.match(f.$('cardRows').innerHTML,/空闲/);
     assert.doesNotMatch(f.$('cardRows').innerHTML,/暂不分配|停止分配/);
-    assert.match(f.$('cardRows').innerHTML,/按当前 API 可读取的卡台成功会员订单去重累计/);
+    assert.match(f.$('cardRows').innerHTML,/按卡片状态与订阅错误判断可用性/);
 });
 
 test('deleted and unavailable cards are omitted from rows after local refresh',async()=>{
@@ -61,8 +61,8 @@ test('failed platform sync retains visible warning with old balances and re-enab
     assert.doesNotMatch(f.$('cardRows').innerHTML,/card-provider-status active/);
     assert.match(f.$('cardSyncState').textContent,/不能用于确认/);
     assert.ok(f.$('cardSyncState').textContent.includes(reason));
-    assert.match(f.$('cardRows').innerHTML,/待同步 \/ 7 笔成功会员订单/);
-    assert.doesNotMatch(f.$('cardRows').innerHTML,/0 \/ 7 笔成功会员订单/);
+    assert.match(f.$('cardRows').innerHTML,/待同步 笔成功会员订单/);
+    assert.doesNotMatch(f.$('cardRows').innerHTML,/0 笔成功会员订单/);
     assert.equal(f.$('syncCards').disabled,false);
     assert.equal(f.$('loadCards').disabled,false);
 });
@@ -108,11 +108,11 @@ test('authorization usage shows synchronized counts, pending counts and retireme
     assert.match(f.$('cardRows').innerHTML,/待同步/);
     assert.doesNotMatch(f.$('cardRows').innerHTML,/data-update-card-usage|data-bind-card/);
     f.card.successful_order_count=6; await f.api.loadCards();
-    assert.match(f.$('cardRows').innerHTML,/6 \/ 7 笔成功会员订单/);
+    assert.match(f.$('cardRows').innerHTML,/6 笔成功会员订单/);
     assert.doesNotMatch(f.$('cardRows').innerHTML,/达到上限，停止分配/);
     f.card.successful_order_count=7; await f.api.loadCards();
-    assert.match(f.$('cardRows').innerHTML,/7 \/ 7 笔成功会员订单/);
-    assert.match(f.$('cardRows').innerHTML,/达到上限，停止分配/);
+    assert.match(f.$('cardRows').innerHTML,/7 笔成功会员订单/);
+    assert.doesNotMatch(f.$('cardRows').innerHTML,/达到上限，停止分配/);
     f.card.successful_order_count=6;f.card.authorization_pending=true;await f.api.loadCards();
     assert.doesNotMatch(f.$('cardRows').innerHTML,/等待授权同步/);
     f.card.retiring=true; await f.api.loadCards();
@@ -171,11 +171,11 @@ test('viewing transactions refreshes authorization counts without maintaining th
         {id:'settlement',transaction_type:'Settlement',status:'completed'}
     ]}};});
     f.card.successful_order_count=2;await f.api.loadCards();
-    assert.match(f.$('cardRows').innerHTML,/2 \/ 7 笔成功会员订单/);
+    assert.match(f.$('cardRows').innerHTML,/2 笔成功会员订单/);
     f.$('transactionCardId').value='42';f.$('transactionPage').value='1';
     await f.api.loadCardTransactions();
     assert.deepEqual(f.calls,['/api/admin/orbitcard/cards','/api/admin/orbitcard/cards/42/transactions?page=1','/api/admin/orbitcard/cards']);
-    assert.match(f.$('cardRows').innerHTML,/3 \/ 7 笔成功会员订单/);
+    assert.match(f.$('cardRows').innerHTML,/3 笔成功会员订单/);
     assert.match(f.$('cardRows').innerHTML,/授权流水仅供对账/);
     assert.equal(JSON.parse(f.$('cardTransactions').textContent).transactions.length,2);
     assert.equal(f.$('loadTransactions').disabled,false);
@@ -188,7 +188,7 @@ test('transaction query failures replace stale results with an error and preserv
     f.$('cardTransactions').textContent='previous response';
     await assert.rejects(f.api.loadCardTransactions(),/HTTP 403/);
     assert.match(f.$('cardTransactions').textContent,/查询失败.*HTTP 403.*授权次数未更新/);
-    assert.match(f.$('cardRows').innerHTML,/3 \/ 7 笔成功会员订单/);
+    assert.match(f.$('cardRows').innerHTML,/3 笔成功会员订单/);
     assert.equal(f.$('loadTransactions').disabled,false);
 });
 

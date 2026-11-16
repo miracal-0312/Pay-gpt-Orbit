@@ -1,11 +1,17 @@
 'use strict';
 const { PLAN_TYPES, paymentPlan } = require('./plan-registry');
 const money = require('./orbitcard-money');
-const cardPool = require('./orbitcard-pool');
 
 const DEFAULT_BASE_URL = 'https://orbitcard.cc';
 const PROTOCOL_VERSION = 'orbitcard-hmac-v1';
 const RETIRED_CONFIG_KEYS = ['gpt_api_provider', 'gpt_api_plan_key', 'gpt_api_country', 'gpt_api_currency'];
+
+function openingChoices(value, kind) {
+    if (!Array.isArray(value) || value.length > 200 || value.some(item => typeof item !== 'string'
+        || !item.trim() || item.length > 128 || /[\x00-\x1f\x7f]/.test(item)
+        || kind === 'bin' && !/^\d{6,8}$/.test(item))) throw new Error('开卡渠道和卡段必须是有效的多选列表');
+    return [...new Set(value.map(item => item.trim()))];
+}
 
 function normalizePaymentRegions(input = {}, existing = {}) {
     if (!input || typeof input !== 'object' || Array.isArray(input)
@@ -70,9 +76,11 @@ function prepareConfig(input, existing = {}, secretAvailable = false) {
         api_key: String(process.env.ORBITCARD_API_KEY || '').trim(),
         orbitcard_max_fee: String(input.orbitcard_max_fee ?? existing.orbitcard_max_fee ?? '').trim(),
         orbitcard_product_code: String(input.orbitcard_product_code ?? existing.orbitcard_product_code ?? '').trim(),
+        orbitcard_product_codes: openingChoices(Object.hasOwn(input, 'orbitcard_product_codes') ? input.orbitcard_product_codes
+            : Object.hasOwn(input, 'orbitcard_product_code') ? (input.orbitcard_product_code ? [input.orbitcard_product_code] : [])
+                : existing.orbitcard_product_codes ?? (existing.orbitcard_product_code ? [existing.orbitcard_product_code] : []), 'product'),
+        orbitcard_bins: openingChoices(Object.hasOwn(input, 'orbitcard_bins') ? input.orbitcard_bins : existing.orbitcard_bins ?? [], 'bin'),
         orbitcard_max_initial_amount: String(input.orbitcard_max_initial_amount ?? existing.orbitcard_max_initial_amount ?? '').trim(),
-        orbitcard_max_authorizations: Object.hasOwn(input, 'orbitcard_max_authorizations')
-            ? cardPool.validateLimit(input.orbitcard_max_authorizations) : cardPool.successfulOrderLimit(existing),
         orbitcard_payment_regions: normalizePaymentRegions(input.orbitcard_payment_regions, existing.orbitcard_payment_regions),
         orbitcard_plan_prices: normalizePlanPrices(input.orbitcard_plan_prices, existing.orbitcard_plan_prices)
     };
@@ -86,4 +94,4 @@ function prepareConfig(input, existing = {}, secretAvailable = false) {
 }
 
 module.exports = { DEFAULT_BASE_URL, PROTOCOL_VERSION, RETIRED_CONFIG_KEYS, normalizeBaseUrl, migrationValues, prepareConfig,
-    normalizePaymentRegions, paymentRegion, normalizePlanPrices, planPrice };
+    normalizePaymentRegions, paymentRegion, normalizePlanPrices, planPrice, openingChoices };

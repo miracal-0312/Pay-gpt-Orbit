@@ -3,6 +3,7 @@ const crypto = require('node:crypto');
 const money = require('./orbitcard-money');
 const { CardPreparationError, FundingPendingError, FundingAwaitingError, FUNDING_POLL_MS, cardScope } = require('./orbitcard-card-policy');
 const { PaymentStoppedError } = require('./payment-automation');
+const { classifyApiError } = require('./orbitcard-error-policy');
 
 module.exports = function createFundingService({ api, cardsApi, audit, now, assertPaymentAllowed,
     assertReconciliationAllowed = assertPaymentAllowed, withRecoveryOwner }) {
@@ -28,7 +29,8 @@ module.exports = function createFundingService({ api, cardsApi, audit, now, asse
             const result = await api.request({...cfg,auditJobKey:funding.job_key},'getCardFlow',{
                 card_id:Number(funding.card_id),type:'recharge',page,page_size:100
             });
-            if (!result.success) return result;
+            if (!result.success || result.status !== 200 || result.requestError || result.data?.request_error
+                || result.code != null && result.code !== 0) return result;
             const data=result.data;
             if (!data || !Array.isArray(data.list) || (data.card_id != null && Number(data.card_id)!==Number(funding.card_id))
                 || (data.type != null && String(data.type).toLowerCase()!=='recharge')) throw new FundingPendingError('原补款流水响应或归属无效，保留原补款订单');
@@ -72,6 +74,9 @@ module.exports = function createFundingService({ api, cardsApi, audit, now, asse
             throw new CardPreparationError('原补款未提交，准备任务可以安全结束');
         }
         if (options.readOnly && !funding.order_no) throw new FundingPendingError('原补款缺少平台订单号，无法只读确认；保留原记录，请人工核对');
+        if (!funding.order_no && funding.state !== 'prepared') {
+            throw new FundingPendingError('原补款可能已发送但缺少平台订单号，保留原意图并人工核对，禁止重复补款');
+        }
         if (Number(funding.retry_at || 0)>now()) {
             const ErrorType = funding.order_no && ['pending','submitting','ready'].includes(funding.state) ? FundingAwaitingError : FundingPendingError;
             throw new ErrorType('原补款订单仍在重查间隔内，请稍后确认',Number(funding.retry_at)-now());
@@ -97,6 +102,23 @@ module.exports = function createFundingService({ api, cardsApi, audit, now, asse
             if(card.provider_status!=='ACTIVE') throw new FundingPendingError('补款提交前发现卡片不可用，已停止发送补款；保留原意图和 CDK 待核对');
             await assertPaymentAllowed(cfg, funding.job_key);
             result=await api.request({...cfg,auditJobKey:funding.job_key},'rechargeCard',body,funding.funding_key);
+        }
+        if (!result.success || result.status !== 200 || result.requestError || result.data?.request_error
+            || result.code != null && result.code !== 0) {
+            const disposition = classifyApiError({ operation: funding.order_no ? 'getCardFlow' : 'rechargeCard',
+                status: result.status, code: result.code, requestError: result.requestError || result.data?.request_error,
+                retryAfterMs: result.retryAfterMs });
+            const delay = Math.max(FUNDING_POLL_MS, result.retryAfterMs || 0, disposition.retryAfterMs,
+                disposition.stopTracking ? 300000 : 0);
+            const message = `${disposition.message}；保留原补款、卡片和 CDK，禁止重复补款`;
+            const awaiting = Boolean(funding.order_no) && !disposition.stopTracking;
+            await locked.updateFunding(funding.funding_key, { state: awaiting ? 'pending' : 'unknown',
+                message, retry_at: now() + delay });
+            funding.retry_at = now() + delay;
+            record(funding, 'card_funding_unconfirmed', message, { order_no: funding.order_no || '', error_action: disposition.action });
+            const error = awaiting ? new FundingAwaitingError(message, delay) : new FundingPendingError(message);
+            error.disposition = disposition; error.retryAfterMs = delay;
+            throw error;
         }
         const data=result.data,order=typeof data?.order_no==='string'?data.order_no:'',status=typeof data?.status==='string'?data.status:'';
         const delay=Math.max(FUNDING_POLL_MS,result.retryAfterMs || 0,
@@ -176,7 +198,9 @@ module.exports = function createFundingService({ api, cardsApi, audit, now, asse
                 try { await confirm(ownedCfg,locked,funding,{readOnly:true}); }
                 catch (error) {
                     if (error instanceof PaymentStoppedError) throw error;
-                    await locked.updateFunding(funding.funding_key,{state:'unknown',retry_at:Math.max(Number(funding.retry_at || 0),now()+60000),message:'原补款仍待确认或人工核对，保持原申请身份'});
+                    await locked.updateFunding(funding.funding_key,{state:'unknown',
+                        retry_at:Math.max(Number(funding.retry_at || 0),now()+Math.max(60000,error.retryAfterMs || 0)),
+                        message:error.disposition ? `${error.disposition.message}；保留原补款申请` : '原补款仍待确认或人工核对，保持原申请身份'});
                     record(funding,'card_funding_pending','原补款仍待确认或人工核对，保持原申请身份');
                 }
             });

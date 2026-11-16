@@ -85,6 +85,27 @@ test('a historical waiting retry returns its original order without dispatching 
         assert.equal(f.events.filter(event=>event[0]==='worker').length,0);
     } finally {if(old===undefined)delete process.env.ORBITCARD_API_SECRET;else process.env.ORBITCARD_API_SECRET=old;}
 });
+
+test('activation resumes a verified 59005 failure after restart without requiring an upstream order number', async () => {
+    const previous = process.env.ORBITCARD_API_SECRET; process.env.ORBITCARD_API_SECRET = 'test-secret';
+    try {
+        let claims = 0;
+        const snapshot = { client_order_no: 'REJECTED-CARD', card_id: 42, plan_type: 'gpt-plus',
+            platform_code: 59005, submission_outcome: 'rejected', failureCode: 'card_unavailable' };
+        const f = fixture({ verifyCdkDetails: async () => ({ type: '自助', plan_type: 'plus', used_at: 'reserved' }),
+            getRunningTaskByCdk: async () => ({ job_key: 'original', status: 'running', orbitcard_state: 'retry_waiting',
+                orbitcard_client_order_no: 'REJECTED-CARD', orbitcard_card_id: 42, orbitcard_plan_type: 'plus',
+                orbitcard_retry_attempt_no: 1, gpt_api_order_id: null, gpt_api_raw: JSON.stringify(snapshot) }),
+            claimOrbitcardRetry: async (key, credentials) => {
+                claims++; assert.equal(key, 'original'); assert.equal(credentials.email, session.user.email);
+                return { jobKey: 'retry', orbitcardClientOrderNo: 'SECOND', orbitcardRetryRootJobKey: 'original', orbitcardRetryAttemptNo: 2 };
+            }, createOrbitcardTask: async () => assert.fail('must preserve original attempt chain') });
+        const response = await f.request();
+        assert.equal(response.code, 200); assert.equal(response.data.jobKey, 'original');
+        assert.equal(claims, 1); assert.equal(f.events.filter(row => row[0] === 'worker').length, 1);
+        assert.equal(f.events.find(row => row[0] === 'worker')[1].task.orbitcardRetryAttemptNo, 2);
+    } finally { if (previous === undefined) delete process.env.ORBITCARD_API_SECRET; else process.env.ORBITCARD_API_SECRET = previous; }
+});
 test('admission capacity is reserved before an asynchronous task insert', async () => {
     const old = process.env.ORBITCARD_API_SECRET; process.env.ORBITCARD_API_SECRET = 'test-secret';
     let release, entered;
@@ -156,7 +177,7 @@ test('historical tasks retain reservations and migrations do not drop legacy dat
     assert.ok(executed.some(([sql]) => sql.includes('used_at = COALESCE(used_at')));
     assert.ok(executed.some(([sql]) => sql.includes("status = 'manual'")));
     assert.ok(executed.every(([sql]) => !/DROP|TRUNCATE|used_at = NULL/.test(sql)));
-    assert.ok(columns.every(([table]) => ['app_config','cdk_codes','task_logs','orbitcard_admin_orders','orbitcard_managed_cards','orbitcard_card_uses'].includes(table)));
+    assert.ok(columns.every(([table]) => ['app_config','cdk_codes','task_logs','orbitcard_admin_orders','orbitcard_managed_cards','orbitcard_card_uses','orbitcard_card_issues'].includes(table)));
 });
 test('new tasks store only the account preview and never a submitted Session', async () => {
     let insert;

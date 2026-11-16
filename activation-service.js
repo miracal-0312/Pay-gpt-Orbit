@@ -21,7 +21,7 @@ module.exports = function createActivationHandler({ store, ensureStoreReady, act
             if (code?.manual_redeemed_at) return res.status(403).json({ success: false, message: '该卡密已由人工售后核销，不能再次充值' });
             const existing = code && await store.getRunningTaskByCdk(cdk);
 
-            const resumingRetry = existing?.orbitcard_state === 'retry_waiting' && Boolean(existing.gpt_api_order_id);
+            const resumingRetry = require('./payment-retry-policy').retryableTask(existing);
             if (existing && !resumingRetry) return res.json({ success: true,
                 jobKey: existing.orbitcard_retry_root_job_key || existing.job_key,
                 provider: existing.orbitcard_client_order_no ? 'orbitcard' : 'history',

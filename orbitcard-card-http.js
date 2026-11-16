@@ -2,7 +2,7 @@
 
 const cardsApi = require('./orbitcard-cards-client');
 const api = require('./orbitcard-client');
-const { successfulOrderLimit } = require('./orbitcard-pool');
+const { eligible } = require('./orbitcard-pool');
 const { CardPreparationError } = require('./orbitcard-card-policy');
 const { PLAN_TYPES: CANONICAL_PLAN_TYPES, PROVIDER_PLANS } = require('./plan-registry');
 
@@ -18,14 +18,17 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
         const cards = (await methods.listCards()).map(card => ({
             card_id: Number(card.card_id), active_job: card.active_job,
             authorization_count: card.authorization_count == null ? null : Number(card.authorization_count),
-            successful_order_count: card.successful_order_count == null ? null : Number(card.successful_order_count), successful_order_limit: successfulOrderLimit(cfg),
+            successful_order_count: card.successful_order_count == null ? null : Number(card.successful_order_count),
+            availability_basis: 'card_errors', usable: eligible(card) && card.provider_status === 'ACTIVE',
+            disabled_at: card.disabled_at, disabled_code: card.disabled_code,
+            disabled_reason: card.disabled_reason, disabled_job_key: card.disabled_job_key, card_bin: card.card_bin,
             counting_basis: 'confirmed_subscription_orders', authorizations_checked_at: card.authorizations_checked_at,
             retiring: Boolean(card.retirement_key),
             provider_status: card.provider_status, product_code: card.product_code, last4: card.last4,
             balance: card.balance, currency: card.currency, source: card.source, updated_at: card.updated_at
         }));
         const issues = (await methods.listIssues()).map(issue => Object.fromEntries([
-            'issue_key','job_key','plan_type','product_code','amount','state','order_no','card_id','message',
+            'issue_key','job_key','replacement_for_card_id','replacement_for_job_key','plan_type','product_code','amount','state','order_no','card_id','message',
             'provider_status','completed','fee_snapshot','retry_at','created_at','updated_at'
         ].map(key => [key,issue[key]])));
         const fundings=(await methods.listFundings()).map(funding => Object.fromEntries([
@@ -34,6 +37,28 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
         ].map(key => [key,funding[key]])));
         res.set('Cache-Control', 'no-store');
         res.json({ success: true, source: 'local_snapshot', cards, issues, fundings });
+    }));
+    app.get('/api/admin/orbitcard/products', handler(async (req, res) => {
+        const products = await cardsApi.products(await config());
+        res.set('Cache-Control', 'no-store');
+        res.json({ success: true, products, channels: products.map(product => ({
+            code: product.product_code, bin: product.bin, network: product.network, issuing_area: product.issuing_area })),
+            bins: [...new Set(products.map(product => product.bin).filter(Boolean))] });
+    }));
+    app.post('/api/admin/orbitcard/cards/:cardId/availability', requireSecondaryAuth, handler(async (req, res) => {
+        const cardId = cardsApi.positiveId(req.params.cardId), disabled = req.body?.disabled;
+        const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+        if (!cardId || typeof disabled !== 'boolean' || !reason || reason.length > 255) {
+            throw new CardPreparationError('请选择有效卡片及停用状态，并填写 1–255 字的修改原因');
+        }
+        const cfg = await config();
+        const safeReason = require('./log-safety').sanitize(reason);
+        const result = await store.withCardAllocationLock(cfg.base_url,
+            locked => locked.setCardAvailability(cardId, disabled, safeReason));
+        require('./runtime-log').push({ source: 'admin', event: 'card_availability_changed',
+            text: disabled ? '管理员人工停用卡片' : '管理员恢复卡片使用',
+            data: { card_id: cardId, disabled, reason: safeReason, admin: req.admin?.email || '' } });
+        res.json({ success: true, card: result, message: disabled ? '卡片已人工停用' : '已清除卡片停用标记，后续选卡将实时核对平台状态和余额' });
     }));
     app.get('/api/admin/orbitcard/cards/preview', handler(async (req, res) => {
         const cards = await cardsApi.listCards(await config());
@@ -81,7 +106,7 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
             throw new CardPreparationError('共享卡池开卡不接收套餐或自定义参数，请提交空请求');
         }
         const cfg = await config(), card = await cardService.apply(cfg);
-        res.json({ success: true, card, message: `开卡成功，首充 20 USD；成功会员订单满 ${successfulOrderLimit(cfg)} 次后停止分配` });
+        res.json({ success: true, card, message: '开卡成功，首充 20 USD；卡片按平台状态和订阅卡片错误判定可用性' });
     }));
     app.post('/api/admin/orbitcard/issues/refresh', handler(async (req, res) => {
         await cardService.recover(await config());

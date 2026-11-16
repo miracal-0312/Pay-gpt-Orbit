@@ -110,6 +110,10 @@ CREATE TABLE IF NOT EXISTS orbitcard_managed_cards (
     authorizations_checked_at DATETIME(3) NULL,
     retirement_key VARCHAR(80) NULL,
     retirement_state VARCHAR(16) NULL,
+    disabled_at DATETIME(3) NULL,
+    disabled_code VARCHAR(128) NULL,
+    disabled_reason VARCHAR(255) NULL,
+    disabled_job_key VARCHAR(128) NULL,
     active_job VARCHAR(64) NULL,
     provider_status VARCHAR(32) NOT NULL DEFAULT '',
     product_code VARCHAR(128) NOT NULL DEFAULT '',
@@ -184,6 +188,8 @@ CREATE TABLE IF NOT EXISTS orbitcard_card_issues (
     issue_key VARCHAR(80) NOT NULL PRIMARY KEY,
     scope CHAR(64) NOT NULL,
     job_key VARCHAR(64) NULL,
+    replacement_for_card_id BIGINT UNSIGNED NULL,
+    replacement_for_job_key VARCHAR(128) NOT NULL DEFAULT '',
     plan_type VARCHAR(32) NOT NULL,
     credential_hash CHAR(64) NOT NULL,
     request_body TEXT NOT NULL,
@@ -199,5 +205,6 @@ CREATE TABLE IF NOT EXISTS orbitcard_card_issues (
     retry_at BIGINT UNSIGNED NOT NULL DEFAULT 0,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    KEY idx_oc_issue_recovery (scope, state, updated_at)
+    KEY idx_oc_issue_recovery (scope, state, updated_at),
+    UNIQUE KEY idx_oc_issue_replacement (scope, replacement_for_card_id, replacement_for_job_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

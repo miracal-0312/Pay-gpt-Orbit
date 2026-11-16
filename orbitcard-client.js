@@ -5,6 +5,8 @@ const crypto = require('node:crypto');
 const { normalizeBaseUrl } = require('./orbitcard-config');
 const { validateRequest } = require('./orbitcard-api-contract');
 const audit = require('./runtime-log');
+const { classifyApiError } = require('./orbitcard-error-policy');
+const { sanitize } = require('./log-safety');
 
 const accountCooldowns = new Map();
 const MAX_ACTIVE_REQUESTS = 32;
@@ -63,7 +65,8 @@ async function request(cfg, operation, body = {}, idempotencyKey = '') {
             maxContentLength: 2 * 1024 * 1024, maxBodyLength: 256 * 1024,
             validateStatus: () => true });
         const envelope = response.data;
-        const success = response.status >= 200 && response.status < 300 && envelope?.code === 0;
+        const rawRequestError = envelope?.request_error || envelope?.data?.request_error;
+        const success = response.status >= 200 && response.status < 300 && envelope?.code === 0 && !rawRequestError;
         const retryHeader = response.headers?.['retry-after'];
         const headerSeconds = retryHeader && !Number.isFinite(Number(retryHeader))
             ? Math.max(0, (Date.parse(retryHeader) - Date.now()) / 1000) : Number(retryHeader || 0);
@@ -75,26 +78,48 @@ async function request(cfg, operation, body = {}, idempotencyKey = '') {
             if (!accountCooldowns.has(accountIdentity) && accountCooldowns.size >= 128) accountCooldowns.delete(accountCooldowns.keys().next().value);
             accountCooldowns.set(accountIdentity,Date.now()+Math.max(5000,retryAfterMs));
         }
-        const requestError = envelope?.request_error || envelope?.data?.request_error;
-        record('request_finished', { http_status: response.status, platform_code: envelope?.code,
+        const requestError = safeRequestError(rawRequestError);
+        const platformCode = diagnosticCode(envelope?.code);
+        const disposition = success ? undefined : classifyApiError({ operation, status: response.status,
+            code: platformCode, requestError, retryAfterMs });
+        record('request_finished', { http_status: response.status, platform_code: platformCode,
             card_response: ['getCardList', 'cardDetail'].includes(operation) ? cardResponseShape(envelope?.data) : undefined,
-            success, order: summary(envelope?.data), request_error: requestError ? {
-                code: typeof requestError.code === 'string' ? requestError.code : undefined,
-                submission_outcome: typeof requestError.submission_outcome === 'string' ? requestError.submission_outcome : undefined,
-                source: typeof requestError.source === 'string' ? requestError.source : undefined
-            } : undefined, retry_after_ms: retryAfterMs });
-        return { success, status: response.status, code: envelope?.code, data: envelope?.data,
-            requestError: envelope?.request_error || envelope?.data?.request_error,
-            retryAfterMs,
-            error: success ? undefined : [401,403].includes(response.status)
-                ? `Orbitcard 认证或接口权限不足（HTTP ${response.status}），请管理员检查密钥、出口 IP 和 API 权限`
-                : response.status===429 ? 'Orbitcard 请求频率受限，请按重试时间稍后查询'
-                    : `Orbitcard 请求失败（HTTP ${response.status} / code ${envelope?.code ?? 'unknown'}）` };
+            success, order: summary(envelope?.data), request_error: requestError,
+            error_action: disposition?.action, retry_after_ms: retryAfterMs });
+        return { success, status: response.status, code: platformCode, data: envelope?.data,
+            requestError, retryAfterMs, disposition,
+            error: success ? undefined : disposition.message };
     } catch (_) {
         // Axios errors contain the signed request and the customer's entire Session.
         record('request_failed', { outcome: 'unknown', error: 'network_or_audit_failure' });
-        return { success: false, error: 'Orbitcard 网络请求失败，结果待确认' };
+        const disposition = classifyApiError({ operation });
+        return { success: false, requestError: { code: 'relay_transport_unknown', source: 'relay', submission_outcome: 'unknown' },
+            disposition, error: disposition.message };
     } finally { activeRequests--; }
+}
+
+// Error metadata is a small protocol vocabulary, never free-form upstream text.
+// In particular a URL, JWT, serialized Session or long number cannot become a
+// diagnostic code merely by appearing in an error-code field.
+function diagnosticCode(value) {
+    if (Number.isSafeInteger(value) && value >= 0 && value <= 9999999999) return value;
+    if (typeof value !== 'string') return undefined;
+    if (/^\d{1,10}$/.test(value)) return value;
+    return value.length <= 128 && /^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/.test(value) ? value : undefined;
+}
+
+function safeRequestError(error) {
+    if (!error) return undefined;
+    const result = { code: diagnosticCode(error.code) || 'relay_unclassified_error' };
+    if (['relay', 'upstream', 'local'].includes(error.source)) result.source = error.source;
+    if (['rejected', 'unknown'].includes(error.submission_outcome)) result.submission_outcome = error.submission_outcome;
+    const upstreamCode = diagnosticCode(error.upstream_code);
+    if (upstreamCode !== undefined) result.upstream_code = upstreamCode;
+    if (Number.isInteger(error.upstream_http_status) && error.upstream_http_status >= 100 && error.upstream_http_status <= 599) {
+        result.upstream_http_status = error.upstream_http_status;
+    }
+    if (Number.isFinite(error.retry_after_seconds) && error.retry_after_seconds >= 0) result.retry_after_seconds = error.retry_after_seconds;
+    return result;
 }
 
 // Structure only: no card numbers, CVV, credentials or raw provider messages.
@@ -127,6 +152,8 @@ function terminalUpstreamSnapshot(data) {
 function outcome(data, detail = false) {
     // Callers must validate the original order identity before settlement.
     // Unverified snapshots and contradictory indicators remain unresolved.
+    if (data?.request_error || (data?.result_source && data.result_source !== 'upstream')
+        || (data?.subscription_succeeded != null && typeof data.subscription_succeeded !== 'boolean')) return 'pending';
     if (detail && data?.query_source && data.query_source !== 'upstream' && !terminalUpstreamSnapshot(data)) return 'pending';
     const observed = [data?.upstream_status, detail ? data?.status : null]
         .filter(value => value !== null && value !== undefined && value !== '');
@@ -146,15 +173,21 @@ function summary(data) {
     const keys = ['task_no', 'orderId', 'client_order_no', 'plan_type', 'payment_region', 'paymentRegion',
         'status', 'upstream_status', 'subscription_succeeded', 'subscriptionCancelled', 'service_fee', 'currency',
         'fee_status', 'billing_policy', 'stage', 'query_source', 'result_source', 'error_code', 'card_id',
-        'order_no','amount','fee_amount','total_debit_amount', 'failureCode', 'failureMessage'];
+        'order_no','amount','fee_amount','total_debit_amount', 'failureCode', 'failureMessage',
+        'platform_code', 'http_status', 'submission_outcome', 'error_action'];
+    // Correlation keys must survive byte-for-byte; generic PAN redaction would
+    // corrupt a legitimate numeric order number. Reject malformed identities
+    // instead of silently changing the identity used by recovery.
+    const identityKeys = new Set(['task_no', 'orderId', 'client_order_no', 'order_no']);
     const result = Object.fromEntries(keys.filter(k => data?.[k] === null || ['string', 'number', 'boolean'].includes(typeof data?.[k]))
-        .map(k => [k, typeof data[k] === 'string' ? data[k].slice(0, 256) : data[k]]));
+        .filter(k => !identityKeys.has(k) || typeof data[k] === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(data[k]))
+        .map(k => [k, typeof data[k] === 'string' ? identityKeys.has(k) ? data[k]
+            : sanitize(data[k]).replace(/https?:\/\/[^\s<>"']+/gi, '[REDACTED_URL]').slice(0, 256) : data[k]]));
     if (Number.isFinite(data?.payment?.amount) && typeof data.payment.currency === 'string') {
         result.payment = { amount: data.payment.amount, currency: data.payment.currency.slice(0, 8) };
     }
-    for (const key of ['failureCode', 'failureMessage']) {
-        if (typeof result[key] === 'string') result[key] = require('./log-safety').sanitize(result[key]);
-    }
+    const requestError = safeRequestError(data?.request_error);
+    if (requestError) result.request_error = requestError;
     return result;
 }
 
@@ -187,4 +220,4 @@ async function testConnection(cfg) {
         balanceError: balance.success ? null : balance.error, checks };
 }
 
-module.exports = { request, fetchPlans, testConnection, outcome, terminalUpstreamSnapshot, summary, captcha };
+module.exports = { request, fetchPlans, testConnection, outcome, terminalUpstreamSnapshot, summary, captcha, safeRequestError };

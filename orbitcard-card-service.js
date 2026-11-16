@@ -12,13 +12,16 @@ const { PLAN_TYPES } = require('./plan-registry');
 const { decideCards } = require('./orbitcard-payment-decision');
 const { planPrice } = require('./orbitcard-config');
 const { PaymentStoppedError } = require('./payment-automation');
+const { classifyApiError } = require('./orbitcard-error-policy');
 
 module.exports = function createCardService({ store, audit, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), maxIssuePolls = 3, now = Date.now }) {
     function record(jobKey, event, text, data) { audit({ jobKey: jobKey || '', source: 'orbitcard', event, text, data }); }
     const credentialHash = cfg => crypto.createHash('sha256').update(String(cfg.api_key || '').trim()).digest('hex');
-    async function latestLimitConfig(cfg) {
+    async function latestOpeningConfig(cfg) {
         const latest = store.getGptApiConfig ? await store.getGptApiConfig() : cfg;
-        return { ...cfg, orbitcard_max_authorizations: poolPolicy.successfulOrderLimit(latest) };
+        return { ...cfg, orbitcard_product_codes: latest.orbitcard_product_codes,
+            orbitcard_product_code: latest.orbitcard_product_code, orbitcard_bins: latest.orbitcard_bins,
+            orbitcard_max_initial_amount: latest.orbitcard_max_initial_amount };
     }
     async function assertPaymentAllowed(cfg, jobKey) {
         await cfg.executionGuard?.assertOwned();
@@ -37,8 +40,8 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
         const originalIssueOnly = issueReconciliation && Boolean(entry.job_key)
             && (owner.allowed || owner.canReconcileIssue);
         if (!owner.allowed && !originalIssueOnly) return false;
-        // Automatic opening is disabled, including historical order attempts.
-        // Only reconcile acknowledged applications, or close an unsent marker.
+        // Historical order-bound applications reconcile their original identity.
+        // Shared replacement applications are owned by the card pool.
         if (originalIssueOnly && entry.state !== 'prepared' && !entry.order_no) return false;
         // Dedicated funding reconciliation owns these jobs. The legacy card
         // maintenance pass must not lengthen their delay or resend funding.
@@ -67,7 +70,11 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
     const orderSync = require('./orbitcard-order-sync')({ api, store });
     async function account(cfg) {
         const result=await api.request(cfg,'getAccountBalance');
-        if(!result.success) throw new CardPreparationError(result.error || '账户可用余额查询失败，已停止选卡、开卡和补款');
+        if(!result.success || result.requestError || result.data?.request_error || result.code != null && result.code !== 0) {
+            const disposition = classifyApiError({ operation: 'getAccountBalance', status: result.status,
+                code: result.code, requestError: result.requestError || result.data?.request_error, retryAfterMs: result.retryAfterMs });
+            throw new CardPreparationError(`${disposition.message}；已停止选卡、开卡和补款`);
+        }
         const available=money.units(result.data?.available_balance);
         record(cfg.auditJobKey,'account_balance_checked','已读取账户可用余额',{available_balance:money.decimal(available)});
         return available;
@@ -85,7 +92,6 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
     }
 
     async function maintainPool(cfg, locked, listed) {
-        const limit = poolPolicy.successfulOrderLimit(cfg);
         if (!cfg.enabled) return listed;
         const removed = new Set();
         async function retireAndRecord(card, row, isListed = true) {
@@ -104,19 +110,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
             await retireAndRecord(card || row, row, Boolean(card));
         }
         const live = listed.filter(card => card.provider_status !== 'DELETED' && !removed.has(Number(card.card_id)));
-        const saved = await locked.listCards();
-        const liveIds = new Set(live.map(card => Number(card.card_id)));
-        if (saved.some(row => liveIds.has(Number(row.card_id))
-            && (row.successful_order_count == null || !Number.isSafeInteger(Number(row.successful_order_count)) || Number(row.successful_order_count) < 0)))
-            throw new CardPreparationError('成功会员订单次数尚未确认，暂停卡池维护，请核对订单账本');
-        const retireIds = new Set(saved.filter(row => row.retirement_key || Number(row.successful_order_count) >= limit).map(row => Number(row.card_id)));
-        for (const card of live) {
-            const row = saved.find(row => Number(row.card_id) === Number(card.card_id));
-            if (!row || row.active_job || !retireIds.has(Number(card.card_id))) continue;
-            await retireAndRecord(card, row);
-        }
-        // Synchronization and retirement never create cards. New cards require
-        // an explicit administrator application.
+        // Replacement issuance runs in allocation and background recovery.
         return live.filter(card => !removed.has(Number(card.card_id)));
     }
 
@@ -139,6 +133,21 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
             await assertAllowed(cfg, issue.job_key);
             const result = await api.request({ ...cfg, auditJobKey: issue.job_key || cfg.auditJobKey || '' }, 'createCard', body, issue.issue_key);
             await assertAllowed(cfg, issue.job_key);
+            if (!result.success || result.status !== 200 || result.requestError || result.data?.request_error
+                || result.code != null && result.code !== 0) {
+                const disposition = classifyApiError({ operation: 'createCard', status: result.status, code: result.code,
+                    requestError: result.requestError || result.data?.request_error, retryAfterMs: result.retryAfterMs });
+                const delay = Math.max(5000, result.retryAfterMs || 0, disposition.retryAfterMs,
+                    disposition.stopTracking ? 300000 : 0);
+                const message = `${disposition.message}；保留原开卡申请，禁止更换幂等键重开`;
+                await locked.updateIssue(issue.issue_key, { state: 'unknown', message, retry_at: now() + delay });
+                issue.retry_at = now() + delay;
+                record(issue.job_key, 'card_issue_unconfirmed', message, { issue_key: issue.issue_key,
+                    order_no: issue.order_no || '', error_action: disposition.action });
+                const error = new CardPreparationError(message);
+                error.disposition = disposition; error.retryAfterMs = delay;
+                throw error;
+            }
             const detail = cardsApi.issueResult(result.data);
             if ((issue.order_no && detail.order_no && issue.order_no !== detail.order_no)
                 || (issue.card_id && detail.card_id && Number(issue.card_id) !== detail.card_id)
@@ -189,7 +198,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
         if (!issue) {
             // Refresh before a new issue; an unresolved issue retains its original body and key.
             const products = await cardsApi.products(cfg);
-            const selected = cardsApi.chooseOpeningProduct(products,cfg);
+            const selected = cardsApi.chooseOpeningProduct(products,cfg,(await locked.listIssues())[0]?.product_code);
             const body = cardsApi.createCardBody(selected);
             requireFunds('',await account(cfg),money.units(body.amount));
             await assertPaymentAllowed(cfg, null);
@@ -202,18 +211,59 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
         return confirmIssue(cfg, locked, issue);
     }
 
+    async function replaceDisabledCard(cfg, locked, planType, knownProducts = null) {
+        if (!cfg.enabled && !cfg.auditJobKey) return null;
+        for (const row of await locked.listCards()) {
+            if (!row.disabled_at || row.disabled_code === 'manual' || row.active_job) continue;
+            const failureJobKey = row.disabled_job_key || '';
+            let issue = await locked.replacementForCard(row.card_id, failureJobKey);
+            if (issue && ['ready', 'failed'].includes(issue.state)) continue;
+            if (!issue) {
+                // A unique issue per card and failure survives restarts and retries.
+                for (const plan of PLAN_TYPES) {
+                    if (await locked.pendingIssue(plan)) throw new CardBusyError('原开卡申请正在确认，等待原申请完成后补开');
+                }
+                const products = knownProducts || await cardsApi.products(cfg);
+                const selected = cardsApi.chooseOpeningProduct(products, cfg, (await locked.listIssues())[0]?.product_code);
+                const body = cardsApi.createCardBody(selected);
+                requireFunds(cfg.auditJobKey, await account(cfg), money.units(body.amount));
+                await assertPaymentAllowed(cfg, cfg.auditJobKey || null);
+                issue = await locked.createManualIssue({ issue_key: `card-${crypto.randomUUID()}`,
+                    plan_type: planFor(planType), ...selected, credential_hash: credentialHash(cfg),
+                    request_body: JSON.stringify(body), replacement_for_card_id: row.card_id, replacement_for_job_key: failureJobKey });
+                record(cfg.auditJobKey, 'card_replacement_started', '卡片因订阅错误停用，已登记补开申请', {
+                    card_id: Number(row.card_id), failure_code: row.disabled_code,
+                    issue_key: issue.issue_key, product_code: selected.product_code });
+            }
+            try {
+                const card = await confirmIssue(cfg, locked, issue, 1);
+                record(cfg.auditJobKey, 'card_replacement_ready', '停用卡的补开申请已完成', {
+                    disabled_card_id: Number(row.card_id), card_id: card.card_id, issue_key: issue.issue_key });
+                return card;
+            } catch (error) {
+                const latest = await locked.replacementForCard(row.card_id, failureJobKey);
+                if (latest && !['ready', 'failed'].includes(latest.state)) {
+                    record(cfg.auditJobKey, 'card_replacement_pending', '补开申请待确认，保留原请求身份', {
+                        card_id: Number(row.card_id), issue_key: issue.issue_key });
+                    throw new CardBusyError('支付卡补开申请正在确认，卡片就绪后将继续选卡');
+                }
+                throw error;
+            }
+        }
+        return null;
+    }
+
     async function reusable(cfg, locked, jobKey, planType, liveCards, products, excludedCardIds = []) {
-        const limit = poolPolicy.successfulOrderLimit(cfg);
         const plan = planFor(planType), live = new Map(liveCards.map(card => [Number(card.card_id),card]));
         const saved = await locked.listCards();
         const owned=saved.filter(row=>row.active_job===jobKey);
         if(owned.length>1 || owned.some(row=>!live.has(Number(row.card_id))
-            || !poolPolicy.eligible(row, limit))) {
-            throw new CardPreparationError('原订单已预占卡片但平台列表或次数不一致，禁止换卡或重复开卡');
+            || !poolPolicy.eligible(row))) {
+            throw new CardPreparationError('原订单已预占卡片但平台列表或可用状态不一致，请核对原订单');
         }
         const relevant=saved.filter(row => live.has(Number(row.card_id))
             && !['DELETED','CANCELLED','FROZEN'].includes(live.get(Number(row.card_id)).provider_status)
-            && poolPolicy.eligible(row, limit)
+            && poolPolicy.eligible(row)
             && (!row.active_job || row.active_job===jobKey));
         const details=new Map();
         try {
@@ -227,7 +277,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
             throw new CardSelectionError('平台卡片列表非空但批量详情全部缺失，无法确认可用支付卡；请联系人工售后');
         }
         const decision = decideCards({ saved, listed: liveCards, detailed: [...details.values()], products,
-            jobKey, planType, priceFor: (_product, plan) => planPrice(cfg, plan), excludedCardIds, maxSuccessfulOrders: limit });
+            jobKey, planType, priceFor: (_product, plan) => planPrice(cfg, plan), excludedCardIds });
         for (const skipped of decision.skipped) record(jobKey, 'card_unavailable', '卡片已从本次支付选择中排除', skipped);
         for (const card of details.values()) await locked.syncCards([card]);
         record(jobKey, 'card_payment_decision', '支付卡准备决策', {
@@ -236,13 +286,13 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
         const candidates = decision.candidates;
         for (const candidate of candidates) {
             const {row,card,target,deficit}=candidate;
-            const reserved = await locked.reserveCard(card.card_id, jobKey, planType, limit);
+            const reserved = await locked.reserveCard(card.card_id, jobKey, planType);
             if (!reserved) {
                 if(row.active_job===jobKey) throw new CardPreparationError('原订单预占卡片状态已变更，禁止换卡或重复开卡');
                 busy=true;continue;
             }
-            record(jobKey, 'card_reserved', '已预占未达到成功会员订单次数上限的支付卡', {
-                card_id: card.card_id, plan_type: plan, successful_uses: Number(row.successful_order_count), limit });
+            record(jobKey, 'card_reserved', '已预占状态可用的支付卡', {
+                card_id: card.card_id, plan_type: plan, availability_basis: 'card_errors' });
             record(jobKey,'card_funds_before_subscription','订阅提交前支付卡资金快照',{
                 card_id:card.card_id,balance:card.balance_amount,required_balance:money.decimal(target),currency:card.currency});
             if(deficit>0n) {
@@ -258,23 +308,21 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
             throw new CardBusyError('支付卡正在使用，请等待原任务完成或核对原资金记录；本次未开新卡');
         }
         if (busy || decision.action === 'wait') {
-            const unconfirmed = decision.waiting.some(card => card.reason === 'order_count_unconfirmed');
             const statusUnknown = decision.waiting.some(card => card.reason === 'status_unconfirmed');
-            throw new CardPreparationError(unconfirmed ? '成功会员订单次数尚未确认，请核对订单账本；本次未开新卡'
-                : statusUnknown ? '支付卡平台状态尚未确认，请同步卡片并核对原记录；本次未开新卡'
+            throw new CardPreparationError(statusUnknown ? '支付卡平台状态尚未确认，请同步卡片并核对原记录'
                 : '支付卡正在使用，请等待原任务完成或核对原资金记录；本次未开新卡');
         }
         return null;
     }
 
     async function allocate(cfg, jobKey, planType, selection = {}) {
-        cfg = await latestLimitConfig(cfg);
+        cfg = await latestOpeningConfig(cfg);
         return store.withCardAllocationLock(cfg.base_url, async cardMethods => {
             await assertPaymentAllowed(cfg, jobKey);
             requirePlanPrice(cfg, planType);
             const locked = selection.manualRequestId ? {
                 ...cardMethods,
-                reserveCard: (cardId, key, plan, limit) => store.reserveManualCard(selection.manualRequestId, cardId, key, plan, limit)
+                reserveCard: (cardId, key, plan) => store.reserveManualCard(selection.manualRequestId, cardId, key, plan)
             } : cardMethods;
             // Every selection (including manual requests) starts with
             // a complete provider snapshot. Never fall back to cached card state.
@@ -316,7 +364,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
                     : await fundingService.confirm(cfg,locked,originalFunding);
                 await locked.syncCards([card]);
                 const reservation = (await locked.listCards()).find(row => Number(row.card_id)===Number(originalFunding.card_id));
-                if(!reservation || reservation.active_job!==jobKey || !poolPolicy.eligible(reservation, poolPolicy.successfulOrderLimit(cfg))) {
+                if(!reservation || reservation.active_job!==jobKey || !poolPolicy.eligible(reservation)) {
                     throw new CardPreparationError('原补款卡片占用归属已变更，禁止继续提交订阅');
                 }
                 const products=await cardsApi.products(cfg);
@@ -340,7 +388,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
                 const listed = await refreshCards();
                 if (originalIssue.card_id) requireListedCard(listed, originalIssue.card_id);
                 // Finish this job's original issue before looking at unrelated cards.
-                if (originalIssue.state !== 'ready') throw new CardPreparationError('自动开卡已禁用，原开卡申请须先完成对账');
+                if (originalIssue.state !== 'ready') throw new CardPreparationError('原开卡申请须先完成对账，请查询原申请');
                 const opened = await cardsApi.cardDetail(cfg, originalIssue.card_id);
                 const products = await cardsApi.products(cfg);
                 const selected = await reusable(cfg, locked, jobKey, planType, [opened], products);
@@ -351,16 +399,25 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
             }
             const products = await cardsApi.products(cfg);
             let listed = await refreshCards();
-            const selected = await reusable(cfg, locked, jobKey, planType, listed, products, selection.excludedCardIds || []);
+            const excludedIds = selection.excludedCardIds || [];
+            const waitingForReplacement = (await locked.listCards()).some(row => row.disabled_at
+                && excludedIds.map(Number).includes(Number(row.card_id)));
+            if (!waitingForReplacement) {
+                const existing = await reusable(cfg, locked, jobKey, planType, listed, products, excludedIds);
+                if (existing) return existing.card_id;
+            }
+            const replacement = await replaceDisabledCard(cfg, locked, planType, products);
+            if (replacement) listed = [replacement];
+            const selected = await reusable(cfg, locked, jobKey, planType, listed, products, excludedIds);
             if (selected) return selected.card_id;
-            throw new CardPreparationError('没有可用的现有支付卡，自动开卡已禁用，请管理员手动申请或补充卡片');
+            throw new CardPreparationError('没有可用支付卡，请管理员补充卡片或核对停用卡的补开申请');
         });
     }
 
     // Short, read-only financial reconciliation. Never allocates another card or
     // sends a funding request. The caller sleeps after this allocation lock ends.
     async function confirmFunding(cfg, jobKey, planType) {
-        cfg = await latestLimitConfig(cfg);
+        cfg = await latestOpeningConfig(cfg);
         try {
             return await store.withCardAllocationLock(cfg.base_url, async locked => {
                 await assertReconciliationAllowed(cfg, jobKey);
@@ -374,7 +431,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
                 await assertReconciliationAllowed(cfg, jobKey);
                 if (releaseOnly) return card.card_id;
                 const latest = (await locked.listCards()).find(row => Number(row.card_id) === Number(card.card_id));
-                if (!latest || latest.active_job !== jobKey || !poolPolicy.eligible(latest, poolPolicy.successfulOrderLimit(cfg))) {
+                if (!latest || latest.active_job !== jobKey || !poolPolicy.eligible(latest)) {
                     throw new CardPreparationError('原补款卡片当前不符合支付条件，请核对原订单');
                 }
                 return card.card_id;
@@ -467,25 +524,32 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
                 for(const issue of candidates) {
                     const handled = await withRecoveryOwner(cfg, issue, async (ownedCfg, options) => {
                         // Prepared means the remote-write marker was never committed.
-                        if (issue.state === 'prepared') {
+                        if (issue.state === 'prepared' && !issue.replacement_for_card_id) {
                             await locked.updateIssue(issue.issue_key, { state: 'failed', message: '服务在开卡提交前中断，未发送该申请' });
                             return;
                         }
                         try { await confirmIssue(ownedCfg, locked, issue, 1, options); }
                         catch (error) {
                             if (error instanceof PaymentStoppedError) throw error;
-                            await locked.updateIssue(issue.issue_key,{state:'unknown',retry_at:Math.max(Number(issue.retry_at || 0),now()+60000),message:'原开卡申请尚待确认或人工核对，保留原身份'});
+                            await locked.updateIssue(issue.issue_key,{state:'unknown',
+                                retry_at:Math.max(Number(issue.retry_at || 0),now()+Math.max(60000,error.retryAfterMs || 0)),
+                                message:error.disposition ? `${error.disposition.message}；保留原开卡申请` : '原开卡申请尚待确认或人工核对，保留原身份'});
                             record(issue.job_key, 'card_issue_pending', '原开卡申请尚待确认，保留原幂等身份', { issue_key: issue.issue_key });
                         }
                     }, { issueReconciliation: true });
                     if (handled) break;
+                }
+                try { await replaceDisabledCard(cfg, locked, 'plus'); }
+                catch (error) {
+                    record('', 'card_replacement_deferred', '停用卡补开尚未完成，请核对开卡记录、账户余额和产品设置', {
+                        reason: error instanceof CardPreparationError ? error.message : 'replacement_unavailable' });
                 }
             });
         } finally { recovering = false; }
     }
     let balanceCache=null;
     async function transactions(cfg,cardId,page=1) {
-        cfg = await latestLimitConfig(cfg);
+        cfg = await latestOpeningConfig(cfg);
         const id=cardsApi.positiveId(cardId),number=Number(page);
         if(!id || !Number.isSafeInteger(number) || number<1 || number>10000) throw new CardPreparationError('交易查询参数无效');
         return store.withCardAllocationLock(cfg.base_url, async locked => {
@@ -494,7 +558,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
             await locked.syncCards([card]);
             await locked.saveAuthorizations(id,ids);
             const saved=(await locked.listCards()).find(row => Number(row.card_id) === id);
-            return {successful_order_count:Number(saved.successful_order_count),successful_order_limit:poolPolicy.successfulOrderLimit(cfg),counting_basis:'confirmed_subscription_orders',card_id:id,card_status:card.provider_status,card_balance:card.balance_amount,currency:card.currency,
+            return {successful_order_count:Number(saved.successful_order_count),availability_basis:'card_errors',disabled_at:saved.disabled_at,disabled_reason:saved.disabled_reason,card_id:id,card_status:card.provider_status,card_balance:card.balance_amount,currency:card.currency,
                 authorization_count:saved?.authorization_count == null ? null : Number(saved.authorization_count),
                 authorizations_checked_at:saved?.authorizations_checked_at,
                 ...await transactionRows(cfg,id,number)};
@@ -520,13 +584,13 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
         return {page:number,total,transactions:list};
     }
     async function reconcile(cfg,cardId,jobKey) {
-        cfg = await latestLimitConfig(cfg);
+        cfg = await latestOpeningConfig(cfg);
         cardId=cardsApi.positiveId(cardId);
         if(!cardId) throw new CardPreparationError('交易查询参数无效');
         const identity={...cfg,auditJobKey:jobKey};
         const [card,balance,flows]=await Promise.allSettled([
             cardsApi.cardDetail(identity,cardId),account(identity),transactionRows(identity,cardId,1)]);
-        const snapshot={card_id:cardId,successful_order_limit:poolPolicy.successfulOrderLimit(cfg),card_status:card.status==='fulfilled'?card.value.provider_status:null,
+        const snapshot={card_id:cardId,availability_basis:'card_errors',card_status:card.status==='fulfilled'?card.value.provider_status:null,
             card_balance:card.status==='fulfilled'?card.value.balance_amount:null,
             account_available:balance.status==='fulfilled'?money.decimal(balance.value):null,
             observed_transactions:flows.status==='fulfilled'?flows.value.transactions.length:null,

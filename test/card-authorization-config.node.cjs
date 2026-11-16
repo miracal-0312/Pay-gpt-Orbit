@@ -25,61 +25,85 @@ function database() {
     return {core:module.exports,rows};
 }
 
-test('authorization limit defaults to four, permits positive safe integers and preserves omitted settings', () => {
-    assert.equal(prepareConfig({}).orbitcard_max_authorizations,4);
-    for (const value of [1,4,12,1001,Number.MAX_SAFE_INTEGER,'8']) {
-        assert.equal(prepareConfig({orbitcard_max_authorizations:value}).orbitcard_max_authorizations,Number(value));
-    }
-    assert.equal(prepareConfig({orbitcard_max_fee:'2'},{orbitcard_max_authorizations:12}).orbitcard_max_authorizations,12);
-    for (const value of [null,undefined,'', ' ',0,-1,1.2,NaN,Infinity,Number.MAX_SAFE_INTEGER+1,[],{},true]) {
-        assert.throws(()=>prepareConfig({orbitcard_max_authorizations:value}),/正安全整数/);
-    }
+test('opening selections migrate the legacy product and validate independent multi-select lists', () => {
+    assert.deepEqual(prepareConfig({}, {orbitcard_product_code:'legacy'}).orbitcard_product_codes, ['legacy']);
+    const selected=prepareConfig({orbitcard_product_codes:['p1','p2','p1'],orbitcard_bins:['555659','53700000']});
+    assert.deepEqual(selected.orbitcard_product_codes,['p1','p2']);
+    assert.deepEqual(selected.orbitcard_bins,['555659','53700000']);
+    assert.deepEqual(prepareConfig({},selected).orbitcard_product_codes,['p1','p2']);
+    assert.deepEqual(prepareConfig({orbitcard_product_codes:[]},selected).orbitcard_product_codes,[]);
+    for (const value of [null, {}, 'p1', [''], [123]]) assert.throws(()=>prepareConfig({orbitcard_product_codes:value}),/多选列表/);
+    for (const value of [null, ['123'], ['555659x'], [555659]]) assert.throws(()=>prepareConfig({orbitcard_bins:value}),/多选列表/);
+    assert.equal(Object.hasOwn(prepareConfig({orbitcard_max_authorizations:0}),'orbitcard_max_authorizations'),false);
 });
 
-test('authorization limit is persisted, returned as a number and not overwritten by startup defaults or unrelated edits', async () => {
+test('opening selections persist across startup and unrelated configuration edits', async () => {
     const {core,rows}=database();
-    assert.equal((await core.getGptApiConfig()).orbitcard_max_authorizations,4);
+    rows.set('orbitcard_product_code','legacy');
     await core.ensureGptApiConfigDefaults();
-    assert.equal(rows.get('orbitcard_max_authorizations'),'4');
-    await core.saveGptApiConfig({orbitcard_max_authorizations:12});
-    assert.equal(rows.get('orbitcard_max_authorizations'),'12');
+    assert.deepEqual((await core.getGptApiConfig()).orbitcard_product_codes,['legacy']);
+    await core.saveGptApiConfig({orbitcard_product_codes:['p1','p2'],orbitcard_bins:['555659']});
     await core.ensureGptApiConfigDefaults();
     await core.saveGptApiConfig({orbitcard_max_fee:'2'});
-    assert.equal((await core.getGptApiConfig()).orbitcard_max_authorizations,12);
-    await assert.rejects(core.saveGptApiConfig({orbitcard_max_authorizations:0}),/正安全整数/);
-    assert.equal(rows.get('orbitcard_max_authorizations'),'12');
+    assert.deepEqual((await core.getGptApiConfig()).orbitcard_product_codes,['p1','p2']);
+    assert.deepEqual(JSON.parse(rows.get('orbitcard_bins')),['555659']);
+    await assert.rejects(core.saveGptApiConfig({orbitcard_bins:['broken']}),/多选列表/);
+    assert.deepEqual((await core.getGptApiConfig()).orbitcard_bins,['555659']);
 });
 
-test('admin configuration returns and saves the authorization limit using the same API', async () => {
-    const {core}=database(), routes=new Map();
+test('admin configuration returns and saves channel and BIN selections', async () => {
+    const {core}=database(),routes=new Map();
     const app={get:(url,...handlers)=>routes.set('GET '+url,handlers.at(-1)),post:(url,...handlers)=>routes.set('POST '+url,handlers.at(-1)),use(){},delete(){},put(){},patch(){}};
     require('../admin-http')(app,{store:core,ensureStoreReady:async()=>{},getTotalActiveJobs:()=>0});
     const invoke=async(method,body)=>{
         const res={statusCode:200,status(code){this.statusCode=code;return this;},json(value){this.body=value;return this;}};
-        await routes.get(method+' /api/admin/gpt-api')({body},res,error=>{throw error;});
-        return res;
+        await routes.get(method+' /api/admin/gpt-api')({body},res,error=>{throw error;});return res;
     };
-    assert.equal((await invoke('GET')).body.config.orbitcard_max_authorizations,4);
-    assert.equal((await invoke('POST',{orbitcard_max_authorizations:9})).statusCode,200);
-    assert.equal((await invoke('GET')).body.config.orbitcard_max_authorizations,9);
-    assert.equal((await invoke('POST',{orbitcard_max_authorizations:-2})).statusCode,400);
-    assert.equal((await invoke('GET')).body.config.orbitcard_max_authorizations,9);
+    assert.equal((await invoke('POST',{orbitcard_product_codes:['p1','p2'],orbitcard_bins:['555659']})).statusCode,200);
+    const config=(await invoke('GET')).body.config;
+    assert.deepEqual(config.orbitcard_product_codes,['p1','p2']);assert.deepEqual(config.orbitcard_bins,['555659']);
+    assert.equal(Object.hasOwn(config,'orbitcard_max_authorizations'),false);
+    assert.equal((await invoke('POST',{orbitcard_bins:['bad']})).statusCode,400);
 });
 
-test('card snapshots expose the configured limit without obsolete cooldown fields from an older database', async () => {
-    const {core}=database(), routes=new Map();
-    await core.saveGptApiConfig({orbitcard_max_authorizations:9});
-    const oldCard={card_id:42,successful_order_count:3,provider_status:'ACTIVE',reuse_after_ms:Date.now()+300000};
+test('card snapshots expose durable disable status independently of counts and legacy cooldowns', async () => {
+    const {core}=database(),routes=new Map();
+    const cards=[{card_id:42,successful_order_count:999,provider_status:'ACTIVE',reuse_after_ms:Date.now()+300000},
+        {card_id:43,successful_order_count:0,provider_status:'ACTIVE',disabled_at:'2026-11-16',disabled_code:'card_declined',disabled_reason:'卡片被拒绝'}];
     const app={get:(url,...handlers)=>routes.set(url,handlers.at(-1)),post(){}};
-    require('../orbitcard-card-http')(app,{store:{...core,cardMethods:()=>({
-        listCards:async()=>[oldCard],listIssues:async()=>[],listFundings:async()=>[]
-    })},cardService:{},requireSecondaryAuth(){}});
+    require('../orbitcard-card-http')(app,{store:{...core,cardMethods:()=>({listCards:async()=>cards,listIssues:async()=>[],listFundings:async()=>[]})},cardService:{},requireSecondaryAuth(){}});
     const res={set(){},json(value){this.body=value;},status(){return this;}};
     await routes.get('/api/admin/orbitcard/cards')({},res);
-    assert.equal(res.body.success,true);
-    assert.equal(res.body.cards[0].successful_order_limit,9);
-    assert.equal(res.body.cards[0].successful_order_count,3);
-    assert.equal(Object.hasOwn(res.body.cards[0],'cooling_down'),false);
+    assert.equal(res.body.cards[0].usable,true);assert.equal(res.body.cards[0].successful_order_count,999);
+    assert.equal(res.body.cards[1].usable,false);assert.equal(res.body.cards[1].disabled_reason,'卡片被拒绝');
+    assert.equal(Object.hasOwn(res.body.cards[0],'successful_order_limit'),false);
     assert.equal(Object.hasOwn(res.body.cards[0],'reuse_after_ms'),false);
-    assert.equal(oldCard.reuse_after_ms > Date.now(),true);
+});
+
+test('manual availability routes require secondary auth, validate reasons and audit the administrator', async () => {
+    const f = require('./helpers/card-db.cjs')();
+    await f.addCard();
+    const routes = new Map(), audit = [], secondary = () => {};
+    const app = { get() {}, post: (url, ...handlers) => routes.set(url, handlers) };
+    const filename = require.resolve('../orbitcard-card-http'), realRequire = createRequire(filename), module = { exports: {} };
+    new Function('require', 'module', 'exports', fs.readFileSync(filename, 'utf8'))(
+        name => name === './runtime-log' ? { push: entry => audit.push(entry) } : realRequire(name), module, module.exports);
+    module.exports(app, { store: { ...f.store, getGptApiConfig: async () => ({ base_url: f.base }) },
+        cardService: {}, requireSecondaryAuth: secondary });
+    const handlers = routes.get('/api/admin/orbitcard/cards/:cardId/availability');
+    assert.equal(handlers[0], secondary);
+    async function invoke(body) {
+        const response = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json(value) { this.body = value; } };
+        await handlers.at(-1)({ params: { cardId: '42' }, body, admin: { email: 'admin@example.test' } }, response);
+        return response;
+    }
+    assert.equal((await invoke({ disabled: true, reason: '' })).statusCode, 400);
+    assert.equal((await invoke({ disabled: 'false', reason: 'invalid type' })).statusCode, 400);
+    assert.equal(audit.length, 0);
+    assert.equal((await invoke({ disabled: true, reason: '人工核对中' })).body.success, true);
+    assert.equal(f.db.cards[0].disabled_code, 'manual');
+    assert.equal(audit[0].data.admin, 'admin@example.test');
+    assert.equal((await invoke({ disabled: false, reason: '已确认可用' })).body.success, true);
+    assert.equal(f.db.cards[0].disabled_at, null);
+    assert.equal(audit[1].data.disabled, false);
 });

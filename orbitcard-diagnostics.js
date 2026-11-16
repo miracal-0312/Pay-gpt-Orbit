@@ -77,7 +77,7 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
             }
             const summaries = listed.map(card => ({ card_id: card.card_id, status: card.provider_status,
                 successful_order_count: saved.find(row => Number(row.card_id) === card.card_id)?.successful_order_count,
-                successful_order_limit: poolPolicy.successfulOrderLimit(cfg), counting_basis: 'confirmed_subscription_orders',
+                availability_basis: 'card_errors', disabled_at: saved.find(row => Number(row.card_id) === card.card_id)?.disabled_at,
                 busy: Boolean(saved.find(row => Number(row.card_id) === card.card_id)?.active_job),
                 balance: null, currency: card.currency || null }));
             result.selection = { action: 'wait', card_id: null, candidate_count: 0, skipped: [], waiting: [],
@@ -104,7 +104,7 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
             const snapshotNow = Date.now();
             const relevant = saved.filter(row => readable.some(card => card.card_id === Number(row.card_id)
                 && !['DELETED','CANCELLED','FROZEN'].includes(card.provider_status))
-                && poolPolicy.eligible(row, poolPolicy.successfulOrderLimit(cfg)) && !row.active_job);
+                && poolPolicy.eligible(row) && !row.active_job);
             const detailed = await cards.cardDetailsInBatches(cfg, relevant.map(row => Number(row.card_id)), { allowPartial: true });
             if (relevant.length && !detailed.length) throw new CardPreparationError('批量卡片详情全部缺失，停止选卡，请联系售后');
             for (const card of detailed) {
@@ -116,7 +116,6 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
         async function concurrency() {
             const snapshot = await selectionSnapshot();
             result.concurrency = await simulateSelection({ snapshot, count: concurrentTasks, available,
-                maxSuccessfulOrders: poolPolicy.successfulOrderLimit(cfg),
                 planType: plan, jobPrefix: traceId, priceFor: (_product, type) => planPrice(cfg, type) });
             delete result.selection;
             return result.concurrency;
@@ -125,7 +124,6 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
             const snapshot = await selectionSnapshot();
             const { saved, listed: readable } = snapshot;
             const decision = decideCards({ ...snapshot, jobKey: traceId, planType: plan,
-                maxSuccessfulOrders: poolPolicy.successfulOrderLimit(cfg),
                 priceFor: (_product, type) => planPrice(cfg, type) });
             const selected = decision.candidates[0];
             Object.assign(result.selection, { action: decision.action, card_id: selected?.card.card_id || null,
@@ -134,11 +132,11 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
             if (selected) {
                 result.selection.funding_amount = money.cents(selected.deficit);
             } else if (decision.action === 'unavailable') {
-                throw new CardPreparationError('没有可用的现有支付卡，自动开卡已禁用，请管理员手动申请或补充卡片');
-            } else throw new CardPreparationError('卡片被占用或成功会员订单计数尚未确认，实际支付需要等待处理；共享等待位最多 1 个');
+                throw new CardPreparationError('没有可用支付卡，请核对停用卡的补开申请或手动补充卡片');
+            } else throw new CardPreparationError('卡片被占用或平台状态尚未确认，实际支付需要等待处理；共享等待位最多 1 个');
             const required = funding;
             if (cfg.enabled) {
-                const retiring = saved.filter(row => !row.active_job && Number(row.successful_order_count) >= poolPolicy.successfulOrderLimit(cfg)
+                const retiring = saved.filter(row => !row.active_job && row.retirement_key
                     && readable.some(card => card.card_id === Number(row.card_id)));
                 result.selection.maintenance = { current_size:readable.length,
                     retire_card_ids:retiring.map(row => Number(row.card_id)), funding_amount:money.cents(funding),

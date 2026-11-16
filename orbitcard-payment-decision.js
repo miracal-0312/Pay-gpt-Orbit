@@ -5,8 +5,7 @@ const money = require('./orbitcard-money');
 const { planFor, CardPreparationError } = require('./orbitcard-card-policy');
 
 // Pure decisions over one platform snapshot. No network requests or persistence.
-function decideCards({ saved, listed, detailed, products, jobKey, planType, priceFor, excludedCardIds = [], maxSuccessfulOrders = poolPolicy.DEFAULT_MAX_SUCCESSFUL_ORDERS }) {
-    maxSuccessfulOrders = poolPolicy.validateLimit(maxSuccessfulOrders);
+function decideCards({ saved, listed, detailed, products, jobKey, planType, priceFor, excludedCardIds = [] }) {
     const plan = planFor(planType), live = new Map(listed.map(card => [Number(card.card_id), card]));
     const details = new Map(detailed.map(card => [Number(card.card_id), card]));
     const excluded = new Set(excludedCardIds.map(Number));
@@ -16,6 +15,10 @@ function decideCards({ saved, listed, detailed, products, jobKey, planType, pric
         const id = Number(row.card_id), owned = row.active_job === jobKey;
         if (excluded.has(id)) { skipped.push({ card_id: id, reason: 'previous_payment_attempt' }); continue; }
         if (!live.has(id)) { skipped.push({ card_id: id, reason: 'missing_from_platform_list' }); continue; }
+        if (!poolPolicy.eligible(row)) {
+            if (owned) throw new CardPreparationError('原订单卡片已停用或正在退役，请核对原订单');
+            skipped.push({ card_id: id, reason: row.disabled_at ? 'card_error_disabled' : 'retiring', code: row.disabled_code || '' }); continue;
+        }
         // An unresolved owner still blocks a replacement, including when the
         // platform has frozen its card or its quota is already exhausted.
         if (row.active_job && !owned) { waiting.push({ card_id: id, reason: 'busy' }); continue; }
@@ -30,10 +33,6 @@ function decideCards({ saved, listed, detailed, products, jobKey, planType, pric
             skipped.push({ card_id: id, reason: 'inactive', status }); continue;
         }
         if (status !== 'ACTIVE') { waiting.push({ card_id: id, reason: 'status_unconfirmed' }); continue; }
-        if (row.successful_order_count == null) { waiting.push({ card_id: id, reason: 'order_count_unconfirmed' }); continue; }
-        const used = Number(row.successful_order_count);
-        if (!Number.isSafeInteger(used) || used < 0) throw new CardPreparationError('成功会员订单次数无效，请核对订单账本');
-        if (!poolPolicy.eligible(row, maxSuccessfulOrders)) { skipped.push({ card_id: id, reason: 'limit_reached', successful_uses: used, limit: maxSuccessfulOrders }); continue; }
         if (!detail) {
             if (owned) throw new CardPreparationError('已预占卡片的实时详情缺失，请核对原补款及管理员订单');
             skipped.push({ card_id: id, reason: 'invalid_detail' }); continue;

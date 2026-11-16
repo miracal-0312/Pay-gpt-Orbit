@@ -125,22 +125,22 @@ test('configuration form submits independent USD plan amounts and USDT service f
     const source = fs.readFileSync(path.resolve(__dirname, '../public/admin.js'), 'utf8');
     const block = source.slice(source.indexOf('function apiInput()'), source.indexOf('function renderCardRow('));
     const values = { apiEnabled: { checked: true }, baseUrl: { value: 'https://orbitcard.test' },
-        productCode: { value: '' }, cardAuthorizationLimit: { value: '4' }, maxInitialAmount: { value: '' }, maxFee: { value: ' 0.15 ' } };
+        productCodes: { selectedOptions: [] }, cardBins: { selectedOptions: [] }, maxInitialAmount: { value: '' }, maxFee: { value: ' 0.15 ' } };
     const amounts = { plus: '15.54000001', pro100: '100', pro200: '', pro500: '500.25' };
     for (const plan of Object.keys(amounts)) {
         values[`planPrice_${plan}`] = { value: ` ${amounts[plan]} ` };
         values[`paymentRegion_${plan}`] = { value: plan === 'plus' ? 'PH' : '' };
     }
-    const input = new Function('$', 'cardPlans', block + '\nreturn apiInput();')(id => values[id], amounts);
+    const input = new Function('$', 'cardPlans', 'selectedOpeningValues', block + '\nreturn apiInput();')(id => values[id], amounts, id => Array.from(values[id].selectedOptions, item => item.value));
     assert.deepEqual(input.orbitcard_plan_prices, amounts);
     assert.equal(input.orbitcard_max_fee, '0.15');
     assert.equal(input.orbitcard_payment_regions.plus, 'PH');
-    assert.equal(input.orbitcard_max_authorizations, 4);
+    assert.deepEqual(input.orbitcard_product_codes, []); assert.deepEqual(input.orbitcard_bins, []);
 });
 
 test('configuration page reloads saved USD amounts and leaves unconfigured plans empty', async () => {
     const source = fs.readFileSync(path.resolve(__dirname, '../public/admin.js'), 'utf8');
-    const block = source.slice(source.indexOf('async function loadApi()'), source.indexOf('function regionLabel('));
+    const block = source.slice(source.indexOf('async function loadApi()'), source.indexOf('let openingProducts ='));
     const nodes = new Map();
     const node = id => {
         if (!nodes.has(id)) nodes.set(id, { value: '', textContent: '', dataset: {} });
@@ -148,15 +148,15 @@ test('configuration page reloads saved USD amounts and leaves unconfigured plans
     };
     const config = { base_url: 'https://orbitcard.test', enabled: false, orbitcard_max_fee: '0.15',
         orbitcard_plan_prices: { plus: '15.54000001', pro100: '100.00000000', pro500: '500.25000000' } };
-    const loadApi = new Function('$', 'request', 'cardPlans', 'renderPaymentRegionOptions',
+    const loadApi = new Function('$', 'request', 'cardPlans', 'renderPaymentRegionOptions', 'renderOpeningChoices',
         'let savedBaseUrl; let paymentRegionLoadSequence=0;\n' + block + '\nreturn loadApi;')(
-        node, async () => ({ config }), { plus: 'Plus', pro100: 'Pro 100', pro200: 'Pro 200', pro500: 'Pro 500' }, () => {});
+        node, async () => ({ config }), { plus: 'Plus', pro100: 'Pro 100', pro200: 'Pro 200', pro500: 'Pro 500' }, () => {}, () => {});
     await loadApi();
     assert.equal(node('planPrice_plus').value, '15.54000001');
     assert.equal(node('planPrice_pro100').value, '100.00000000');
     assert.equal(node('planPrice_pro200').value, '');
     assert.equal(node('maxFee').value, '0.15');
-    assert.equal(node('cardAuthorizationLimit').value, '4');
+    assert.equal(node('maxFee').value, '0.15');
 });
 
 test('client signs with environment Secret even if config contains an obsolete Secret', async () => {

@@ -58,11 +58,11 @@ function diagShowConcurrency(simulation) {
     const summary = simulation.summary;
     const contention = simulation.initial_contention;
     $('diagConcurrencySummary').textContent = `${simulation.task_count} 个任务：分配现有卡 ${summary.assigned} 个（直接支付 ${summary.pay}、需补款 ${summary.fund}），等待 ${summary.waiting} 个（最多 1 个），未分配 ${summary.blocked} 个。模型内重复分配 ${summary.duplicate_assignments} 次。${contention ? `初始有 ${contention.tasks} 个任务同时首选卡 ${contention.card_id}，分配时会重新检查占用。` : ''}`;
-    $('diagConcurrencyBudget').textContent = `账户快照 ${simulation.budget.available} USD；模拟预留预算 ${simulation.budget.reserved} USD；剩余 ${simulation.budget.remaining} USD。预算仅包含预计补款，不含平台额外费用；自动开卡已禁用。仅为快照模拟结果，不代表真实并发压测通过。`;
+    $('diagConcurrencyBudget').textContent = `账户快照 ${simulation.budget.available} USD；模拟预留预算 ${simulation.budget.reserved} USD；剩余 ${simulation.budget.remaining} USD。预算仅包含预计补款。停用卡补开由实际订单和后台处理；此处展示现有卡的快照模拟结果。`;
     const actions = { pay: '可直接支付', fund: '分配后需补款', wait: '等待', blocked: '未分配' };
     const reasons = { reserved_in_simulation: '仅在模拟中占用', busy: '卡片已被其他任务占用',
         authorizations_unconfirmed: '授权次数未确认', status_unconfirmed: '卡片状态未确认', account_balance: '共享账户预算不足', queue_full: '等待队列已满，请 10 分钟后再下单',
-        automatic_opening_disabled: '无可用现有卡，自动开卡已禁用', multiple_waiting: '多项等待条件' };
+        no_available_card: '快照中没有可用支付卡', card_error_disabled: '订阅卡片错误，已停用', multiple_waiting: '多项等待条件' };
     $('diagConcurrencyRows').innerHTML = simulation.tasks.map(row => {
         const reason = row.reasons?.map(value => reasons[value] || value).join('、') || row.message || reasons[row.reason] || row.reason;
         return `<tr><td>${escapeHtml(row.task)}</td><td>${escapeHtml(row.initial_card_id ?? '—')}</td><td>${escapeHtml(actions[row.action] || row.action)}</td><td>${escapeHtml(row.card_id ?? '—')}</td><td>${escapeHtml(row.funding_amount)}</td><td>${escapeHtml(reason)}</td></tr>`;

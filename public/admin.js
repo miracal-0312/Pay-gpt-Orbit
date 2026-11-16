@@ -112,8 +112,7 @@ async function loadApi() {
     const { config } = await request('/api/admin/gpt-api');
     savedBaseUrl = config.base_url;
     $('apiEnabled').checked = config.enabled; $('baseUrl').value = config.base_url;
-    $('productCode').value = config.orbitcard_product_code || '';
-    $('cardAuthorizationLimit').value = String(config.orbitcard_max_authorizations ?? 4);
+    renderOpeningChoices([], config.orbitcard_product_codes ?? (config.orbitcard_product_code ? [config.orbitcard_product_code] : []), config.orbitcard_bins || []);
     $('maxInitialAmount').value = config.orbitcard_max_initial_amount || ''; $('maxFee').value = config.orbitcard_max_fee;
     paymentRegionLoadSequence++;
     for (const plan of Object.keys(cardPlans)) {
@@ -129,13 +128,52 @@ async function loadApi() {
     $('keyState').dataset.state = config.api_key_configured ? 'configured' : 'missing';
     $('secretState').dataset.state = config.orbitcard_secret_configured ? 'configured' : 'missing';
     if (config.api_key_configured && config.orbitcard_secret_configured) {
-        await Promise.all([loadCardIdPreview(), loadPaymentRegions()]);
+        await Promise.all([loadCardIdPreview(), loadPaymentRegions(), loadOpeningProducts()]);
     } else {
         $('cardIdPreview').textContent = '请先在服务器环境变量中配置配对的 API Key 和 API Secret。';
         $('paymentRegionState').textContent = '请先配置平台凭据；已有地区设置会保留。';
         $('refreshPaymentRegions').disabled = false;
     }
 }
+let openingProducts = [], openingProductsSequence = 0;
+function selectedOpeningValues(id) {
+    return Array.from($(id).selectedOptions, option => option.value);
+}
+function renderOpeningChoices(products, selectedProducts, selectedBins) {
+    function fill(id, choices, selectedValues) {
+        const select = $(id);
+        select.replaceChildren();
+        const labels = new Map(choices.map(choice => [choice.value, choice.label]));
+        for (const value of selectedValues) if (!labels.has(value)) labels.set(value, `${value}（已选，当前目录未返回）`);
+        for (const [value, label] of labels) {
+            const option = new Option(label, value);
+            option.selected = selectedValues.includes(value);
+            select.add(option);
+        }
+    }
+    fill('productCodes', products.map(product => ({ value: product.product_code,
+        label: [product.product_code, product.network, product.issuing_area, product.bin ? `BIN ${product.bin}` : ''].filter(Boolean).join(' · ') })), selectedProducts);
+    const matching = products.filter(product => !selectedProducts.length || selectedProducts.includes(product.product_code));
+    fill('cardBins', [...new Set(matching.map(product => product.bin).filter(Boolean))].sort().map(bin => ({ value: bin, label: bin })), selectedBins);
+}
+async function loadOpeningProducts() {
+    const sequence = ++openingProductsSequence, button = $('refreshOpeningProducts');
+    button.disabled = true;
+    $('openingProductsState').textContent = '正在从已保存的卡台读取开卡渠道与卡段…';
+    try {
+        const data = await request('/api/admin/orbitcard/products');
+        if (sequence !== openingProductsSequence) return;
+        openingProducts = data.products || [];
+        const codes = selectedOpeningValues('productCodes'), bins = selectedOpeningValues('cardBins');
+        renderOpeningChoices(openingProducts, codes, bins);
+        const matching = openingProducts.filter(product => (!codes.length || codes.includes(product.product_code)) && (!bins.length || bins.includes(product.bin)));
+        $('openingProductsState').textContent = `已读取 ${openingProducts.length} 个渠道、${data.bins.length} 个卡段；当前匹配 ${matching.length} 个产品。按住 Ctrl 或 Command 可多选，分别留空表示全部，同时选择取交集。选择后点击“保存配置”。`;
+    } catch (error) {
+        if (sequence === openingProductsSequence) $('openingProductsState').textContent = `读取失败，已保留当前选择：${error.message}`;
+    } finally { if (sequence === openingProductsSequence) button.disabled = false; }
+}
+$('refreshOpeningProducts').onclick = () => perform(loadOpeningProducts);
+$('productCodes').addEventListener('change', () => renderOpeningChoices(openingProducts, selectedOpeningValues('productCodes'), selectedOpeningValues('cardBins')));
 function regionLabel(code) {
     try {
         const name = new Intl.DisplayNames(['zh-CN'], { type: 'region' }).of(code);
@@ -191,25 +229,22 @@ async function loadCardIdPreview() {
     try {
         const data = await request('/api/admin/orbitcard/cards/preview');
         const ids = (data.cards || []).map(card => `${card.card_id}${card.status === 'ACTIVE' ? '（可用）' : `（${card.status || '未知状态'}）`}`);
-        $('cardIdPreview').textContent = `平台共 ${data.total} 张卡，可用 ${data.active} 张。${ids.length ? `前 ${ids.length} 张：${ids.join('、')}` : '当前没有卡片，自动开卡已禁用，请手动申请卡片。'}`;
+        $('cardIdPreview').textContent = `平台共 ${data.total} 张卡，平台状态正常 ${data.active} 张。${ids.length ? `前 ${ids.length} 张：${ids.join('、')}` : '当前没有卡片，请手动申请或核对停用卡的补开记录。'}`;
     } catch (error) { $('cardIdPreview').textContent = `卡片 ID 读取失败：${error.message}`; }
 }
 function apiInput() {
-    const successfulOrderLimit = Number($('cardAuthorizationLimit').value);
-    if (!Number.isSafeInteger(successfulOrderLimit) || successfulOrderLimit < 1) throw new Error('单卡成功会员订单次数上限必须是有效的正整数');
     return { enabled: $('apiEnabled').checked, base_url: $('baseUrl').value.trim(),
-    orbitcard_max_authorizations: successfulOrderLimit,
-    orbitcard_product_code: $('productCode').value.trim(), orbitcard_max_initial_amount: $('maxInitialAmount').value.trim(),
+    orbitcard_product_codes: selectedOpeningValues('productCodes'), orbitcard_bins: selectedOpeningValues('cardBins'),
+    orbitcard_max_initial_amount: $('maxInitialAmount').value.trim(),
     orbitcard_payment_regions: Object.fromEntries(Object.keys(cardPlans).map(plan => [plan, $(`paymentRegion_${plan}`).value])),
     orbitcard_plan_prices: Object.fromEntries(Object.keys(cardPlans).map(plan => [plan, $(`planPrice_${plan}`).value.trim()])),
     orbitcard_max_fee: $('maxFee').value.trim() };
 }
 function renderCardRow(card, sync = null) {
     const id = escapeHtml(card.card_id);
-    const usage = `${escapeHtml(card.successful_order_count ?? '待同步')} / ${escapeHtml(card.successful_order_limit)} 笔成功会员订单`;
-    const history = card.retiring ? '待确认删卡'
-        : card.successful_order_count != null && Number(card.successful_order_count) >= Number(card.successful_order_limit) ? '达到上限，停止分配'
-            : '按当前 API 可读取的卡台成功会员订单去重累计';
+    const usage = `${escapeHtml(card.successful_order_count ?? '待同步')} 笔成功会员订单`;
+    const history = card.disabled_at ? `已停用 · ${escapeHtml(card.disabled_code || '')}<br>${escapeHtml(card.disabled_reason || '订阅卡片错误')}`
+        : card.retiring ? '待确认删卡' : '按卡片状态与订阅错误判断可用性';
     const countedAt = '授权流水仅供对账，不影响订单计数';
     const last4 = card.last4 ? `****${escapeHtml(card.last4)}` : '尾号未提供';
     const confirmed = sync?.synced_ids?.includes(Number(card.card_id));
@@ -217,8 +252,8 @@ function renderCardRow(card, sync = null) {
         : sync?.failed_ids?.includes(Number(card.card_id)) ? '详情读取失败 · 以下为旧快照'
             : sync?.listed_ids && !sync.listed_ids.includes(Number(card.card_id)) ? '本次平台列表未返回 · 以下为旧快照' : '本地快照 · 未实时查询';
     const labels = { ACTIVE: '正常（ACTIVE）', CANCELLED: '冻结（CANCELLED）', DELETED: '已删除（DELETED）' };
-    const active = confirmed && card.provider_status === 'ACTIVE';
-    return `<tr><td><strong class="card-id">${id}</strong><span class="card-meta">${last4}</span><span class="card-meta">${escapeHtml(card.product_code || '产品未知')}</span></td><td><span class="card-meta">${escapeHtml(snapshot)}</span><span class="card-provider-status${active ? ' active' : ''}">${escapeHtml(labels[card.provider_status] || card.provider_status || '未知状态')}</span><span class="card-balance">${escapeHtml(card.balance ?? '未知')} ${escapeHtml(card.currency || '')}</span></td><td><div class="card-usage-list">${usage}</div><span class="card-meta">${countedAt}</span></td><td>${card.active_job ? `<code>${escapeHtml(card.active_job)}</code>` : '<span class="card-idle">空闲</span>'}</td><td><div class="card-row-actions">${history}<button type="button" data-card-transactions="${id}" class="secondary">查看交易</button></div></td></tr>`;
+    const active = confirmed && card.provider_status === 'ACTIVE' && !card.disabled_at && !card.retiring;
+    return `<tr><td><strong class="card-id">${id}</strong><span class="card-meta">${last4}</span><span class="card-meta">${escapeHtml(card.product_code || '产品未知')}</span></td><td><span class="card-meta">${escapeHtml(snapshot)}</span><span class="card-provider-status${active ? ' active' : ''}">${escapeHtml(labels[card.provider_status] || card.provider_status || '未知状态')}</span><span class="card-balance">${escapeHtml(card.balance ?? '未知')} ${escapeHtml(card.currency || '')}</span></td><td><div class="card-usage-list">${usage}</div><span class="card-meta">${countedAt}</span></td><td>${card.active_job ? `<code>${escapeHtml(card.active_job)}</code>` : '<span class="card-idle">空闲</span>'}</td><td><div class="card-row-actions">${history}<button type="button" data-card-availability="${id}" data-disable="${!card.disabled_at}" class="secondary"${card.active_job || card.retiring ? ' disabled' : ''}>${card.disabled_at ? '恢复使用' : '人工停用'}</button><button type="button" data-card-transactions="${id}" class="secondary">查看交易</button></div></td></tr>`;
 }
 async function loadCards(sync = null) {
     const data = await request('/api/admin/orbitcard/cards');
@@ -480,7 +515,37 @@ function selectView(tab) {
     history.replaceState(null, '', '#' + selected + (selected === 'diagnostics' ? '/' + selectedDiagnostic : ''));
     return perform(loadSelected);
 }
+let cardAvailabilityEditing = null, cardAvailabilitySaving = false;
+function editCardAvailability(button) {
+    cardAvailabilityEditing = { cardId: button.dataset.cardAvailability, disabled: button.dataset.disable === 'true' };
+    $('cardAvailabilityTitle').textContent = cardAvailabilityEditing.disabled ? '人工停用卡片' : '恢复卡片使用';
+    $('cardAvailabilityTarget').textContent = `卡片 ${cardAvailabilityEditing.cardId}`;
+    $('cardAvailabilityReason').value = '';
+    $('cardAvailabilityError').textContent = '';
+    $('cardAvailabilityDialog').showModal();
+}
+$('cardAvailabilityForm').addEventListener('submit', async event => {
+    event.preventDefault();
+    if (!cardAvailabilityEditing || cardAvailabilitySaving) return;
+    cardAvailabilitySaving = true;
+    $('cardAvailabilityFields').disabled = true;
+    $('cardAvailabilityError').textContent = '';
+    try {
+        const data = await request(`/api/admin/orbitcard/cards/${encodeURIComponent(cardAvailabilityEditing.cardId)}/availability`, {
+            disabled: cardAvailabilityEditing.disabled, reason: $('cardAvailabilityReason').value.trim() });
+        $('cardAvailabilityDialog').close();
+        cardAvailabilityEditing = null;
+        notice(data.message, 'success');
+        try { await loadCards(); }
+        catch (error) { notice(`状态已保存，列表刷新失败：${error.message}`, 'error'); }
+    } catch (error) { $('cardAvailabilityError').textContent = error.message; }
+    finally { cardAvailabilitySaving = false; $('cardAvailabilityFields').disabled = false; }
+});
+$('cancelCardAvailability').onclick = () => { if (!cardAvailabilitySaving) $('cardAvailabilityDialog').close(); };
+$('cardAvailabilityDialog').addEventListener('cancel', event => { if (cardAvailabilitySaving) event.preventDefault(); });
 document.addEventListener('click', event => {
+    const availability = event.target.closest('[data-card-availability]');
+    if (availability?.dataset.cardAvailability && !availability.disabled) editCardAvailability(availability);
     const button = event.target.closest('[data-diagnostic-tab],[data-open-diagnostic]');
     if (button) selectView('diagnostics/' + (button.dataset.diagnosticTab || button.dataset.openDiagnostic));
 });

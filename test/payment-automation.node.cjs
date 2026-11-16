@@ -55,7 +55,8 @@ test('a pending original-order query cannot undo manual handoff or enable anothe
     assert.equal(f.db.tasks[0].orbitcard_state, 'manual');
     await assert.rejects(f.store.assertPaymentAllowed(task.jobKey), factory.PaymentStoppedError);
     const failure = await f.store.recordOrbitcardPaymentFailure(task.jobKey, { clientOrderNo: task.orbitcardClientOrderNo,
-        cardId: 42, orderId: 'SUB-1', raw: JSON.stringify({ task_no: 'SUB-1', status: 'failed', subscription_succeeded: false }) });
+        cardId: 42, orderId: 'SUB-1', raw: JSON.stringify({ task_no: 'SUB-1', client_order_no: task.orbitcardClientOrderNo,
+            plan_type: 'gpt-plus', card_id: 42, status: 'failed', subscription_succeeded: false }) });
     assert.equal(failure.applied, true);
     assert.equal(failure.nextTask, undefined); assert.equal(f.db.tasks.length, 1);
     assert.equal(f.db.tasks[0].orbitcard_state, 'support_locked');

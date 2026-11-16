@@ -74,7 +74,9 @@ function database(factory) {
     const claim = () => store.createOrbitcardTask({ cdk: 'CDK-TEST', planType: 'plus', email: 'target@example.test', baseUrl: 'https://orbitcard.test' });
     const settle = (task, state, extra = {}) => store.settleOrbitcardTask(task.jobKey, {
         status: state === 'success' ? 'success' : ['failed','rejected'].includes(state) ? 'failed' : 'manual',
-        progress: 90, message: state, orbitcardState: state, ...extra
+        progress: 90, message: state, orbitcardState: state,
+        ...(state === 'success' ? { gptApiOrderId: 'SUCCESS-1', gptApiRaw: JSON.stringify({ task_no: 'SUCCESS-1',
+            client_order_no: task.orbitcardClientOrderNo, plan_type: 'gpt-plus', status: 'succeeded', query_source: 'upstream' }) } : {}), ...extra
     });
     return { db, store, claim, settle };
 }
@@ -186,7 +188,8 @@ test('first confirmed failure stops payment; unknown results never create anothe
     await assert.rejects(f.store.recordOrbitcardPaymentFailure(task.jobKey,{...base,raw:JSON.stringify({task_no:'SUB-1',status:'failed',query_source:'snapshot'})}),/上游结果/);
     await assert.rejects(f.store.recordOrbitcardPaymentFailure(task.jobKey,{...base,raw:JSON.stringify({task_no:'SUB-1',status:'failed',upstream_status:'processing'})}),/不一致/);
     assert.equal(f.db.tasks.length,1);
-    const failed={...base,raw:JSON.stringify({task_no:'SUB-1',status:'failed',subscription_succeeded:false})};
+    const failed={...base,raw:JSON.stringify({task_no:'SUB-1',client_order_no:task.orbitcardClientOrderNo,
+        plan_type:'gpt-plus',card_id:42,status:'failed',subscription_succeeded:false})};
     const results=await Promise.all([f.store.recordOrbitcardPaymentFailure(task.jobKey,failed),f.store.recordOrbitcardPaymentFailure(task.jobKey,failed)]);
     assert.equal(results.filter(item=>item.applied).length,1);
     assert.equal(f.db.tasks.length,1);
@@ -254,7 +257,7 @@ test('restart query settles an upstream failure snapshot once and releases the s
         onConfirmedFailure: (original, failure) => f.store.recordOrbitcardPaymentFailure(original.job_key, failure) };
     await Promise.all([query.refresh(input), query.refresh(input)]);
     assert.deepEqual(calls, ['getSubscription']);
-    assert.equal(f.db.tasks[0].orbitcard_state, 'retry_waiting');
+    assert.equal(f.db.tasks[0].orbitcard_state, 'support_locked');
     assert.equal(f.db.cards[0].active_job, null);
     assert.equal(f.db.uses[0].state, 'released');
     assert.equal(f.db.cards[0].authorization_count, 0);
@@ -379,7 +382,7 @@ test('worker records a verified terminal failure without submitting again',async
 test('explicitly rejected submission ends without another payment',async () => {
     const {worker,api}=modules(),states=[];
     api.fetchPlans=async()=>({success:true,plans:[{type:'gpt-plus'}]});
-    api.request=async()=>({success:false,data:{task_no:'REJECTED-2'},requestError:{submission_outcome:'rejected'}});
+    api.request=async()=>({success:false,data:{task_no:'REJECTED-2',client_order_no:'ORDER-2',plan_type:'gpt-plus',card_id:42},requestError:{submission_outcome:'rejected'}});
     const previous=process.env.ORBITCARD_API_SECRET;process.env.ORBITCARD_API_SECRET='test-secret';
     try {
         const result=await worker.run({cfg:{},planType:'plus',cdk:'CDK-TEST',clientOrderNo:'ORDER-2',
@@ -433,10 +436,20 @@ test('unknown creation queries its persisted identity, never creates a replaceme
 });
 
 test('explicit rejection releases CDK even when the platform allocated a task number', async () => {
-    const out = await runWorker([{ success: false, data: { task_no: 'SUB-REJECTED' }, requestError: { submission_outcome: 'rejected' } }]);
+    const out = await runWorker([{ success: false, data: { task_no: 'SUB-REJECTED', client_order_no: 'cdk-fixed-attempt',
+        plan_type: 'gpt-plus', card_id: 42 }, requestError: { submission_outcome: 'rejected' } }]);
     assert.equal(out.rollback, true);
     assert.equal(out.states.at(-1)[3].orbitcardState, 'rejected');
     assert.equal(out.calls.length, 1);
+});
+
+test('a partial task number on rejection cannot prove ownership or release the original payment', async () => {
+    const out = await runWorker([{ success: false, data: { task_no: 'SUB-UNKNOWN' }, requestError: { submission_outcome: 'rejected' } },
+        { success: false, status: 503 }]);
+    assert.equal(out.rollback, false);
+    assert.deepEqual(out.calls.map(c => c[1]), ['createSubscription', 'getSubscription']);
+    assert.deepEqual(out.calls[1][2], { client_order_no: 'cdk-fixed-attempt' });
+    assert.equal(out.states.at(-1)[3].orbitcardState, 'pending');
 });
 
 test('fee charge failure does not reverse subscription success', async () => {

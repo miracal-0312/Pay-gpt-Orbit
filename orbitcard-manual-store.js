@@ -2,7 +2,8 @@
 const poolPolicy = require('./orbitcard-pool');
 
 const { cardScope, planFor, FUNDING_POLL_MS } = require('./orbitcard-card-policy');
-const { MAX_PAYMENT_ATTEMPTS, confirmedFailure, manualHistory } = require('./payment-retry-policy');
+const { MAX_PAYMENT_ATTEMPTS, confirmedFailure, confirmedSuccess, confirmedRejection, retryableFailure, manualHistory } = require('./payment-retry-policy');
+const { classifyFailure } = require('./orbitcard-error-policy');
 
 module.exports = function createManualStore({ runQuery, runExecute, withTransaction, enqueueRedemption = async () => {} }) {
     const usage = require('./orbitcard-order-usage')({ runQuery, runExecute, withTransaction });
@@ -17,7 +18,7 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
 
     async function listRecoverableManualOrders() {
         return runQuery(`SELECT * FROM orbitcard_admin_orders WHERE
-            (state IN ('submitting','pending','manual') AND updated_at <= DATE_SUB(NOW(), INTERVAL 15 SECOND))
+            (state IN ('submitting','pending','manual','retry_waiting') AND updated_at <= DATE_SUB(NOW(), INTERVAL 15 SECOND))
             OR (state IN ('funding_waiting','funding_review','funding_pending','card_pending') AND updated_at <= DATE_SUB(NOW(), INTERVAL ${FUNDING_POLL_MS / 1000} SECOND))
             OR (state IN ('preparing','prepared') AND updated_at <= DATE_SUB(NOW(), INTERVAL 2 MINUTE))
             ORDER BY updated_at ASC LIMIT 10`);
@@ -27,7 +28,7 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
         // Rotate waiting rows without restarting the two-minute preparation
         // timeout or touching a terminal result reached by another worker.
         await runExecute(`UPDATE orbitcard_admin_orders SET updated_at = CURRENT_TIMESTAMP WHERE request_id = ?
-            AND state IN ('submitting','pending','manual','funding_waiting','funding_review','funding_pending','card_pending')`, [requestId]);
+            AND state IN ('submitting','pending','manual','retry_waiting','funding_waiting','funding_review','funding_pending','card_pending')`, [requestId]);
     }
 
     async function prepareManualOrder(input) {
@@ -67,8 +68,7 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
         });
     }
 
-    async function reserveManualCard(requestId, cardId, jobKey, planType, limit = poolPolicy.DEFAULT_MAX_SUCCESSFUL_ORDERS) {
-        limit = poolPolicy.validateLimit(limit);
+    async function reserveManualCard(requestId, cardId, jobKey, planType) {
         return withTransaction(async connection => {
             const options = { connection };
             const [order] = await runQuery('SELECT * FROM orbitcard_admin_orders WHERE request_id = ? FOR UPDATE', [requestId], options);
@@ -82,8 +82,8 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
             const [card] = await runQuery('SELECT * FROM orbitcard_managed_cards WHERE scope = ? AND card_id = ? FOR UPDATE',
                 [order.scope, cardId], options);
             if (!card || card.provider_status !== 'ACTIVE' || card.currency !== 'USD') return null;
-            if (Number(order.card_id) === Number(cardId) && card.active_job === jobKey) return poolPolicy.eligible(card, limit) ? card : null;
-            if (card.active_job || !poolPolicy.eligible(card, limit)) return null;
+            if (Number(order.card_id) === Number(cardId) && card.active_job === jobKey) return poolPolicy.eligible(card) ? card : null;
+            if (card.active_job || !poolPolicy.eligible(card)) return null;
             await runExecute('UPDATE orbitcard_managed_cards SET active_job = ? WHERE scope = ? AND card_id = ?',
                 [jobKey, order.scope, cardId], options);
             await runExecute('UPDATE orbitcard_admin_orders SET card_id = ?, message = ? WHERE request_id = ? AND state = \'preparing\'',
@@ -264,6 +264,18 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
         });
     }
 
+    async function resolvedPreparation(order, options) {
+        const fundings = await runQuery('SELECT * FROM orbitcard_card_fundings WHERE job_key = ? FOR UPDATE', [order.client_order_no], options);
+        const issues = await runQuery('SELECT * FROM orbitcard_card_issues WHERE job_key = ? OR issue_key = ? FOR UPDATE',
+            [order.client_order_no, order.issue_key || null], options);
+        return fundings.length <= 1 && issues.length <= 1 && (!order.issue_key || issues.length === 1)
+            && [...fundings, ...issues].every(intent => ['ready','failed'].includes(intent.state)
+                && intent.job_key === order.client_order_no && intent.scope === order.scope
+                && intent.credential_hash === order.api_key_hash && intent.plan_type === planFor(order.plan_type)
+                && Number(intent.card_id) === Number(order.card_id))
+            && (!order.issue_key || issues[0]?.issue_key === order.issue_key);
+    }
+
     async function settleManualOrder(requestId, { state, taskNo = null, snapshot = null, message, retryAllowed = false, expectedClientOrderNo }) {
         if (!['pending', 'manual', 'success', 'failed', 'rejected'].includes(state)) throw new Error('无效的管理员订单状态');
         return withTransaction(async connection => {
@@ -279,18 +291,34 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
             }
             if (order.state === 'manual' && state === 'pending') {
                 state = 'manual';
-                message = '已转人工处理，自动支付已停止；仅核对原订单结果';
+                message = `已转人工处理，自动支付已停止；仅核对原订单结果${message ? `；${message}` : ''}`;
             }
             const safeTaskNo = taskNo || order.task_no || null;
+            const expected = { clientOrderNo: order.client_order_no, orderId: safeTaskNo,
+                cardId: order.card_id, planType: order.plan_type, email: order.target_email };
+            if ((state === 'failed' && !confirmedFailure(snapshot, expected))
+                || (state === 'success' && !confirmedSuccess(snapshot, expected))
+                || (state === 'rejected' && !confirmedRejection(snapshot, expected))) {
+                throw new Error('管理员订单缺少归属一致的已确认结果，保留原订单与支付卡占用');
+            }
+            if (['success','failed','rejected'].includes(state) && !await resolvedPreparation(order, options)) {
+                throw new Error('管理员原开卡或补款尚未完整核对，保留原订单与支付卡占用');
+            }
             const supportLocked = state === 'failed';
             let retry = false;
             if (supportLocked && retryAllowed && order.state !== 'manual' && manualHistory(order).length + 1 < MAX_PAYMENT_ATTEMPTS
-                && confirmedFailure(snapshot, { clientOrderNo: order.client_order_no, orderId: safeTaskNo,
+                && retryableFailure(snapshot, { clientOrderNo: order.client_order_no, orderId: safeTaskNo,
                     cardId: order.card_id, planType: order.plan_type, email: order.target_email })) {
                 const [code] = order.cdk_code ? await runQuery('SELECT * FROM cdk_codes WHERE cdk_code = ? FOR UPDATE', [order.cdk_code], options) : [];
                 retry = !order.cdk_code || Boolean(code?.is_active && !code.manual_redeemed_at);
             }
-            if (supportLocked) message = '原订单已确认失败，自动支付已停止；CDK 保持锁定，请人工售后处理';
+            if (supportLocked) {
+                const disposition = classifyFailure(snapshot);
+                message = `${disposition.message}；自动支付已停止，保留原记录${order.cdk_code ? '及 CDK 锁定' : ''}，请人工核对`;
+                if (disposition.automaticRetry && manualHistory(order).length + 1 >= MAX_PAYMENT_ATTEMPTS) {
+                    message = `已达到 ${MAX_PAYMENT_ATTEMPTS} 次支付上限；${message}`;
+                }
+            }
             if (retry) message = `充值已明确失败，等待换卡重试；最多 ${MAX_PAYMENT_ATTEMPTS} 次，Session 失效时请按原请求编号重新提交`;
             await runExecute(`UPDATE orbitcard_admin_orders SET state = ?, task_no = COALESCE(task_no, ?),
                 snapshot = ?, message = ? WHERE request_id = ?`,
@@ -308,6 +336,10 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
                     await usage.recordSuccess({ scope: order.scope, cardId: order.card_id,
                         clientOrderNo: order.client_order_no, orderId: safeTaskNo, snapshot }, options);
                 }
+                if (state === 'failed') await require('./orbitcard-card-failure').disableFailedCard({ runExecute,
+                    scope: order.scope, cardId: order.card_id, jobKey: order.client_order_no, snapshot, options,
+                    expected: { clientOrderNo: order.client_order_no, orderId: safeTaskNo,
+                        cardId: order.card_id, planType: order.plan_type, email: order.target_email } });
                 await runExecute(`UPDATE orbitcard_managed_cards SET active_job = NULL
                     WHERE scope = ? AND card_id = ? AND active_job = ?`,
                 [order.scope, order.card_id, order.client_order_no], options);
@@ -315,6 +347,32 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
             if (state === 'success' && order.cdk_code) {
                 await enqueueRedemption({ cdk: order.cdk_code, orderId: order.client_order_no }, options);
             }
+            return getManualOrder(requestId, options);
+        });
+    }
+
+    async function reviewRetry(order, options) {
+        let snapshot = null, eligible = false;
+        try {
+            snapshot = JSON.parse(order.snapshot || '{}');
+            eligible = manualHistory(order).length + 1 < MAX_PAYMENT_ATTEMPTS && retryableFailure(snapshot, {
+                clientOrderNo: order.client_order_no, orderId: order.task_no, cardId: order.card_id,
+                planType: order.plan_type, email: order.target_email
+            });
+        } catch (_) { /* Incomplete historical evidence cannot authorize a new payment. */ }
+        if (eligible) return true;
+        const disposition = classifyFailure(snapshot);
+        await runExecute('UPDATE orbitcard_admin_orders SET state = ?, message = ? WHERE request_id = ?',
+            ['support_locked', `${disposition.message}；原重试依据不满足自动换卡条件，已停止自动支付并保留原记录`.slice(0, 255), order.request_id], options);
+        return false;
+    }
+
+    async function reviewManualRetry(requestId, expectedClientOrderNo) {
+        return withTransaction(async connection => {
+            const options = { connection };
+            const [order] = await runQuery('SELECT * FROM orbitcard_admin_orders WHERE request_id = ? FOR UPDATE', [requestId], options);
+            if (!order || order.client_order_no !== expectedClientOrderNo || order.state !== 'retry_waiting') return order;
+            await reviewRetry(order, options);
             return getManualOrder(requestId, options);
         });
     }
@@ -327,17 +385,13 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
             if (order.target_email.toLowerCase() !== email.toLowerCase() || order.scope !== cardScope(baseUrl) || order.api_key_hash !== apiKeyHash) {
                 throw new Error('重试账号、平台或密钥与原订单不一致');
             }
+            if (!await reviewRetry(order, options)) return null;
             const history = manualHistory(order), snapshot = JSON.parse(order.snapshot || '{}');
-            if (history.length + 1 >= MAX_PAYMENT_ATTEMPTS || !confirmedFailure(snapshot, {
-                clientOrderNo: order.client_order_no, orderId: order.task_no, cardId: order.card_id, planType: order.plan_type, email
-            })) return null;
             if (order.cdk_code) {
                 const [code] = await runQuery('SELECT * FROM cdk_codes WHERE cdk_code = ? FOR UPDATE', [order.cdk_code], options);
                 if (!code?.is_active || code.manual_redeemed_at) return null;
             }
-            const fundings = await runQuery('SELECT * FROM orbitcard_card_fundings WHERE job_key = ? FOR UPDATE', [order.client_order_no], options);
-            const issues = await runQuery('SELECT * FROM orbitcard_card_issues WHERE job_key = ? OR issue_key = ? FOR UPDATE', [order.client_order_no, order.issue_key || null], options);
-            if ([...fundings, ...issues].some(intent => !['ready','failed'].includes(intent.state))) return null;
+            if (!await resolvedPreparation(order, options)) return null;
             history.push({ client_order_no: order.client_order_no, task_no: order.task_no, card_id: Number(order.card_id), snapshot });
             const identity = `manual-${requestId}-attempt-${history.length + 1}`;
             await runExecute(`UPDATE orbitcard_admin_orders SET client_order_no = ?, retry_history = ?, state = 'preparing',
@@ -350,5 +404,5 @@ module.exports = function createManualStore({ runQuery, runExecute, withTransact
     return { getManualOrder, listManualOrders, listRecoverableManualOrders, noteManualQueryAttempt,
         prepareManualOrder, reserveManualCard,
         failManualPreparation, pauseManualPreparation, markManualPrepared, noteManualWaiting, waitManualFunding, reviewManualFunding, releaseManualFunding,
-        claimManualSubmission, abandonPreparedManualOrder, settleManualOrder, startManualRetry };
+        claimManualSubmission, abandonPreparedManualOrder, settleManualOrder, reviewManualRetry, startManualRetry };
 };

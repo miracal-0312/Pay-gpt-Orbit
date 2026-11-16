@@ -42,12 +42,13 @@ async function refresh({ cfg, task, persist, onConfirmedFailure }) {
                 orderId: result.orderId, raw: JSON.stringify(result.snapshot)
             });
             require('./runtime-log').push({ jobKey: task.job_key, source: 'orbitcard', event: 'payment_attempt_failed',
-                text: recorded.retry ? '订阅已明确失败，等待最新 Session 换卡重试' : '订阅已明确失败，换卡尝试已结束',
+                text: recorded.retry ? '订阅已明确失败，等待最新 Session 换卡重试'
+                    : result.disposition?.message || '订阅已明确失败，已停止自动付款，请核对失败原因',
                 data: { attempt: Number(task.orbitcard_retry_attempt_no || 1), card_id: Number(task.orbitcard_card_id),
-                    order_id: result.orderId, applied: recorded.applied } });
+                    order_id: result.orderId, applied: recorded.applied, error_action: result.disposition?.action } });
             return { success: true, applied: recorded.applied };
         }
-        const update = { status: next.status, progress: next.progress, message: next.message,
+        const update = { status: next.status, progress: next.progress, message: result.disposition?.message || next.message,
             orbitcardState: next.state, gptApiOrderId: result.orderId,
             gptApiRaw: JSON.stringify(result.snapshot) };
         const saved = await persist(task.job_key, update);

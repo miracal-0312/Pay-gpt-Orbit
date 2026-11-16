@@ -185,7 +185,8 @@ test('late self-service failure settles the original payment card without releas
     f.db.cdks[0].manual_redeemed_at = '2026-10-26';
     const result = await f.store.recordOrbitcardPaymentFailure(task.jobKey, {
         clientOrderNo: task.orbitcardClientOrderNo, cardId: 42, orderId: 'SUB-1',
-        raw: JSON.stringify({ task_no: 'SUB-1', status: 'failed', subscription_succeeded: false })
+        raw: JSON.stringify({ task_no: 'SUB-1', client_order_no: task.orbitcardClientOrderNo,
+            plan_type: 'gpt-plus', card_id: 42, status: 'failed', subscription_succeeded: false })
     });
     assert.equal(result.applied, true);
     assert.equal(result.nextTask, undefined);
