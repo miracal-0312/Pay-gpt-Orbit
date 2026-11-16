@@ -2,11 +2,11 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const crypto=require('node:crypto');
-const createService=require('../orbitcard-manual-service');
-const createStore=require('../orbitcard-manual-store');
-const {cardScope,FundingAwaitingError,FundingPendingError,CardPreparationError,AccountBalanceError,FUNDING_POLL_MS,FUNDING_WAIT_MS}=require('../orbitcard-card-policy');
-const {PaymentStoppedError}=require('../payment-automation');
-const providerHelpers=require('../orbitcard-client');
+const createService=require('../src/payments/orbitcard-manual-service');
+const createStore=require('../src/db/orbitcard-manual-store');
+const {cardScope,FundingAwaitingError,FundingPendingError,CardPreparationError,AccountBalanceError,FUNDING_POLL_MS,FUNDING_WAIT_MS}=require('../src/orbitcard/orbitcard-card-policy');
+const {PaymentStoppedError}=require('../src/payments/payment-automation');
+const providerHelpers=require('../src/orbitcard/orbitcard-client');
 const id='17aad0bb-5eb7-4771-93f5-1ebd049b29e0';
 
 function fixture({confirm,waitMs=FUNDING_WAIT_MS,sleepHook,initialDelay=FUNDING_POLL_MS}={}) {

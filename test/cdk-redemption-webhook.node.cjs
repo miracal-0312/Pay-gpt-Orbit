@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
-const factory = require('../cdk-redemption-webhook');
+const factory = require('../src/integrations/cdk-redemption-webhook');
 
 function fixture() {
     const env = { CDK_REDEMPTION_WEBHOOK_URL: 'https://shop.example/api/v1/card-secrets/redemption-callback',

@@ -16,7 +16,7 @@ function load(name, { mocks = {}, env = {}, clock = Date } = {}) {
 test('database query pool cannot have an unlimited queue through invalid configuration', () => {
     for (const env of [{}, { DB_POOL_LIMIT: '-1', DB_QUEUE_LIMIT: '0' }, { DB_POOL_LIMIT: 'Infinity', DB_QUEUE_LIMIT: 'bad' }, { DB_POOL_LIMIT: '8', DB_QUEUE_LIMIT: '24' }]) {
         let config;
-        const core = load('mysql-core.js', { env, mocks: { 'mysql2/promise': { createPool: value => { config = value; return {}; } } } });
+        const core = load('src/db/mysql-core.js', { env, mocks: { 'mysql2/promise': { createPool: value => { config = value; return {}; } } } });
         core.getPool(); core.getPool();
         assert.equal(config.connectionLimit, env.DB_POOL_LIMIT === '8' ? 8 : 20);
         assert.equal(config.queueLimit, env.DB_QUEUE_LIMIT === '24' ? 24 : 100);
@@ -28,7 +28,7 @@ test('database query pool cannot have an unlimited queue through invalid configu
 
 test('dedicated lock connection limit includes handshakes, frees failed slots and never evicts owners', async () => {
     const pending = [], connections = [];
-    const core = load('mysql-core.js', { env: { DB_LOCK_LIMIT: '2' }, mocks: { 'mysql2/promise': {
+    const core = load('src/db/mysql-core.js', { env: { DB_LOCK_LIMIT: '2' }, mocks: { 'mysql2/promise': {
         createConnection: () => new Promise((resolve, reject) => pending.push({ resolve, reject }))
     } } });
     function connect(index) {
@@ -54,7 +54,7 @@ test('dedicated lock connection limit includes handshakes, frees failed slots an
 test('authentication caches expire inactive entries and reject overflow without deleting live lockouts', () => {
     let now = 1000000;
     class Clock extends Date { static now() { return now; } }
-    const auth = load('admin-auth.js', { clock: Clock });
+    const auth = load('src/http/admin-auth.js', { clock: Clock });
     const locked = auth.checkLoginRateLimit('locked');
     for (let i = 0; i < 5; i++) auth.recordLoginFailure(locked.key, locked.entry);
     for (let i = 0; i < 9999; i++) assert.equal(auth.checkLoginRateLimit(`ip-${i}`).allowed, true);
@@ -71,7 +71,7 @@ test('authentication caches expire inactive entries and reject overflow without 
 });
 
 test('concurrent login checks share the failure counter and forwarded headers cannot spoof client identity', () => {
-    const auth = load('admin-auth.js');
+    const auth = load('src/http/admin-auth.js');
     const attempts = Array.from({ length: 5 }, () => auth.checkLoginRateLimit('shared'));
     for (const rate of attempts) auth.recordLoginFailure(rate.key, rate.entry);
     assert.equal(auth.checkLoginRateLimit('shared').allowed, false);

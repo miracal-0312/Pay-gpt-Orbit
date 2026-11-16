@@ -9,12 +9,12 @@ const { createRequire } = require('node:module');
 function load(name, mocks = {}) {
     const filename = path.resolve(__dirname, '..', name), module = { exports: {} }, real = createRequire(filename);
     new Function('require', 'module', 'exports', fs.readFileSync(filename, 'utf8'))(
-        id => Object.hasOwn(mocks, id) ? mocks[id] : id === './runtime-log' ? { push() {} } : real(id), module, module.exports);
+        id => Object.hasOwn(mocks, id) ? mocks[id] : id === '../logging/runtime-log' ? { push() {} } : real(id), module, module.exports);
     return module.exports;
 }
-const api = load('orbitcard-client.js', { axios: { request: async () => { throw Error('real transport is forbidden'); } } });
-const createService = require('../orbitcard-subscription-service');
-const { confirmedFailure, confirmedRejection, retryableFailure } = require('../payment-retry-policy');
+const api = load('src/orbitcard/orbitcard-client.js', { axios: { request: async () => { throw Error('real transport is forbidden'); } } });
+const createService = require('../src/orbitcard/orbitcard-subscription-service');
+const { confirmedFailure, confirmedRejection, retryableFailure } = require('../src/payments/payment-retry-policy');
 const expected = { clientOrderNo: 'payment-original-1', planType: 'gpt-plus', cardId: 42, email: 'target@example.test' };
 const prepared = { expected, body: { client_order_no: expected.clientOrderNo, card_id: 42, plan_type: 'gpt-plus' } };
 const identity = { task_no: 'SUB-ORIGINAL', client_order_no: expected.clientOrderNo, card_id: 42, plan_type: 'gpt-plus' };
@@ -137,7 +137,7 @@ test('safe persisted errors retain classification but never upstream payloads, c
         if (oldSecret === undefined) delete process.env.ORBITCARD_API_SECRET; else process.env.ORBITCARD_API_SECRET = oldSecret;
     });
     const events = [];
-    const client = load('orbitcard-client.js', { './runtime-log': { push: e => events.push(e) }, axios: { request: async () => ({
+    const client = load('src/orbitcard/orbitcard-client.js', { '../logging/runtime-log': { push: e => events.push(e) }, axios: { request: async () => ({
         status: 502, headers: {}, data: { code: 59018, request_error: {
             code: 'relay_authentication_failed', source: 'upstream', upstream_code: 40027,
             submission_outcome: 'rejected', upstream_http_status: 400, retry_after_seconds: 8,
@@ -169,7 +169,7 @@ test('worker sends one POST then only queries its original identity after unknow
                 calls.push({ operation, body, key });
                 return operation === 'createSubscription' ? response : { success: false, status: 401 };
             } };
-        const worker = load('orbitcard-worker.js', { './orbitcard-client': provider });
+        const worker = load('src/payments/orbitcard-worker.js', { '../orbitcard/orbitcard-client': provider });
         const result = await worker.run({ cfg: {}, planType: 'plus', session: { accessToken: 'test', user: { email: expected.email }, account: {} },
             clientOrderNo: expected.clientOrderNo, selectCard: async () => 42,
             setProgress: async (...args) => states.push(args), onSubmission: async () => {}, broadcast() {}, sleep: async () => {}, maxPolls: 3,

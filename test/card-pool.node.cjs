@@ -3,8 +3,8 @@ const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path');
 const {createRequire}=require('node:module');
-const policy=require('../orbitcard-pool');
-const {AccountBalanceError}=require('../orbitcard-card-policy');
+const policy=require('../src/orbitcard/orbitcard-pool');
+const {AccountBalanceError}=require('../src/orbitcard/orbitcard-card-policy');
 const fixture=require('./helpers/card-db.cjs');
 function load(name,mocks) {
     const filename=path.resolve(__dirname,'..',name), real=createRequire(filename), module={exports:{}};
@@ -36,8 +36,8 @@ async function setup(counts=[0,0,0,0,0],overrides={}) {
         if(operation==='freezeCard') {remote.find(c=>c.card_id===body.card_id).status=body.status;return {success:true,data:{card_id:body.card_id,status:body.status}};}
         throw Error(operation);
     }};
-    const cards=load('orbitcard-cards-client.js',{'./orbitcard-client':transport});
-    const service=load('orbitcard-card-service.js',{'./orbitcard-client':transport,'./orbitcard-cards-client':cards})({store:f.store,audit(){},maxIssuePolls:1,now:()=>clock,sleep:async()=>{}});
+    const cards=load('src/orbitcard/orbitcard-cards-client.js',{'./orbitcard-client':transport});
+    const service=load('src/orbitcard/orbitcard-card-service.js',{'./orbitcard-client':transport,'./orbitcard-cards-client':cards})({store:f.store,audit(){},maxIssuePolls:1,now:()=>clock,sleep:async()=>{}});
     return {...f,service,calls,remote,ledger,advance(ms=120000){clock+=ms;}};
 }
 
@@ -108,7 +108,7 @@ test('manual disable and restore persist across synchronization and serialize wi
 });
 
 test('only card-related verified terminal failures produce a disable reason', () => {
-    const { cardFailure } = require('../orbitcard-card-failure');
+    const { cardFailure } = require('../src/orbitcard/orbitcard-card-failure');
     for (const failureCode of ['card_declined', 'expired_card', 'insufficient_funds', 'incorrect_cvc']) {
         assert.ok(cardFailure({ failureCode }));
     }
@@ -198,12 +198,12 @@ test('platform-confirmed success permits immediate reuse without authorization s
 
 test('queued requests continue after original settlement without waiting for authorizations',async()=>{
  const f=await setup([0]),first=await f.claim(),next=await f.claim();await f.service.allocate(cfg,first.jobKey,'plus');
- await assert.rejects(f.service.allocate(cfg,next.jobKey,'plus'),require('../orbitcard-card-policy').CardBusyError);
+ await assert.rejects(f.service.allocate(cfg,next.jobKey,'plus'),require('../src/orbitcard/orbitcard-card-policy').CardBusyError);
  await f.settle(first,'success');assert.equal(await f.service.allocate(cfg,next.jobKey,'plus',{waitForAvailability:true}),42);assert.equal(f.db.cards[0].successful_order_count,1);
 });
 
 test('a busy card remains a waiting candidate alongside another card with unknown provider status',async()=>{
-    const {CardBusyError}=require('../orbitcard-card-policy');
+    const {CardBusyError}=require('../src/orbitcard/orbitcard-card-policy');
     const f=await setup([0,0]),task=await f.claim();
     f.db.cards[0].active_job='manual-existing';f.remote[1].status='UNRECOGNIZED';
     await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),CardBusyError);
@@ -256,7 +256,7 @@ test('an unrelated issue does not block an available existing card',async()=>{
 });
 
 test('unknown platform status still waits while order counts do not gate availability', () => {
-    const {decideCards}=require('../orbitcard-payment-decision');
+    const {decideCards}=require('../src/orbitcard/orbitcard-payment-decision');
     const card={card_id:42,provider_status:'ACTIVE',product_code:'p1',currency:'USD',balance_amount:'20.00'};
     const input={saved:[{card_id:42,successful_order_count:null}],listed:[card],detailed:[card],products:[{product_code:'p1',min_retained_balance:'0'}],jobKey:'new-job',planType:'plus',priceFor:()=>'20'};
     assert.equal(decideCards(input).action,'pay');
@@ -265,7 +265,7 @@ test('unknown platform status still waits while order counts do not gate availab
 });
 
 test('selection matches each product reserve and excludes prior, busy and disabled cards',()=>{
-    const {decideCards}=require('../orbitcard-payment-decision'),money=require('../orbitcard-money');
+    const {decideCards}=require('../src/orbitcard/orbitcard-payment-decision'),money=require('../src/orbitcard/orbitcard-money');
     const listed=[41,42,43,44,45].map(card_id=>({card_id,provider_status:'ACTIVE',currency:'USD',
         product_code:card_id===41?'higher-reserve':'no-reserve',balance_amount:'20.00'}));
     const saved=listed.map(card=>({card_id:card.card_id,successful_order_count:card.card_id===45?4:0,
@@ -277,7 +277,7 @@ test('selection matches each product reserve and excludes prior, busy and disabl
     assert.equal(decision.action,'pay');
     assert.deepEqual(decision.candidates.map(candidate=>candidate.card.card_id),[43,41]);
     assert.equal(decision.candidates[1].target,money.units('24.00'));
-    assert.equal(decision.candidates[1].deficit,money.units('4.00'));
+    assert.equal(decision.candidates[1].fundingAmount,money.units('16.00'));
     assert.ok(decision.skipped.some(card=>card.card_id===42 && card.reason==='previous_payment_attempt'));
     assert.ok(decision.skipped.some(card=>card.card_id===45 && card.reason==='card_error_disabled'));
     assert.deepEqual(decision.waiting,[{card_id:44,reason:'busy'}]);
@@ -291,14 +291,14 @@ test('allocation uses an existing funded card without requiring money to fill th
     assert.equal(f.calls.filter(c=>['getAccountBalance','createCard','rechargeCard','deleteCard'].includes(c.operation)).length,0);
 });
 
-test('insufficient account money rejects the exact card deficit before creating a funding intent',async()=>{
+test('insufficient account money rejects a full-plan topup before creating a funding intent',async()=>{
     const f=await setup([0],{getAccountBalance:async()=>({success:true,data:{available_balance:'0.50'}})});
     f.remote[0].balance='20.00';
     const task=await f.claim();
     await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),error=>{
         assert.ok(error instanceof AccountBalanceError);
         assert.match(error.message,/可用 0\.50000000 USD/);
-        assert.match(error.message,/所需 1\.00000000 USD/);
+        assert.match(error.message,/所需 20\.00000000 USD/);
         assert.doesNotMatch(error.message,/锁定/);
         return true;
     });
@@ -341,7 +341,7 @@ test('a sparse busy pool waits while legacy cooldown metadata does not block all
         if(state==='busy') f.db.cards[0].active_job='another-job';
         else f.db.cards[0].reuse_after_ms=Date.now()+600000;
         const task=await f.claim();
-        if(state==='busy')await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),require('../orbitcard-card-policy').CardBusyError);
+        if(state==='busy')await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),require('../src/orbitcard/orbitcard-card-policy').CardBusyError);
         else assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),42);
         assert.equal(f.calls.filter(c=>['createCard','deleteCard','rechargeCard'].includes(c.operation)).length,0);
     }

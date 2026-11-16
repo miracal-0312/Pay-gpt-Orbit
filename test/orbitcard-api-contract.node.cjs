@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const {createRequire} = require('node:module');
-const {OPERATIONS} = require('../orbitcard-api-contract');
+const {OPERATIONS} = require('../src/orbitcard/orbitcard-api-contract');
 
 const requests = {
     getAccountBalance: {}, getProductCode: {}, getSubscriptionPlans: {},
@@ -27,16 +27,16 @@ function fixture(t) {
         if(originalKey===undefined) delete process.env.ORBITCARD_API_KEY; else process.env.ORBITCARD_API_KEY=originalKey;
         if(originalSecret===undefined) delete process.env.ORBITCARD_API_SECRET; else process.env.ORBITCARD_API_SECRET=originalSecret;
     });
-    const calls=[],filename=path.resolve(__dirname,'../orbitcard-client.js'),module={exports:{}},real=createRequire(filename);
+    const calls=[],filename=path.resolve(__dirname,'../src/orbitcard/orbitcard-client.js'),module={exports:{}},real=createRequire(filename);
     const mocks={axios:{request:async input=>{calls.push(input);return {status:200,data:{code:0,data:{}},headers:{}};}},
-        './runtime-log':{push(){}}};
+        '../logging/runtime-log':{push(){}}};
     new Function('require','module','exports',fs.readFileSync(filename,'utf8'))(
         name=>Object.hasOwn(mocks,name)?mocks[name]:real(name),module,module.exports);
     return {api:module.exports,calls,cfg:{base_url:'https://orbitcard.test'}};
 }
 
 test('the business operation registry uses only APIs present in the current linked documents',()=>{
-    const docs=['Orbitcard-Open-API-V1.md','orbitcard-subscription-api-v1.md']
+    const docs=['docs/api/Orbitcard-Open-API-V1.md','docs/api/orbitcard-subscription-api-v1.md']
         .map(file=>fs.readFileSync(path.resolve(__dirname,'..',file),'utf8')).join('\n');
     const documented=new Set([...docs.matchAll(/\/api\/open\/v1\/([A-Za-z]+)/g)].map(match=>match[1]));
     assert.deepEqual(Object.keys(OPERATIONS).sort(),Object.keys(requests).sort());
@@ -100,8 +100,8 @@ test('every money-affecting operation requires a stable valid key and execution 
 
 test('configured decimal service-fee limits are forwarded unchanged without an undocumented precision cap',async t=>{
     const f=fixture(t), fee='0.123456789';
-    const cfg=require('../orbitcard-config').prepareConfig({orbitcard_max_fee:fee});
-    const prepared=require('../orbitcard-subscription-service')({}).prepare({cfg,identity:'persisted-order',
+    const cfg=require('../src/config/orbitcard-config').prepareConfig({orbitcard_max_fee:fee});
+    const prepared=require('../src/orbitcard/orbitcard-subscription-service')({}).prepare({cfg,identity:'persisted-order',
         planType:'plus',cardId:42,session:{user:{email:'fixture@example.invalid'},accessToken:'synthetic-token',account:{}}});
     assert.equal((await f.api.request(f.cfg,'createSubscription',prepared.body,'persisted-intent')).success,true);
     assert.equal(JSON.parse(f.calls[0].data).max_service_fee,fee);

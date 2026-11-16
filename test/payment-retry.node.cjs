@@ -63,14 +63,14 @@ test('documented card-unavailable rejection supports retry without an accepted u
         expectedState: 'preparing', expectedClientOrderNo: task.orbitcardClientOrderNo });
     await f.settle(task, 'submitting');
     const provider = { request: async () => ({ success: false, status: 400, code: 59005, data: null }), summary: () => ({}) };
-    const service = require('../orbitcard-subscription-service')(provider);
+    const service = require('../src/orbitcard/orbitcard-subscription-service')(provider);
     const created = await service.submit({}, { body: {}, expected: { clientOrderNo: task.orbitcardClientOrderNo,
         cardId: 42, planType: 'gpt-plus' } });
     assert.equal(created.cardRejected, true);
     const result = await f.store.recordOrbitcardPaymentFailure(task.jobKey, { clientOrderNo: task.orbitcardClientOrderNo,
         cardId: 42, orderId: null, raw: JSON.stringify(created.snapshot) });
     assert.equal(result.retry, true); assert.equal(f.db.cards[0].disabled_code, 'card_unavailable');
-    const recovery = require('../order-recovery')({ store: f.store, query: { refresh: async () => assert.fail('rejected create must not query a nonexistent upstream order') }, activeJobs: new Set(), audit() {} });
+    const recovery = require('../src/payments/order-recovery')({ store: f.store, query: { refresh: async () => assert.fail('rejected create must not query a nonexistent upstream order') }, activeJobs: new Set(), audit() {} });
     await recovery.refreshTask(f.db.tasks[0]);
     assert.equal(f.db.tasks[0].orbitcard_state, 'retry_waiting');
     const next = await f.store.claimOrbitcardRetry(task.jobKey, { email: 'buyer@example.test', baseUrl: f.base, apiKeyHash: hash });
@@ -90,7 +90,7 @@ test('legacy retry state cannot bypass new failure classification through activa
     const f = await failedAttempt(fixture(), { failureCode: 'session_expired' });
     Object.assign(f.db.tasks[0], { orbitcard_state: 'retry_waiting', status: 'running' });
     assert.equal(await f.store.claimOrbitcardRetry(f.task.jobKey, f.credentials), null);
-    const recovery = require('../order-recovery')({ store: f.store, query: { refresh: async () => assert.fail('no query') }, activeJobs: new Set(), audit() {} });
+    const recovery = require('../src/payments/order-recovery')({ store: f.store, query: { refresh: async () => assert.fail('no query') }, activeJobs: new Set(), audit() {} });
     await recovery.refreshTask(f.db.tasks[0]);
     assert.equal(f.db.tasks[0].orbitcard_state, 'support_locked');
     assert.equal(f.db.tasks.length, 1);
@@ -101,7 +101,7 @@ test('recovery closes exhausted or malformed retry counters without reopening pa
         const f = await failedAttempt();
         f.db.tasks[0].orbitcard_retry_attempt_no = attempt;
         assert.equal(await f.store.claimOrbitcardRetry(f.task.jobKey, f.credentials), null);
-        const recovery = require('../order-recovery')({ store: f.store, query: { refresh: async () => assert.fail('no new payment') }, activeJobs: new Set(), audit() {} });
+        const recovery = require('../src/payments/order-recovery')({ store: f.store, query: { refresh: async () => assert.fail('no new payment') }, activeJobs: new Set(), audit() {} });
         await recovery.refreshTask(f.db.tasks[0]);
         assert.equal(f.db.tasks[0].orbitcard_state, 'support_locked', String(attempt));
         assert.equal(f.db.tasks.length, 1);
@@ -112,7 +112,7 @@ test('a legacy retry with missing evidence preserves any original card reservati
     const f = await failedAttempt();
     Object.assign(f.db.tasks[0], { orbitcard_state: 'retry_waiting', status: 'running', gpt_api_raw: '{broken' });
     Object.assign(f.db.uses[0], { state: 'reserved' }); f.db.cards[0].active_job = f.task.jobKey;
-    const recovery = require('../order-recovery')({ store: f.store, query: { refresh: async () => assert.fail('no automatic payment') }, activeJobs: new Set(), audit() {} });
+    const recovery = require('../src/payments/order-recovery')({ store: f.store, query: { refresh: async () => assert.fail('no automatic payment') }, activeJobs: new Set(), audit() {} });
     await recovery.refreshTask(f.db.tasks[0]);
     assert.equal(f.db.tasks[0].orbitcard_state, 'support_locked');
     assert.equal(f.db.cards[0].active_job, f.task.jobKey);
@@ -183,7 +183,7 @@ test('retry claims enforce the original account and platform credentials without
 
 test('a restarted service waits for Session and fresh credentials resume without resetting the count', async () => {
     const f = await failedAttempt();
-    const recovery = require('../order-recovery')({ store: f.store, query: { refresh: async () => assert.fail('failed attempt needs no new query') }, activeJobs: new Set(), audit() {} });
+    const recovery = require('../src/payments/order-recovery')({ store: f.store, query: { refresh: async () => assert.fail('failed attempt needs no new query') }, activeJobs: new Set(), audit() {} });
     await recovery.refreshTask(f.db.tasks[0]);
     assert.equal(f.db.tasks[0].orbitcard_state, 'retry_waiting'); assert.equal(f.db.tasks.length, 1);
     const next = await f.store.claimOrbitcardRetry(f.task.jobKey, f.credentials);

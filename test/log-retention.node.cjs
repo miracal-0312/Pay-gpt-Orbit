@@ -5,14 +5,14 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { createRequire } = require('node:module');
-const retention = require('../log-retention');
+const retention = require('../src/logging/log-retention');
 function directory(t) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-retention-'));
     t.after(() => { assert.ok(path.basename(root).startsWith('orbit-retention-')); fs.rmSync(root, { recursive: true, force: true }); });
     return root;
 }
 function logger(root) {
-    const source = require.resolve('../runtime-log'), module = { exports: {} };
+    const source = require.resolve('../src/logging/runtime-log'), module = { exports: {} };
     new Function('require', 'module', '__dirname', 'process', fs.readFileSync(source, 'utf8'))(
         createRequire(source), module, path.dirname(source), { ...process, env: { TASK_LOG_DIR: root } });
     return module.exports;

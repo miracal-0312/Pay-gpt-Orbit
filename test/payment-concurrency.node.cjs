@@ -2,8 +2,8 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const lockServer = require('./helpers/payment-locks.cjs');
-const { cdkLockKey, manualLockKeys } = require('../payment-execution-lock');
-const createTransactions = require('../mysql-transaction');
+const { cdkLockKey, manualLockKeys } = require('../src/payments/payment-execution-lock');
+const createTransactions = require('../src/db/mysql-transaction');
 const cardFixture = require('./helpers/card-db.cjs');
 
 function gate() {
@@ -73,7 +73,7 @@ test('business failures, uncertain commits and failed rollback never replay a tr
 });
 
 test('database error wrappers preserve conflict codes without changing transaction semantics', async () => {
-    const core=require('../mysql-core');
+    const core=require('../src/db/mysql-core');
     const conflict=Object.assign(new Error('simulated lock conflict'),{code:'ER_LOCK_DEADLOCK',errno:1213});
     const connection={query:async()=>{throw conflict;},execute:async()=>{throw conflict;}};
     for(const method of ['runQuery','runExecute']) await assert.rejects(core[method]('SELECT 1',[],{connection}),
@@ -97,7 +97,7 @@ test('a second instance cannot recover or release a foreground CDK, and re-reads
         getGptApiConfig: async () => ({enabled:true,api_key:'test-key',base_url:f.base})
     });
     let submissions = 0, queries = 0;
-    const handler = require('../activation-service')({ store:f.store,ensureStoreReady:async()=>{},activeJobs:new Set(),log(){},
+    const handler = require('../src/payments/activation-service')({ store:f.store,ensureStoreReady:async()=>{},activeJobs:new Set(),log(){},
         runWorker: async ({task}) => {
             submissions++; started.release(); await paused.promise;
             await f.settle(task,'submitting'); await f.settle(task,'pending'); finished.release();
@@ -106,7 +106,7 @@ test('a second instance cannot recover or release a foreground CDK, and re-reads
     const response = () => ({status(code){this.code=code;return this;},json(data){this.data=data;return data;}});
     const first = response(); await handler({body},first); assert.equal(first.data.success,true); await started.promise;
     const stale = structuredClone(f.db.tasks[0]);
-    const recovery = require('../order-recovery')({store:f.store,activeJobs:new Set(),audit(){},
+    const recovery = require('../src/payments/order-recovery')({store:f.store,activeJobs:new Set(),audit(){},
         query:{refresh:async ({task})=>{queries++;assert.equal(task.orbitcard_state,'pending');return {success:true,applied:false};}}});
     assert.equal((await recovery.refreshTask(stale)).querySkipped,true);
     const duplicate = response(); await handler({body},duplicate);
@@ -163,7 +163,7 @@ test('retry preparation handoff remains stopped after the original funding or is
         }
         // The transaction must also protect callers holding a stale preparation snapshot.
         assert.equal((await f.store.lockOrbitcardSupport(task.jobKey, 'prepared', 'support')).applied, false);
-        const recovery = require('../order-recovery')({ store: f.store, activeJobs: new Set(), audit() {},
+        const recovery = require('../src/payments/order-recovery')({ store: f.store, activeJobs: new Set(), audit() {},
             query: { refresh: async () => assert.fail('unsubmitted orders cannot be queried as subscriptions') } });
         await recovery.refreshTask(f.db.tasks[0]);
         assert.equal(f.db.tasks[0].orbitcard_state, kind === 'funding' ? 'funding_pending' : 'card_pending');

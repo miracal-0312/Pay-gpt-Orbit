@@ -40,11 +40,11 @@ async function main() {
     if (!Number.isSafeInteger(cardId) || cardId < 1 || !Number.isSafeInteger(page) || page < 1 || page > 10000) {
         throw Object.assign(new Error('Usage: node scripts/inspect-card-transactions.cjs CARD_ID [PAGE]'), { usage: true });
     }
-    require('../load-env')();
-    const store = require('../mysql-store');
+    require('../src/config/load-env')();
+    const store = require('../src/db/mysql-store');
     try {
         const cfg = await store.getGptApiConfig();
-        const result = await require('../orbitcard-client').request(cfg, 'cardTransaction', { card_id: cardId, page, page_size: 20 });
+        const result = await require('../src/orbitcard/orbitcard-client').request(cfg, 'cardTransaction', { card_id: cardId, page, page_size: 20 });
         console.log(JSON.stringify(diagnostic(result, cardId, page), null, 2));
         if (!result.success) process.exitCode = 1;
     } finally { await store.close(); }

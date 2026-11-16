@@ -2,9 +2,9 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const createService = require('../orbitcard-manual-service');
-const createStore = require('../orbitcard-manual-store');
-const { cardScope } = require('../orbitcard-card-policy');
+const createService = require('../src/payments/orbitcard-manual-service');
+const createStore = require('../src/db/orbitcard-manual-store');
+const { cardScope } = require('../src/orbitcard/orbitcard-card-policy');
 
 function fixture({ unknown = false, pendingAllocation = false, now = Date.now, queueOptions = null } = {}) {
     const orders = new Map(), calls = [], created = [], allocations = [], auditEntries = [], auditContexts = [];
@@ -18,13 +18,13 @@ function fixture({ unknown = false, pendingAllocation = false, now = Date.now, q
         assertPaymentAllowed: async jobKey => {
             const order = [...orders.values()].find(item => item.client_order_no === jobKey);
             if (!order || !['preparing','prepared','submitting','pending'].includes(order.state)) {
-                throw new (require('../payment-automation').PaymentStoppedError)('任务已转人工处理');
+                throw new (require('../src/payments/payment-automation').PaymentStoppedError)('任务已转人工处理');
             }
         },
         assertFundingReconciliationAllowed: async jobKey => {
             const order = [...orders.values()].find(item => item.client_order_no === jobKey);
             if (!order || !['funding_waiting','funding_review','funding_pending'].includes(order.state)) {
-                throw new (require('../payment-automation').PaymentStoppedError)('不能核对该任务');
+                throw new (require('../src/payments/payment-automation').PaymentStoppedError)('不能核对该任务');
             }
         },
         releaseManualFunding: async () => null,
@@ -77,7 +77,7 @@ function fixture({ unknown = false, pendingAllocation = false, now = Date.now, q
             if (change.expectedClientOrderNo && row.client_order_no !== change.expectedClientOrderNo) return row;
             if (!['success','failed','support_locked'].includes(row.state)) {
                 const retry = change.state === 'failed' && change.retryAllowed && row.state !== 'manual'
-                    && require('../payment-retry-policy').manualHistory(row).length < 2;
+                    && require('../src/payments/payment-retry-policy').manualHistory(row).length < 2;
                 Object.assign(row, change, { state: retry ? 'retry_waiting' : change.state === 'failed' ? 'support_locked' : change.state });
                 if (change.snapshot) row.snapshot=JSON.stringify(change.snapshot);
             }
@@ -86,7 +86,7 @@ function fixture({ unknown = false, pendingAllocation = false, now = Date.now, q
         startManualRetry: async (requestId, expected) => {
             const row=orders.get(requestId);
             if(row.state!=='retry_waiting' || row.client_order_no!==expected)return null;
-            const history=require('../payment-retry-policy').manualHistory(row);
+            const history=require('../src/payments/payment-retry-policy').manualHistory(row);
             if(history.length>=2)return null;
             history.push({client_order_no:row.client_order_no,task_no:row.task_no,card_id:row.card_id,snapshot:JSON.parse(row.snapshot)});
             Object.assign(row,{client_order_no:`manual-${requestId}-attempt-${history.length+1}`,retry_history:JSON.stringify(history),
@@ -96,8 +96,8 @@ function fixture({ unknown = false, pendingAllocation = false, now = Date.now, q
     };
     const provider = {
         fetchPlans: async () => ({ success: true, plans }),
-        summary: require('../orbitcard-client').summary,
-        outcome: require('../orbitcard-client').outcome,
+        summary: require('../src/orbitcard/orbitcard-client').summary,
+        outcome: require('../src/orbitcard/orbitcard-client').outcome,
         captcha: () => null,
         request: async (_cfg, operation, body, key) => {
             auditContexts.push({operation,jobKey:_cfg.auditJobKey});
@@ -115,17 +115,17 @@ function fixture({ unknown = false, pendingAllocation = false, now = Date.now, q
                 upstream_status: 'succeeded', query_source: 'upstream' } };
         }
     };
-    const cardService = { confirmFunding: async () => { throw new (require('../orbitcard-card-policy').FundingPendingError)('原补款仍待确认'); },
+    const cardService = { confirmFunding: async () => { throw new (require('../src/orbitcard/orbitcard-card-policy').FundingPendingError)('原补款仍待确认'); },
         allocate: async (_cfg, jobKey, planType, selection) => {
         auditContexts.push({operation:'allocate',jobKey:_cfg.auditJobKey});
         allocations.push({ jobKey, planType, selection });
         if (pendingAllocation && allocations.length === 1) {
-            throw new (require('../orbitcard-card-policy').FundingPendingError)('原补款结果待确认');
+            throw new (require('../src/orbitcard/orbitcard-card-policy').FundingPendingError)('原补款结果待确认');
         }
         return 12;
     } };
     const activeJobs = new Set();
-    const waitingQueue = queueOptions && require('../payment-waiting-queue').createPaymentWaitingQueue({store,activeJobs,now,...queueOptions});
+    const waitingQueue = queueOptions && require('../src/payments/payment-waiting-queue').createPaymentWaitingQueue({store,activeJobs,now,...queueOptions});
     const service = createService({ store, activeJobs, waitingQueue, audit: entry => auditEntries.push(entry), provider, cardService, now });
     return { service, calls, created, orders, allocations, cfg, store, provider, cardService, activeJobs, waitingQueue, auditEntries, auditContexts };
 }
@@ -221,7 +221,7 @@ test('expired administrator retry Session waits for fresh credentials and keeps 
     clock+=16*60*1000;
     assert.equal((await f.service.refresh(id)).state,'retry_waiting');
     assert.equal(f.calls.length,before);
-    assert.equal(require('../payment-retry-policy').manualHistory(order).length,0);
+    assert.equal(require('../src/payments/payment-retry-policy').manualHistory(order).length,0);
     // Model a restart after the next identity was persisted but before its card
     // was allocated. Resubmitting must use that identity for the payment guard.
     const next=await f.store.startManualRetry(id,order.client_order_no);
@@ -235,7 +235,7 @@ test('expired administrator retry Session waits for fresh credentials and keeps 
     await f.service.create(input);await until(()=>f.activeJobs.size===0);
     assert.equal(order.state,'pending');
     assert.equal(order.client_order_no,`manual-${id}-attempt-2`);
-    assert.equal(require('../payment-retry-policy').manualHistory(order).length,1);
+    assert.equal(require('../src/payments/payment-retry-policy').manualHistory(order).length,1);
     assert.equal(f.calls.filter(call=>call.operation==='createSubscription').length,2);
 });
 
@@ -295,7 +295,7 @@ test('administrator busy-card preparation keeps one queue place until the card i
     const gate=new Promise(resolve=>{release=resolve;});
     const f=fixture({queueOptions:{sleep:()=>gate}});
     f.store.getMaxConcurrentActivations=async()=>1;
-    f.cardService.allocate=async()=>{attempts++;if(busy)throw new (require('../orbitcard-card-policy').CardBusyError)('card busy');return 12;};
+    f.cardService.allocate=async()=>{attempts++;if(busy)throw new (require('../src/orbitcard/orbitcard-card-policy').CardBusyError)('card busy');return 12;};
     const order=await f.service.create({requestId:id,planType:'gpt-plus',mode:'test',session,authorized:true});
     try {
         assert.equal(order.state,'preparing');assert.match(order.message,/等待队列/);
@@ -312,7 +312,7 @@ test('an administrator waiting timeout releases its unsubmitted order and expose
     process.env.ORBITCARD_API_KEY='key';process.env.ORBITCARD_API_SECRET='secret';
     let clock=Date.now();
     const f=fixture({now:()=>clock,queueOptions:{waitMs:10000,sleep:async ms=>{clock+=ms;}}});
-    f.cardService.allocate=async()=>{throw new (require('../orbitcard-card-policy').CardBusyError)('card busy');};
+    f.cardService.allocate=async()=>{throw new (require('../src/orbitcard/orbitcard-card-policy').CardBusyError)('card busy');};
     await f.service.create({requestId:id,planType:'gpt-plus',mode:'test',session,authorized:true});
     await until(()=>f.orders.get(id).state==='failed'&&f.activeJobs.size===0);
     const order=await f.service.get(id);
@@ -333,7 +333,7 @@ test('administrator refresh and recovery hand queued retries to the background w
             await until(()=>f.activeJobs.size===0);
         }
         clock+=5000;
-        f.cardService.allocate=async()=>{if(busy)throw new (require('../orbitcard-card-policy').CardBusyError)('busy');return 13;};
+        f.cardService.allocate=async()=>{if(busy)throw new (require('../src/orbitcard/orbitcard-card-policy').CardBusyError)('busy');return 13;};
         f.provider.request=async(_cfg,operation,body,key)=>{
             if(operation==='createSubscription')return {success:true,data:{task_no:'RETRY',client_order_no:key,plan_type:body.plan_type,card_id:body.card_id}};
             assert.equal(operation,'getSubscription');
@@ -352,19 +352,19 @@ test('administrator refresh and recovery hand queued retries to the background w
             assert.equal(f.orders.get(second).state,'success','another order must not wait behind a queued retry');
             assert.equal(f.orders.get(id).state,'preparing');
             assert.equal(f.activeJobs.has(`manual-${id}-attempt-2`),true);
-            const lock=await f.store.acquirePaymentLock(require('../payment-execution-lock').manualLockKeys(id));
+            const lock=await f.store.acquirePaymentLock(require('../src/payments/payment-execution-lock').manualLockKeys(id));
             assert.equal(lock,null,'the returned HTTP result must not release the background execution lock');
         } finally {busy=false;release();}
         await until(()=>f.orders.get(id).state==='success'&&f.activeJobs.size===0);
-        const lock=await f.store.acquirePaymentLock(require('../payment-execution-lock').manualLockKeys(id));
+        const lock=await f.store.acquirePaymentLock(require('../src/payments/payment-execution-lock').manualLockKeys(id));
         assert.ok(lock);await lock.release();
     }
 });
 
 test('administrator HTTP reports queue-full feedback and a ten-minute retry header',async()=>{
     const routes=new Map(),app={get(){},post(path,...handlers){routes.set(path,handlers.at(-1));}};
-    const {PaymentQueueFullError}=require('../payment-waiting-queue');
-    require('../orbitcard-manual-http')(app,{service:{create:async()=>{throw new PaymentQueueFullError();}},requireSecondaryAuth(){}});
+    const {PaymentQueueFullError}=require('../src/payments/payment-waiting-queue');
+    require('../src/http/orbitcard-manual-http')(app,{service:{create:async()=>{throw new PaymentQueueFullError();}},requireSecondaryAuth(){}});
     const response={headers:{},set(key,value){this.headers[key]=value;return this;},status(code){this.code=code;return this;},json(body){this.body=body;return this;}};
     await routes.get('/api/admin/manual/orders')({body:{}},response);
     assert.equal(response.code,429);assert.equal(response.headers['Retry-After'],'600');
@@ -1261,7 +1261,7 @@ test('manual original-order refresh settles terminal upstream snapshots and rele
         db.card.balance = 91;
         store.acquirePaymentLock = require('./helpers/payment-locks.cjs')().acquirePaymentLock;
         const calls = [], events = [];
-        const provider = { ...require('../orbitcard-client'), request: async (_, operation, body) => {
+        const provider = { ...require('../src/orbitcard/orbitcard-client'), request: async (_, operation, body) => {
             calls.push(operation);
             assert.equal(operation, 'getSubscription');
             assert.deepEqual(body, { task_no: 'SUB-SNAPSHOT' });
@@ -1306,7 +1306,7 @@ test('manual snapshots with missing provenance, mismatched ownership or query er
         if (scenario === 'request_error') response.requestError = { code: 'relay_query_failed' };
         if (scenario === 'data_error') data.request_error = { code: 'relay_query_failed' };
         if (scenario === 'http_failure') response.success = false;
-        const provider = { ...require('../orbitcard-client'), request: async (_, operation) => {
+        const provider = { ...require('../src/orbitcard/orbitcard-client'), request: async (_, operation) => {
             assert.equal(operation, 'getSubscription'); return response;
         } };
         const service = createService({ store, provider, now, activeJobs: new Set(), audit() {}, cardService: {} });

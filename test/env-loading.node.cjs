@@ -12,13 +12,16 @@ function fixture(t) {
     const files = [];
     function write(name, content) {
         const file = path.join(dir, name);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
         fs.writeFileSync(file, content);
         files.push(file);
         return file;
     }
-    const loader = write('load-env.js', fs.readFileSync(path.join(__dirname, '..', 'load-env.js')));
+    const loader = write('src/config/load-env.js', fs.readFileSync(path.join(__dirname, '..', 'src/config/load-env.js')));
     t.after(() => {
         for (const file of files) fs.unlinkSync(file);
+        fs.rmdirSync(path.join(dir, 'src', 'config'));
+        fs.rmdirSync(path.join(dir, 'src'));
         fs.rmdirSync(dir);
     });
     function run(code, overrides = {}) {
@@ -92,6 +95,7 @@ test('server loads .env before importing its application dependencies', (t) => {
     const f = fixture(t);
     f.write('.env', 'ORBITCARD_API_SECRET=bootstrap-fixture\nDB_NAME=orbit_bootstrap\n');
     f.write('server.js', fs.readFileSync(path.join(__dirname, '..', 'server.js')));
+    f.write('src/server.js', fs.readFileSync(path.join(__dirname, '..', 'src/server.js')));
     const output = f.run(`
         const assert = require('node:assert/strict');
         const Module = require('node:module');
@@ -106,7 +110,7 @@ test('server loads .env before importing its application dependencies', (t) => {
             }
             return original.apply(this, arguments);
         };
-        require(path.join(path.dirname(process.env.PAY_ORBIT_TEST_LOADER), 'server.js'));
+        require(path.resolve(path.dirname(process.env.PAY_ORBIT_TEST_LOADER), '..', '..', 'server.js'));
     `);
     assert.equal(output, 'loaded-before-dependencies');
 });

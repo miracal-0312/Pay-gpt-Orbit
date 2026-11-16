@@ -1,8 +1,8 @@
 'use strict';
 const assert = require('node:assert/strict');
-const cardFactory = require('../../orbitcard-card-store');
-const cdkFactory = require('../../orbitcard-cdk-store');
-const { cardScope } = require('../../orbitcard-card-policy');
+const cardFactory = require('../../src/db/orbitcard-card-store');
+const cdkFactory = require('../../src/db/orbitcard-cdk-store');
+const { cardScope } = require('../../src/orbitcard/orbitcard-card-policy');
 const BASE = 'https://orbitcard.test';
 
 module.exports = function fixture({ enqueueRedemption, now: externalNow } = {}) {
@@ -167,7 +167,7 @@ module.exports = function fixture({ enqueueRedemption, now: externalNow } = {}) 
     const cardStore=cardFactory({runQuery,runExecute,withTransaction,getPool() { throw new Error('Unexpected real connection'); }});
     const cdkStore=cdkFactory({runQuery,runExecute,withTransaction,settleCardUse:cardStore.settleCardUse,enqueueRedemption,
         createTaskLog: async input => { const task={ id:++sequence,job_key:`job-${sequence}`,cdk_code:input.cdkCode,status:'running',progress:3 }; db.tasks.push(task); return {jobKey:task.job_key}; } });
-    const automation=require('../../payment-automation')({runQuery});
+    const automation=require('../../src/payments/payment-automation')({runQuery});
     const store={...cardStore,...cdkStore,...automation,acquirePaymentLock:require('./payment-locks.cjs')().acquirePaymentLock,getTaskStatus:async key=>structuredClone(db.tasks.find(t=>t.job_key===key)),withCardAllocationLock(base, fn) {
         const pending=allocationTail.then(() => fn(cardStore.cardMethods(base))); allocationTail=pending.catch(() => {}); return pending;
     }};
@@ -195,7 +195,7 @@ module.exports = function fixture({ enqueueRedemption, now: externalNow } = {}) 
     }
     const settle=(task,state) => cdkStore.settleOrbitcardTask(task.jobKey,{status:state==='success'?'success':['failed','rejected'].includes(state)?'failed':state==='manual'?'manual':'running',orbitcardState:state,progress:90,message:state,
         ...(['success','failed'].includes(state)?{gptApiOrderId:`sub-${task.jobKey}`,gptApiRaw:JSON.stringify({task_no:`sub-${task.jobKey}`,client_order_no:task.orbitcardClientOrderNo,
-            plan_type:require('../../plan-registry').PROVIDER_PLANS[db.tasks.find(row=>row.job_key===task.jobKey)?.orbitcard_plan_type || 'plus'],
+            plan_type:require('../../src/config/plan-registry').PROVIDER_PLANS[db.tasks.find(row=>row.job_key===task.jobKey)?.orbitcard_plan_type || 'plus'],
             card_id:db.tasks.find(row=>row.job_key===task.jobKey)?.orbitcard_card_id,status:state==='success'?'succeeded':'failed',subscription_succeeded:state==='success',query_source:'upstream'})}:{}),
         ...(state==='submitting'?{expectedState:'prepared',expectedClientOrderNo:task.orbitcardClientOrderNo}:{})});
     return {db,store,claim,addCard,seedHistoricalIssue,settle,now,runQuery,runExecute,withTransaction,advance:(ms=300000)=>{clock+=ms;},base:BASE,scope:cardScope(BASE)};

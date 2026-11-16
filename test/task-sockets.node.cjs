@@ -2,7 +2,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
-const { attachTaskSockets, send } = require('../task-sockets');
+const { attachTaskSockets, send } = require('../src/realtime/task-sockets');
 class Socket extends EventEmitter {
     readyState = 1; bufferedAmount = 0; sent = [];
     send(value) { this.sent.push(JSON.parse(value)); }

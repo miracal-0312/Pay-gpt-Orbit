@@ -2,9 +2,9 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const crypto=require('node:crypto');
-const createFundingService=require('../orbitcard-funding-service');
-const {cardScope,CardPreparationError,FundingPendingError,FundingAwaitingError}=require('../orbitcard-card-policy');
-const {PaymentStoppedError}=require('../payment-automation');
+const createFundingService=require('../src/orbitcard/orbitcard-funding-service');
+const {cardScope,CardPreparationError,FundingPendingError,FundingAwaitingError}=require('../src/orbitcard/orbitcard-card-policy');
+const {PaymentStoppedError}=require('../src/payments/payment-automation');
 
 function fixture(overrides={}) {
     let clock=1000000,allowed=true;

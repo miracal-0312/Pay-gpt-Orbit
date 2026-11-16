@@ -7,6 +7,7 @@ const { createRequire } = require('node:module');
 const { once } = require('node:events');
 
 function load(name, mocks = {}) {
+    if (name === 'src/server.js') mocks = { './config/load-env': () => false, ...mocks };
     const filename = path.resolve(__dirname, '..', name);
     const module = { exports: {} }, real = createRequire(filename);
     new Function('require', 'module', 'exports', '__dirname', fs.readFileSync(filename, 'utf8'))(
@@ -17,7 +18,7 @@ function load(name, mocks = {}) {
 test('CDK queries filter in SQL and export advances past the list cap by ID', async () => {
     const calls = [];
     const core = { runQuery: async (sql, params) => { calls.push({ sql, params }); return [{ id: 50, cdk_code: 'KC-TEST', plan_type: 'pro200', task_status: null, orbitcard_state: null }]; } };
-    const store = load('mysql-store.js', {
+    const store = load('src/db/mysql-store.js', {
         './mysql-core': core,
         './orbitcard-card-store': () => ({}),
         './orbitcard-cdk-store': () => ({})
@@ -48,7 +49,7 @@ test('CDK is redeemed only after confirmed success; export marks exact IDs in on
         runExecute: async (sql, params) => { writes.push([sql, params]); return { affectedRows: params.length }; },
         withTransaction: async callback => callback({ testConnection: true })
     };
-    const store = load('mysql-store.js', {
+    const store = load('src/db/mysql-store.js', {
         './mysql-core': core,
         './orbitcard-card-store': () => ({}),
         './orbitcard-cdk-store': () => ({})
@@ -91,12 +92,12 @@ test('admin CSV export requires both tokens, filters plans and includes rows bey
             for (const row of rows.filter(row => ids.includes(row.id))) row.shipped = true;
         }
     };
-    const { app } = load('server.js', { './mysql-store': store, './runtime-log': { push() {}, initialize() {} } });
+    const { app } = load('src/server.js', { './db/mysql-store': store, './logging/runtime-log': { push() {}, initialize() {} } });
     const server = app.listen(0, '127.0.0.1');
     await once(server, 'listening');
     t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
     const base = `http://127.0.0.1:${server.address().port}`;
-    const auth = require('../admin-auth');
+    const auth = require('../src/http/admin-auth');
     const bearer = auth.issueAdminToken(1, 'admin@example.test').token;
     const secondary = auth.issueSecondaryToken(1, '127.0.0.1').token;
     const headers = { Authorization: `Bearer ${bearer}`, 'x-admin-secondary-token': secondary };
@@ -185,7 +186,7 @@ test('CDK catalog and generation accept only live Plus and Pro plans', async t =
     const oldSecret = process.env.ADMIN_TOKEN_SECRET;
     process.env.ADMIN_TOKEN_SECRET = 'd'.repeat(32);
     t.after(() => { if (oldSecret === undefined) delete process.env.ADMIN_TOKEN_SECRET; else process.env.ADMIN_TOKEN_SECRET = oldSecret; });
-    const orbitcard = require('../orbitcard-client');
+    const orbitcard = require('../src/orbitcard/orbitcard-client');
     const oldFetchPlans = orbitcard.fetchPlans;
     orbitcard.fetchPlans = async () => ({ success: true, plans: [
         { type: 'gpt-go', name: 'Go' }, { type: 'gpt-plus', name: 'Plus' },
@@ -201,12 +202,12 @@ test('CDK catalog and generation accept only live Plus and Pro plans', async t =
         getGptApiConfig: async () => ({ base_url: 'https://orbitcard.cc', api_key: 'test' }),
         insertCdks: async (codes, options) => { inserted.push({ codes, options }); return { insertedCount: codes.length }; }
     };
-    const { app } = load('server.js', { './mysql-store': store, './runtime-log': { push() {}, initialize() {} } });
+    const { app } = load('src/server.js', { './db/mysql-store': store, './logging/runtime-log': { push() {}, initialize() {} } });
     const server = app.listen(0, '127.0.0.1');
     await once(server, 'listening');
     t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
     const base = `http://127.0.0.1:${server.address().port}`;
-    const auth = require('../admin-auth');
+    const auth = require('../src/http/admin-auth');
     const headers = { Authorization: `Bearer ${auth.issueAdminToken(1, 'admin@example.test').token}`,
         'x-admin-secondary-token': auth.issueSecondaryToken(1, '127.0.0.1').token,
         'Content-Type': 'application/json' };

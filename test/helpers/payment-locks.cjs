@@ -1,5 +1,5 @@
 'use strict';
-const { createExecutionLocks } = require('../../payment-execution-lock');
+const { createExecutionLocks } = require('../../src/payments/payment-execution-lock');
 
 // Two services can share this simulated MySQL server while using separate
 // connections and local active-job sets. It runs the production lock manager.

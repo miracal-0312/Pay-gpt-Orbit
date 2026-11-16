@@ -7,8 +7,8 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { createRequire } = require('node:module');
 const fixture = require('./helpers/card-db.cjs');
-const createFundingService = require('../orbitcard-funding-service');
-const { FundingPendingError } = require('../orbitcard-card-policy');
+const createFundingService = require('../src/orbitcard/orbitcard-funding-service');
+const { FundingPendingError } = require('../src/orbitcard/orbitcard-card-policy');
 
 function load(name, mocks) {
     const filename = path.resolve(__dirname, '..', name), real = createRequire(filename), module = { exports: {} };
@@ -96,8 +96,8 @@ async function issueFixture(response) {
         assert.equal(operation, 'createCard', 'a failed response must not fetch or deliver a card');
         return response;
     } };
-    const cards = load('orbitcard-cards-client.js', { './orbitcard-client': api });
-    const service = load('orbitcard-card-service.js', { './orbitcard-client': api, './orbitcard-cards-client': cards })(
+    const cards = load('src/orbitcard/orbitcard-cards-client.js', { './orbitcard-client': api });
+    const service = load('src/orbitcard/orbitcard-card-service.js', { './orbitcard-client': api, './orbitcard-cards-client': cards })(
         { store: f.store, audit() {}, now: f.now, sleep: async () => {} });
     return { ...f, task, methods, body, calls, service };
 }

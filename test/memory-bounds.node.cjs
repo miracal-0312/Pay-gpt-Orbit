@@ -10,7 +10,7 @@ const { createRequire } = require('node:module');
 function logsFixture(t, env = {}) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-memory-'));
     t.after(() => { assert.ok(path.basename(dir).startsWith('orbit-memory-')); fs.rmSync(dir, { recursive: true, force: true }); });
-    const filename = require.resolve('../runtime-log'), real = createRequire(filename);
+    const filename = require.resolve('../src/logging/runtime-log'), real = createRequire(filename);
     const load = () => {
         const module = { exports: {} };
         new Function('require', 'module', '__dirname', 'process', fs.readFileSync(filename, 'utf8'))(
@@ -59,7 +59,7 @@ test('log byte budget evicts data before the entry count limit', t => {
 
 test('idle query cache expiration frees results without a subsequent request', async () => {
     let now = 10000, cleanup, unref = false;
-    const filename = require.resolve('../orbitcard-query'), real = createRequire(filename), module = { exports: {} };
+    const filename = require.resolve('../src/orbitcard/orbitcard-query'), real = createRequire(filename), module = { exports: {} };
     new Function('require', 'module', 'Date', 'setInterval', fs.readFileSync(filename, 'utf8') + '\nmodule.exports.cacheSize = () => recent.size;')(
         id => id === './orbitcard-subscription-service' ? () => ({ query: async () => ({ success: false, retryAfterMs: 5000 }) }) : real(id),
         module, { now: () => now }, (fn, ms) => { assert.equal(ms, 30000); cleanup = fn; return { unref() { unref = true; } }; });

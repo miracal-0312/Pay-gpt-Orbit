@@ -36,7 +36,7 @@ test('Orbitcard credentials come only from environment, never admin input or old
         async getConnection() { return connection; }
     }) };
     try {
-        const core = load('mysql-core.js', { 'mysql2/promise': mysql });
+        const core = load('src/db/mysql-core.js', { 'mysql2/promise': mysql });
         const config = await core.getGptApiConfig();
         assert.equal(config.api_key, 'environment-key');
         assert.equal(Object.hasOwn(config, 'api_secret'), false);
@@ -108,7 +108,7 @@ test('Orbitcard credentials come only from environment, never admin input or old
 });
 
 test('configured card prices preserve decimal precision and never fall back to platform fees or removed product prices', () => {
-    const { normalizePlanPrices, planPrice } = require('../orbitcard-config');
+    const { normalizePlanPrices, planPrice } = require('../src/config/orbitcard-config');
     assert.equal(normalizePlanPrices({ plus: '00020.12345678' }).plus, '20.12345678');
     assert.equal(normalizePlanPrices({ plus: '0.00000001' }).plus, '0.00000001');
     assert.equal(normalizePlanPrices({ plus: '99999999999999.99999999' }).plus, '99999999999999.99999999');
@@ -164,10 +164,10 @@ test('client signs with environment Secret even if config contains an obsolete S
     process.env.ORBITCARD_API_SECRET = 'environment-secret';
     process.env.ORBITCARD_API_KEY = 'environment-key';
     let outgoing;
-    const api = load('orbitcard-client.js', {
+    const api = load('src/orbitcard/orbitcard-client.js', {
         axios: { request: async args => { outgoing = args; return { status: 200,
             data: { code: 0, data: { available_balance: '20.00' } }, headers: {} }; } },
-        './runtime-log': { push() {} }
+        '../logging/runtime-log': { push() {} }
     });
     try {
         assert.equal((await api.request({ api_key: 'forged-config-key', api_secret: 'obsolete-secret',
@@ -192,10 +192,10 @@ test('card ID preview reads platform card list and returns only safe summary fie
     const app = { get: (route, fn) => handlers.set(route, fn), post: (route, _auth, fn) => handlers.set(route, fn || _auth) };
     const cards = [{ card_id: 42, provider_status: 'ACTIVE', last4: '1234', card_number: '4111111111111234', cvv: '999' },
         { card_id: 43, provider_status: 'FROZEN', last4: '5678' }];
-    const register = load('orbitcard-card-http.js', {
-        './orbitcard-cards-client': { listCards: async () => cards },
-        './orbitcard-client': {},
-        './orbitcard-card-policy': { CardPreparationError: class extends Error {} }
+    const register = load('src/http/orbitcard-card-http.js', {
+        '../orbitcard/orbitcard-cards-client': { listCards: async () => cards },
+        '../orbitcard/orbitcard-client': {},
+        '../orbitcard/orbitcard-card-policy': { CardPreparationError: class extends Error {} }
     });
     register(app, { store: { getGptApiConfig: async () => ({ api_key: 'fixture' }) },
         cardService: {}, requireSecondaryAuth: (_req, _res, next) => next(), audit() {} });
@@ -218,7 +218,7 @@ test('connection diagnostics report both upstream calls without exposing credent
     process.env.ORBITCARD_API_KEY = 'diagnostic-key';
     process.env.ORBITCARD_API_SECRET = 'diagnostic-secret';
     const calls = [];
-    const api = load('orbitcard-client.js', {
+    const api = load('src/orbitcard/orbitcard-client.js', {
         axios: { request: async args => {
             calls.push(new URL(args.url).pathname);
             const data = args.url.endsWith('/getSubscriptionPlans')
@@ -226,7 +226,7 @@ test('connection diagnostics report both upstream calls without exposing credent
                 : { available_balance: '25.00' };
             return { status: 200, data: { code: 0, data }, headers: {} };
         } },
-        './runtime-log': { push() {} }
+        '../logging/runtime-log': { push() {} }
     });
     try {
         const result = await api.testConnection({ base_url: 'https://orbitcard.test' });

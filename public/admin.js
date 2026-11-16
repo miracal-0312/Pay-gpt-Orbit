@@ -66,7 +66,10 @@ async function requestOnce(url, body, method) {
     catch (_) { throw new Error(`服务端响应格式异常（HTTP ${response.status}）`); }
     if (!data || typeof data !== 'object') throw new Error(`服务端响应格式异常（HTTP ${response.status}）`);
     if (!response.ok || data.success === false) {
-        if (data.secondaryRequired) { localStorage.removeItem(SECONDARY_KEY); $('unlockState').textContent = '请重新验证二级密码'; }
+        if (data.secondaryRequired) {
+            localStorage.removeItem(SECONDARY_KEY); $('unlockState').textContent = '请重新验证二级密码';
+            if (typeof lockEmailNotificationForm === 'function') lockEmailNotificationForm();
+        }
         const error = new Error(data.message || `请求失败（${response.status}）`);
         error.httpStatus = response.status;
         error.error_code = data.error_code;
@@ -90,8 +93,8 @@ function renderTasks(tasks) {
     $('tasks').innerHTML = tasks.map(task => {
         const order = task.order || {}, fee = order.fee_status ? `${order.service_fee ?? '—'} ${order.currency || 'USDT'} / ${order.fee_status}` : '—';
         const payment = order.payment ? `${order.payment.amount} ${order.payment.currency}` : '—';
-        const preparing = task.queued || ['preparing','prepared','funding_waiting','funding_review','card_pending','funding_pending','balance_blocked'].includes(task.orbitcard_state);
-        const refresh = task.provider === 'orbitcard' ? `<button class="secondary" data-refresh-order="${escapeHtml(task.jobKey)}">${['funding_waiting','funding_review','funding_pending'].includes(task.orbitcard_state) ? '核对原补款' : '查原单'}</button>${preparing ? '' : ` <button type="button" class="secondary" data-edit-order="${escapeHtml(task.jobKey)}" data-order-status="${escapeHtml(task.status)}">人工修改</button>`}` : '<small>历史记录</small>';
+        const refresh = (task.provider === 'orbitcard' ? `<button class="secondary" data-refresh-order="${escapeHtml(task.jobKey)}">${['funding_waiting','funding_review','funding_pending'].includes(task.orbitcard_state) ? '核对原补款' : '查原单'}</button>` : '<small>历史记录</small>')
+            + ` <button type="button" class="secondary" data-order-manual="${escapeHtml(task.jobKey)}" data-order-kind="task">人工修改</button>`;
         const cardLabel = task.card_id || (task.provider !== 'orbitcard' ? '历史未绑定'
             : ['preparing','prepared','rejected','balance_blocked','card_pending'].includes(task.orbitcard_state) ? '尚未分配支付卡' : '未记录支付卡');
         return `<tr><td>${escapeHtml(task.time)}<br><code>${escapeHtml(task.cdk)}</code></td><td>${escapeHtml(task.provider === 'orbitcard' ? task.token : '历史账号')}<br><code>${escapeHtml(task.order_id || task.client_order_no || task.jobKey)}</code><br>卡 ID：${escapeHtml(cardLabel)}</td><td>${task.queued ? '<span class="pill">排队等待</span>' : status(['funding_review','funding_pending','card_pending'].includes(task.orbitcard_state) ? task.orbitcard_state : task.status)}<br>${escapeHtml(task.message)}</td><td>${escapeHtml(fee)}</td><td>${escapeHtml(payment)}</td><td>${refresh} <button class="secondary" data-download-audit="${escapeHtml(task.jobKey)}">下载日志</button> <button class="secondary" data-debug-trace="${escapeHtml(task.jobKey)}">链路日志</button></td></tr>`;
@@ -107,6 +110,64 @@ async function loadOverview() {
     $('botState').textContent = telegram.bot_token_saved ? '已保存 Bot Token' : '未配置 Bot Token';
     $('adminChat').value = telegram.admin_chat_id || ''; $('groupChat').value = telegram.group_chat_id || '';
     for (const [id, key] of [['notifyAdmin','notify_admin'],['notifyGroup','notify_group'],['onSuccess','on_success'],['onFailure','on_failure']]) $(id).checked = Boolean(telegram[key]);
+}
+function lockEmailNotificationForm() {
+    $('emailNotificationFields').disabled = true;
+    $('smtpPassword').value = '';
+    $('emailNotificationState').textContent = '请先验证二级密码，再读取邮件配置。';
+}
+function renderEmailNotificationConfig(config = {}) {
+    for (const [id, key] of [['emailEnabled','enabled'],['emailLowBalance','on_low_balance'],['emailSuccess','on_success'],['emailFailure','on_failure']]) {
+        $(id).checked = Boolean(config[key]);
+    }
+    for (const [id, key] of [['smtpHost','smtp_host'],['smtpUser','smtp_user'],['emailFrom','from_email'],['emailTo','to_email']]) $(id).value = config[key] || '';
+    $('smtpPort').value = config.smtp_port || 465;
+    $('smtpSecurity').value = config.smtp_secure === false ? 'starttls' : 'tls';
+    $('smtpPassword').value = ''; $('smtpClearPassword').checked = false;
+    $('smtpPasswordState').textContent = config.smtp_password_error ? '已保存密码无法解密，请重新填写后保存'
+        : config.smtp_password_saved ? '密码已保存，留空保持不变' : '未配置密码';
+    $('emailBalanceThreshold').value = config.balance_threshold ?? '50.00';
+    $('emailBalanceCooldown').value = config.balance_cooldown_minutes ?? 360;
+    $('emailNotificationFields').disabled = false;
+    $('emailNotificationState').textContent = config.enabled ? '自动邮件通知已启用。' : '自动邮件通知未启用。填写配置后可先发送测试邮件。';
+}
+function renderEmailNotificationHistory(history = []) {
+    const names = { low_balance: '账户低余额', order_success: '订阅成功', order_failure: '充值失败', order_review: '充值未完成，需人工处理' };
+    const states = { pending: '等待发送', sent: '已发送', failed: '发送失败' };
+    $('emailNotificationRows').innerHTML = history.map(row => `<tr><td>${escapeHtml(row.created_at)}<br>${escapeHtml(names[row.event_type] || row.event_type)}</td><td>${escapeHtml(row.target_email)}</td><td>${escapeHtml(states[row.status] || row.status)} / ${escapeHtml(row.attempts)}</td><td>${escapeHtml(row.delivered_at || '—')}<br>${escapeHtml(row.last_error || '')}</td></tr>`).join('')
+        || '<tr><td colspan="4">暂无邮件通知记录</td></tr>';
+}
+async function loadEmailNotifications() {
+    if (!localStorage.getItem(SECONDARY_KEY)) { lockEmailNotificationForm(); return; }
+    const data = await request('/api/admin/email-notifications');
+    renderEmailNotificationConfig(data.config);
+    renderEmailNotificationHistory(data.history || []);
+}
+function emailNotificationInput() {
+    return { enabled: $('emailEnabled').checked, smtp_host: $('smtpHost').value.trim(), smtp_port: Number($('smtpPort').value),
+        smtp_secure: $('smtpSecurity').value === 'tls', smtp_user: $('smtpUser').value.trim(), smtp_password: $('smtpPassword').value,
+        clear_password: $('smtpClearPassword').checked, from_email: $('emailFrom').value.trim(), to_email: $('emailTo').value.trim(),
+        on_low_balance: $('emailLowBalance').checked, on_success: $('emailSuccess').checked, on_failure: $('emailFailure').checked,
+        balance_threshold: $('emailBalanceThreshold').value.trim(), balance_cooldown_minutes: Number($('emailBalanceCooldown').value) };
+}
+async function saveEmailNotifications() {
+    const result = await request('/api/admin/email-notifications', emailNotificationInput());
+    renderEmailNotificationConfig(result.config);
+    notice(result.message, 'success');
+}
+async function testEmailNotifications() {
+    const button = $('testEmailNotifications');
+    if (button.disabled) return;
+    button.disabled = true;
+    $('emailTestResult').textContent = '正在向已保存的管理员邮箱发送测试邮件…';
+    try {
+        const result = await request('/api/admin/email-notifications/test', {});
+        $('emailTestResult').textContent = result.message;
+        notice(result.message, 'success');
+    } catch (error) {
+        $('emailTestResult').textContent = error.message;
+        reportError(error);
+    } finally { button.disabled = false; }
 }
 async function loadApi() {
     const { config } = await request('/api/admin/gpt-api');
@@ -267,7 +328,7 @@ async function loadCards(sync = null) {
         : sync?.checked_at ? `查询完成：${sync.checked_at}，同步 ${sync.count} 张，详情读取失败 ${sync.failed_ids.length} 张，已移出列表 ${(sync.removed_ids || []).length} 张。数值为本次查询时的快照。`
             : '状态、余额和成功会员订单次数为本地快照，点击“同步卡片与订单”更新。“刷新本地记录”不会调用平台；API 不可见的网页订单不计入，授权流水仅供对账。';
     $('issueRows').innerHTML = data.issues.map(issue => `<tr><td>${escapeHtml(issue.created_at)}<br><code>${escapeHtml(issue.issue_key)}</code></td><td>${escapeHtml(issue.product_code)}<br>${escapeHtml(issue.amount)}</td><td>${issue.job_key ? escapeHtml(cardPlans[issue.plan_type] || issue.plan_type) : '共享卡池'} / ${escapeHtml(issue.state)}<br>${escapeHtml(issue.provider_status || '')}<br>${escapeHtml(issue.message)}</td><td>${escapeHtml(issue.order_no || '待返回')}<br>${escapeHtml(issue.card_id || '待返回')}</td></tr>`).join('') || '<tr><td colspan="4">暂无开卡申请</td></tr>';
-    $('fundingRows').innerHTML=(data.fundings || []).map(funding => `<tr><td>${escapeHtml(funding.created_at)}<br><code>${escapeHtml(funding.job_key)}</code></td><td>${escapeHtml(funding.card_id)}<br>${escapeHtml(funding.amount)} USD</td><td>${escapeHtml(funding.state)} / ${escapeHtml(funding.provider_status)}<br>${escapeHtml(funding.order_no || funding.funding_key)}<br>${escapeHtml(funding.message)}</td><td>${escapeHtml(funding.fee_snapshot || '待确认')}<br>目标余额：${escapeHtml(funding.target_balance)}</td></tr>`).join('') || '<tr><td colspan="4">暂无卡片补款</td></tr>';
+    $('fundingRows').innerHTML=(data.fundings || []).map(funding => `<tr><td>${escapeHtml(funding.created_at)}<br><code>${escapeHtml(funding.job_key)}</code></td><td>${escapeHtml(funding.card_id)}<br>${escapeHtml(funding.amount)} USD</td><td>${escapeHtml(funding.state)} / ${escapeHtml(funding.provider_status)}<br>${escapeHtml(funding.order_no || funding.funding_key)}<br>${escapeHtml(funding.message)}</td><td>${escapeHtml(funding.fee_snapshot || '待确认')}<br>支付前要求余额：${escapeHtml(funding.target_balance)}</td></tr>`).join('') || '<tr><td colspan="4">暂无卡片补款</td></tr>';
 }
 async function loadCardTransactions() {
     const id = Number($('transactionCardId').value), page = Number($('transactionPage').value);
@@ -481,7 +542,7 @@ async function loadSelected() {
         if (selectedDiagnostic === 'login') await loadLoginLogs();
         if (selectedDiagnostic === 'trace' && localStorage.getItem(SECONDARY_KEY)) await loadManualOrders();
     }
-    if (selected === 'settings') await Promise.all([loadOverview(), loadSecurity()]);
+    if (selected === 'settings') await Promise.all([loadOverview(), loadSecurity(), loadEmailNotifications()]);
     if (selected === 'cdks' && localStorage.getItem(SECONDARY_KEY)) { await loadCdkPlans().catch(error => { cdkPlans = {}; notice(`套餐目录读取失败：${error.message}`, 'error'); }); await loadCdks(); }
     if (selected === 'manual' && localStorage.getItem(SECONDARY_KEY)) {
         await Promise.all([loadManualCatalog(), loadManualOrders()]);
@@ -607,6 +668,7 @@ function renderManualOrders(orders) {
         const action = `${!order.queued && ['preparing','retry_waiting'].includes(order.state)
             ? `<button type="button" class="secondary" data-retry-manual="${escapeHtml(order.request_id)}">${order.state === 'retry_waiting' ? '提交 Session 换卡重试' : '继续准备'}</button>` : ''}${order.queued || ['submitting','pending','manual'].includes(order.state)
             ? `<button type="button" class="secondary" data-refresh-manual="${escapeHtml(order.request_id)}">查询原订单</button>` : ''}
+            <button type="button" class="secondary" data-order-manual="${escapeHtml(order.request_id)}" data-order-kind="admin">人工修改</button>
             <button type="button" class="secondary" data-download-manual="${escapeHtml(order.client_order_no)}">下载日志</button> <button type="button" class="secondary" data-debug-trace="${escapeHtml(order.client_order_no)}">链路日志</button>`;
         return `<tr><td>${escapeHtml(new Date(order.created_at).toLocaleString('zh-CN'))}<br>${escapeHtml(order.target_email)}</td>
             <td>${order.mode === 'fulfillment' ? '人工交付' : '测试开通'}<br>${escapeHtml(order.plan_name || order.plan_type)}<br>${order.card_id ? `卡 ${escapeHtml(order.card_id)}` : '待选卡'}${order.cdk_code ? `<br><code>${escapeHtml(order.cdk_code)}</code>` : ''}</td>
@@ -803,6 +865,9 @@ form('emailForm', async () => { await request('/api/admin/change-email', { email
 form('secondaryForm', async () => { const data = await request('/api/admin/change-secondary-password', { currentPassword: $('oldSecondary').value, newPassword: $('newSecondary').value }); $('oldSecondary').value = ''; $('newSecondary').value = ''; localStorage.removeItem(SECONDARY_KEY); $('unlockState').textContent = '请重新解锁'; notice(data.message, 'success'); });
 form('pathsForm', async () => { const data = await request('/api/admin/security/paths', { loginPath: $('loginPath').value, panelPath: $('panelPath').value }); location.assign(data.panelUrl); });
 form('telegramForm', async () => { const data = await request('/api/admin/telegram', { bot_token: $('botToken').value, admin_chat_id: $('adminChat').value, group_chat_id: $('groupChat').value, notify_admin: $('notifyAdmin').checked, notify_group: $('notifyGroup').checked, on_success: $('onSuccess').checked, on_failure: $('onFailure').checked }); $('botToken').value = ''; notice(data.message, 'success'); await loadOverview(); });
+form('emailNotificationForm', saveEmailNotifications);
+$('refreshEmailNotifications').onclick = () => perform(loadEmailNotifications);
+$('testEmailNotifications').onclick = testEmailNotifications;
 $('testTelegram').onclick = () => runDiagnostic('testTelegram', 'telegramTestResult', async () => (await diagnosticFetch('/api/admin/telegram/test', {})).message);
 $('loadLoginLogs').onclick = () => perform(loadLoginLogs);
 $('loadCdks').onclick = () => perform(loadCdks); $('loadLogs').onclick = () => perform(loadLogs);
@@ -824,39 +889,113 @@ $('cdkFilters').addEventListener('click', event => {
     perform(loadCdks);
 });
 $('clearLogs').onclick = () => perform(async () => { await request('/api/admin/runtime-logs/clear', {}); await loadLogs(); notice('显示缓存已清空，磁盘日志保留最近 15 天', 'success'); });
-let orderEditing = null, orderStatusSaving = false;
-function editOrderStatus(button) {
-    if (orderStatusSaving) return;
-    orderEditing = { jobKey: button.dataset.editOrder, status: button.dataset.orderStatus };
-    $('orderStatusCode').textContent = orderEditing.jobKey;
-    $('orderEditStatus').value = ['success', 'failed'].includes(orderEditing.status) ? orderEditing.status : '';
-    $('orderStatusReason').value = '';
-    $('orderStatusError').textContent = '';
-    $('orderStatusDialog').showModal();
+let orderManualEditing = null, orderManualSaving = false, orderManualLoadSequence = 0;
+const orderManualActionLabels = { note: '记录处理备注', pause: '暂停自动处理', success: '人工确认成功', failed: '人工确认失败' };
+function orderManualUrl(order) {
+    return order.kind === 'admin' ? `/api/admin/manual/orders/${encodeURIComponent(order.id)}/manual`
+        : `/api/admin/orders/${encodeURIComponent(order.id)}/manual`;
 }
-async function saveOrderStatus() {
-    if (!orderEditing || orderStatusSaving) return;
-    orderStatusSaving = true;
-    $('orderStatusFields').disabled = true;
-    $('orderStatusError').textContent = '';
+function renderOrderManualControl(data) {
+    const previous = $('orderManualAction').value;
+    const actions = data.actions.filter(action => action && Object.hasOwn(orderManualActionLabels, action.value));
+    $('orderManualState').textContent = `当前状态：${data.status || '未记录'} / ${data.state || '未记录'}`;
+    $('orderManualAction').innerHTML = '<option value="">请选择处理操作</option>' + actions.map(action =>
+        `<option value="${escapeHtml(action.value)}"${action.enabled === true ? '' : ' disabled'}>${escapeHtml(action.label || orderManualActionLabels[action.value])}${action.enabled === true ? '' : '（暂不可执行）'}</option>`).join('');
+    const selected = actions.find(action => action.value === previous && action.enabled === true)
+        || actions.find(action => action.value === 'note' && action.enabled === true) || actions.find(action => action.enabled === true);
+    $('orderManualAction').value = selected?.value || '';
+    $('orderManualAvailability').innerHTML = actions.map(action => `<li><strong>${escapeHtml(action.label || orderManualActionLabels[action.value])}</strong>：${escapeHtml(action.reason || (action.enabled === true ? '可以执行' : '当前状态暂不可执行'))}</li>`).join('');
+    const history = Array.isArray(data.history) ? data.history.filter(entry => entry && typeof entry === 'object').slice(0, 20) : [];
+    $('orderManualHistory').innerHTML = history.length ? history.map(entry =>
+        `<p><strong>${escapeHtml(orderManualActionLabels[entry.action] || entry.action)}</strong> · ${escapeHtml(entry.created_at)}<br>${escapeHtml(entry.admin_email || '管理员')} · ${escapeHtml(entry.previous_status || '—')} → ${escapeHtml(entry.next_status || '—')}<br>${escapeHtml(entry.reason)}</p>`).join('') : '<p>暂无人工处理记录</p>';
+    $('orderManualSave').disabled = !selected;
+}
+async function loadOrderManualControl() {
+    if (!orderManualEditing || orderManualSaving) return;
+    const target = orderManualEditing, sequence = ++orderManualLoadSequence;
+    target.data = null;
+    $('orderManualFields').disabled = true;
+    $('orderManualReload').disabled = true;
+    $('orderManualError').textContent = '';
+    $('orderManualState').textContent = '正在读取订单状态与可执行操作…';
     try {
-        const result = await request(`/api/admin/orders/${encodeURIComponent(orderEditing.jobKey)}/status`, {
-            status: $('orderEditStatus').value, expected_status: orderEditing.status, reason: $('orderStatusReason').value.trim()
-        });
-        $('orderStatusDialog').close();
-        orderEditing = null;
-        notice(result.message, 'success');
-        try { await loadOverview(); }
-        catch (error) { notice(`结果已保存，但列表刷新失败：${error.message}`, 'error'); }
-    } catch (error) { $('orderStatusError').textContent = error.message; }
-    finally { orderStatusSaving = false; $('orderStatusFields').disabled = false; }
+        const result = await request(orderManualUrl(target));
+        if (target !== orderManualEditing || sequence !== orderManualLoadSequence) return;
+        const data = result.data;
+        if (!data || data.kind !== target.kind || data.id !== target.id || typeof data.revision !== 'string'
+            || !data.revision || !Array.isArray(data.actions)) throw new Error('订单处理信息不完整，请重新读取');
+        renderOrderManualControl(data);
+        target.data = data;
+    } catch (error) {
+        if (target !== orderManualEditing || sequence !== orderManualLoadSequence) return;
+        $('orderManualState').textContent = '尚未读取到可用的订单处理信息';
+        $('orderManualError').textContent = error.message;
+    } finally {
+        if (target === orderManualEditing && sequence === orderManualLoadSequence) {
+            $('orderManualFields').disabled = !target.data;
+            $('orderManualReload').disabled = false;
+        }
+    }
 }
-$('orderStatusForm').addEventListener('submit', event => { event.preventDefault(); saveOrderStatus(); });
-$('cancelOrderStatus').onclick = () => { if (!orderStatusSaving) $('orderStatusDialog').close(); };
-$('orderStatusDialog').addEventListener('cancel', event => { if (orderStatusSaving) event.preventDefault(); });
+async function openOrderManualControl(button) {
+    if (orderManualSaving) return;
+    const kind = button.dataset.orderKind, id = button.dataset.orderManual;
+    if (!['task', 'admin'].includes(kind) || !id) return;
+    orderManualEditing = { kind, id, data: null };
+    $('orderManualCode').textContent = `${kind === 'admin' ? '管理员订单' : '订单'}：${id}`;
+    $('orderManualReason').value = '';
+    $('orderManualAction').value = '';
+    $('orderManualAvailability').innerHTML = '';
+    $('orderManualHistory').innerHTML = '<p>读取后显示处理记录</p>';
+    if (!$('orderManualDialog').open) $('orderManualDialog').showModal();
+    await loadOrderManualControl();
+}
+function closeOrderManualControl() {
+    if (orderManualSaving) return;
+    orderManualLoadSequence++;
+    orderManualEditing = null;
+    $('orderManualReason').value = '';
+    $('orderManualDialog').close();
+}
+async function saveOrderManualControl() {
+    if (!orderManualEditing?.data || orderManualSaving) return;
+    const target = orderManualEditing, action = $('orderManualAction').value, reason = $('orderManualReason').value.trim();
+    const available = Object.hasOwn(orderManualActionLabels, action)
+        && target.data.actions.find(item => item?.value === action && item.enabled === true);
+    if (!available) { $('orderManualError').textContent = '请选择当前可执行的操作'; return; }
+    if (!reason || reason.length > 255) { $('orderManualError').textContent = '请填写 1–255 字的处理原因'; return; }
+    orderManualSaving = true;
+    $('orderManualFields').disabled = true;
+    $('orderManualReload').disabled = true;
+    $('cancelOrderManual').disabled = true;
+    $('orderManualError').textContent = '';
+    try {
+        const result = await request(orderManualUrl(target), { action, expected_revision: target.data.revision, reason });
+        $('orderManualDialog').close();
+        orderManualEditing = null;
+        $('orderManualReason').value = '';
+        notice(result.message || '人工处理已保存', 'success');
+        try { await (target.kind === 'admin' ? loadManualOrders() : loadOverview()); }
+        catch (error) { notice(`处理已保存，但列表刷新失败：${error.message}`, 'error'); }
+    } catch (error) {
+        $('orderManualError').textContent = error.httpStatus === 409
+            ? `${error.message}；请重新读取订单状态后再处理` : error.message;
+        if (error.httpStatus === 409) target.data = null;
+    } finally {
+        orderManualSaving = false;
+        $('orderManualFields').disabled = !orderManualEditing?.data;
+        $('orderManualReload').disabled = false;
+        $('cancelOrderManual').disabled = false;
+    }
+}
+$('orderManualForm').addEventListener('submit', event => { event.preventDefault(); saveOrderManualControl(); });
+$('orderManualReload').onclick = loadOrderManualControl;
+$('cancelOrderManual').onclick = closeOrderManualControl;
+$('orderManualDialog').addEventListener('cancel', event => { event.preventDefault(); closeOrderManualControl(); });
+
 document.addEventListener('click', event => {
-    const editOrder = event.target.closest('[data-edit-order]');
-    if (editOrder) editOrderStatus(editOrder);
+    const manualControl = event.target.closest('[data-order-manual]');
+    if (manualControl) openOrderManualControl(manualControl);
     const retryManual = event.target.closest('[data-retry-manual]');
     if (retryManual) {
         const order = manualOrders.find(item => item.request_id === retryManual.dataset.retryManual);

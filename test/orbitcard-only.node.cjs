@@ -4,20 +4,20 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { createRequire } = require('node:module');
-const config = require('../orbitcard-config');
+const config = require('../src/config/orbitcard-config');
 
 function load(name, mocks = {}) {
     const filename = path.resolve(__dirname, '..', name);
     const realRequire = createRequire(filename);
     const module = { exports: {} };
     new Function('require', 'module', 'exports', fs.readFileSync(filename, 'utf8'))(
-        id => Object.hasOwn(mocks, id) ? mocks[id] : id === './runtime-log' ? { push() {} } : realRequire(id), module, module.exports);
+        id => Object.hasOwn(mocks, id) ? mocks[id] : id === '../logging/runtime-log' ? { push() {} } : realRequire(id), module, module.exports);
     return module.exports;
 }
 
 test('third-party client always uses the signed Orbitcard routes, ignoring obsolete provider values', async () => {
     const calls = [];
-    const api = load('orbitcard-client.js', { axios: { request: async args => {
+    const api = load('src/orbitcard/orbitcard-client.js', { axios: { request: async args => {
         calls.push(args);
         return { status: 200, data: { code: 0, data: args.url.endsWith('getSubscriptionPlans')
             ? { enabled: true, plans: [{ type: 'gpt-plus', name: 'Plus', service_fee: '0.15' }] } : { balance: '10.00' } } };
@@ -49,7 +49,7 @@ test('third-party client always uses the signed Orbitcard routes, ignoring obsol
 });
 
 async function migrate(saved) {
-    const source = fs.readFileSync(path.resolve(__dirname, '../mysql-core.js'), 'utf8');
+    const source = fs.readFileSync(path.resolve(__dirname, '../src/db/mysql-core.js'), 'utf8');
     const code = source.slice(source.indexOf('async function ensureGptApiConfigDefaults()'), source.indexOf('async function getGptApiConfig()'));
     const connection = {};
     const keys = ['gpt_api_enabled','gpt_api_base_url','gpt_api_key','gpt_api_protocol_version','orbitcard_card_id','orbitcard_region','orbitcard_max_fee'];
@@ -63,7 +63,7 @@ async function migrate(saved) {
             assert.equal(options.connection, connection);
             if (sql.startsWith('DELETE')) for (const key of args) delete saved[key];
             else if (!sql.startsWith('INSERT IGNORE') || saved[args[0]] == null) saved[args[0]] = args[1];
-        }, config, keys, require('../orbitcard-pool')
+        }, config, keys, require('../src/orbitcard/orbitcard-pool')
     );
     await fn();
     return saved;
@@ -149,7 +149,7 @@ test('enabling third-party mode dispatches Orbitcard for a CDK without any provi
             createOrbitcardTask: async input => { claims++; assert.equal(input.cdk, 'CDK-TEST'); return { jobKey: 'job1', orbitcardClientOrderNo: 'cdk-current-attempt' }; }
         }
     };
-    const handler = require('../activation-service')(deps);
+    const handler = require('../src/payments/activation-service')(deps);
     let payload;
     const res = { status() { return this; }, json(data) { payload = data; return data; } };
     const old = process.env.ORBITCARD_API_SECRET, oldKey = process.env.ORBITCARD_API_KEY;

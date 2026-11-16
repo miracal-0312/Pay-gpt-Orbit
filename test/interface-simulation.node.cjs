@@ -3,8 +3,8 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const contract = require('../orbitcard-api-contract');
-const { simulate } = require('../orbitcard-interface-simulation');
+const contract = require('../src/orbitcard/orbitcard-api-contract');
+const { simulate } = require('../src/diagnostics/orbitcard-interface-simulation');
 
 test('every supported write operation is checked locally and clearly does not claim remote success', () => {
     for (const [operation, spec] of Object.entries(contract.OPERATIONS)) {
@@ -28,14 +28,14 @@ test('simulation cannot reach a transport and detects a broken write-validation 
     const context = vm.createContext({ module, exports: module.exports,
         require(name) {
             imports.push(name);
-            assert.equal(name, './orbitcard-api-contract', 'no transport or financial dependency may be loaded');
+            assert.equal(name, '../orbitcard/orbitcard-api-contract', 'no transport or financial dependency may be loaded');
             return { OPERATIONS: contract.OPERATIONS, validateRequest() {} };
         }
     });
-    vm.runInContext(fs.readFileSync(require.resolve('../orbitcard-interface-simulation'), 'utf8'), context);
+    vm.runInContext(fs.readFileSync(require.resolve('../src/diagnostics/orbitcard-interface-simulation'), 'utf8'), context);
     const result = module.exports.simulate('createCard');
     assert.equal(result.passed, false);
     assert.equal(result.summary.sent_to_platform, false);
     assert.ok(result.checks.some(check => check.status === 'failed'));
-    assert.deepEqual(imports, ['./orbitcard-api-contract']);
+    assert.deepEqual(imports, ['../orbitcard/orbitcard-api-contract']);
 });

@@ -6,7 +6,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { createRequire } = require('node:module');
 const fixture = require('./helpers/card-db.cjs');
-const { PaymentStoppedError } = require('../payment-automation');
+const { PaymentStoppedError } = require('../src/payments/payment-automation');
 
 function load(name, mocks) {
     const filename = path.resolve(__dirname, '..', name), real = createRequire(filename), module = { exports: {} };
@@ -37,8 +37,8 @@ async function setup({ state = 'pending', orderNo = 'OPEN-ORIGINAL', response, a
         if (operation === 'cardTransaction') return { success: true, data: { list: [], total: 0 } };
         assert.fail(`Unexpected remote operation: ${operation}`);
     } };
-    const cards = load('orbitcard-cards-client.js', { './orbitcard-client': api });
-    const service = load('orbitcard-card-service.js', { './orbitcard-client': api, './orbitcard-cards-client': cards })(
+    const cards = load('src/orbitcard/orbitcard-cards-client.js', { './orbitcard-client': api });
+    const service = load('src/orbitcard/orbitcard-card-service.js', { './orbitcard-client': api, './orbitcard-cards-client': cards })(
         { store: f.store, audit() {}, now: () => clock, sleep: async () => {} });
     return { ...f, task, calls, service, methods, body, advance(ms) { clock += ms; } };
 }
@@ -78,7 +78,7 @@ test('issue confirmation and order recovery release the unsubmitted task while p
     for (const redeemed of [false, true]) {
         const f = await setup();
         if (redeemed) f.db.cdks[0].manual_redeemed_at = 'already-redeemed';
-        const recovery = require('../order-recovery')({ store: f.store, activeJobs: new Set(), audit() {},
+        const recovery = require('../src/payments/order-recovery')({ store: f.store, activeJobs: new Set(), audit() {},
             query: { refresh: async () => assert.fail('an unsubmitted issue must not query or submit membership') } });
         await recovery.refreshTask(f.db.tasks[0]);
         assert.equal(f.db.tasks[0].orbitcard_state, 'card_pending');
@@ -112,7 +112,7 @@ test('a crash before attaching the saved issue cannot release its task until the
         status: 'failed', orbitcardState: 'rejected', expectedState: 'preparing', expectedClientOrderNo: f.task.orbitcardClientOrderNo
     });
     assert.equal(premature.applied, false);
-    const recovery = require('../order-recovery')({ store: f.store, activeJobs: new Set(), audit() {},
+    const recovery = require('../src/payments/order-recovery')({ store: f.store, activeJobs: new Set(), audit() {},
         query: { refresh: async () => assert.fail('an unsubmitted task must not query membership') } });
     await recovery.refreshTask(f.db.tasks[0]);
     assert.equal(f.db.tasks[0].orbitcard_state, 'card_pending');
@@ -129,7 +129,7 @@ test('multiple issues linked by task identity or attached key cannot be mistaken
     const f = await setup();
     f.db.issues.push({ ...f.db.issues[0], issue_key: 'second-key' });
     await assert.rejects(f.store.getCardIssueForTask(f.task.jobKey), /多笔开卡申请/);
-    const recovery = require('../order-recovery')({ store: f.store, activeJobs: new Set(), audit() {} });
+    const recovery = require('../src/payments/order-recovery')({ store: f.store, activeJobs: new Set(), audit() {} });
     await assert.rejects(recovery.refreshTask(f.db.tasks[0]), /多笔开卡申请/);
     assert.equal(f.db.tasks[0].orbitcard_state, 'card_pending');
     assert.ok(f.db.cdks[0].used_at);

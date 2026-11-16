@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { createRequire } = require('node:module');
 const { once } = require('node:events');
-const createStatusService = require('../cdk-status-service');
+const createStatusService = require('../src/payments/cdk-status-service');
 
 function fixture() {
     const env = { CDK_REDEMPTION_WEBHOOK_URL: 'https://shop.example/api/v1/card-secrets/redemption-callback',
@@ -48,7 +48,7 @@ function fixture() {
         locked = true;
         return { assertOwned: async () => { assert.equal(locked, true); }, release: async () => { locked = false; releases++; } };
     };
-    const webhook = require('../cdk-redemption-webhook')({ runQuery, runExecute, env });
+    const webhook = require('../src/integrations/cdk-redemption-webhook')({ runQuery, runExecute, env });
     const update = createStatusService({ runQuery, runExecute, withTransaction, acquirePaymentLock, env, enqueueRedemption: webhook.enqueue });
     const input = { cdk: 'code-support', status: 'redeemed', reason: ' 已在售后完成补发 ', adminEmail: 'admin@example.test' };
     return { db, env, update, input, setLocked(value) { locked = value; }, failEnqueue(value) { failEnqueue = value; },
@@ -217,7 +217,7 @@ function load(name, mocks) {
 test('list, export and public redemption lookup prioritize manual redemption over an original failed order', async () => {
     const code = { id: 7, cdk_code: 'CODE-SUPPORT', used_at: 'reserved', task_status: 'failed', orbitcard_state: 'support_locked',
         manual_redeemed_at: '2026-10-26', manual_redeemed_by: 'admin@example.test', manual_redemption_reason: '补发完成' };
-    const store = load('mysql-store.js', { './mysql-core': { runQuery: async () => [code] },
+    const store = load('src/db/mysql-store.js', { './mysql-core': { runQuery: async () => [code] },
         './orbitcard-card-store': () => ({}), './orbitcard-cdk-store': () => ({}) });
     for (const row of [(await store.listCdks())[0], (await store.listCdksExportPage())[0]]) {
         assert.equal(row.status, 'redeemed');
@@ -236,10 +236,10 @@ test('admin status endpoint requires both tokens and records the authenticated o
     const calls = [];
     const store = { getAdminAuthConfig: async () => ({ passwordVersion: 1, secondaryPasswordVersion: 1 }),
         updateCdkStatus: async input => { calls.push(input); return f.update(input); } };
-    require('../admin-http')(app, { store, ensureStoreReady: async () => {}, getTotalActiveJobs: () => 0 });
+    require('../src/http/admin-http')(app, { store, ensureStoreReady: async () => {}, getTotalActiveJobs: () => 0 });
     const server = app.listen(0, '127.0.0.1'); await once(server, 'listening');
     t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
-    const auth = require('../admin-auth'), url = `http://127.0.0.1:${server.address().port}/api/admin/cdks/CODE-SUPPORT/status`;
+    const auth = require('../src/http/admin-auth'), url = `http://127.0.0.1:${server.address().port}/api/admin/cdks/CODE-SUPPORT/status`;
     const bearer = `Bearer ${auth.issueAdminToken(1, 'operator@example.test').token}`;
     const headers = { Authorization: bearer, 'x-admin-secondary-token': auth.issueSecondaryToken(1, '127.0.0.1').token, 'Content-Type': 'application/json' };
     assert.equal((await fetch(url, { method: 'POST' })).status, 401);

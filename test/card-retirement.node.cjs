@@ -3,8 +3,8 @@ const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const fixture = require('./helpers/card-db.cjs');
-const createRetirement = require('../orbitcard-retirement');
-const {positiveId} = require('../orbitcard-cards-client');
+const createRetirement = require('../src/orbitcard/orbitcard-retirement');
+const {positiveId} = require('../src/orbitcard/orbitcard-cards-client');
 const cfg = {api_key:'retirement-test',base_url:'https://orbitcard.test'};
 const existingKey = () => `retire-${crypto.createHash('sha256').update(cfg.api_key).digest('hex').slice(0,16)}-saved`;
 

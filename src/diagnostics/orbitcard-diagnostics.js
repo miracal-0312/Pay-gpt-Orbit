@@ -1,0 +1,180 @@
+'use strict';
+const poolPolicy = require('../orbitcard/orbitcard-pool');
+
+const crypto = require('node:crypto');
+const { parseSession } = require('../payments/session-input');
+const { PLAN_TYPES, PROVIDER_PLANS, paymentPlan } = require('../config/plan-registry');
+const { paymentRegion, planPrice } = require('../config/orbitcard-config');
+const { CardPreparationError } = require('../orbitcard/orbitcard-card-policy');
+const { decideCards } = require('../orbitcard/orbitcard-payment-decision');
+const { simulateSelection, taskCount } = require('./orbitcard-concurrency-simulation');
+const money = require('../orbitcard/orbitcard-money');
+
+// Read-only: no allocation locks, reservations, synchronization, card creation or funding.
+module.exports = function createDiagnostics({ store, audit, provider = require('../orbitcard/orbitcard-client'), cards = require('../orbitcard/orbitcard-cards-client') }) {
+    async function preflight(input = {}) {
+        const stage = input.stage || 'full';
+        if (!['session','plans','balance','regions','cards','concurrency','full'].includes(stage)) throw new Error('无效的预检步骤');
+        const concurrentTasks = stage === 'concurrency' ? taskCount(input.concurrent_tasks) : null;
+        const requestId = input.request_id || crypto.randomUUID();
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId)) throw new Error('无效的预检编号');
+        const traceId = `debug-${requestId}`, steps = [], result = {};
+        let cfg, plan, available;
+        const record = (event, text, data) => audit({ jobKey: traceId, source: 'diagnostics', event, text, data });
+        async function step(name, text, action) {
+            const started = Date.now(); record('preflight_started', text, { step: name, read_only: true });
+            try {
+                const data = await action();
+                const row = { step: name, state: 'passed', elapsed_ms: Date.now() - started, message: text, data };
+                steps.push(row); record('preflight_passed', text, row); return true;
+            } catch (error) {
+                const message = name === 'session' ? 'Session 格式、账号邮箱或有效期不符合要求，请重新获取完整 Session'
+                    : error instanceof CardPreparationError ? error.message : '该步骤暂不可用，请检查接口权限或服务端状态';
+                const row = { step: name, state: 'failed', elapsed_ms: Date.now() - started, message };
+                steps.push(row); record('preflight_failed', message, row); return false;
+            }
+        }
+        async function session() {
+            parseSession(input.session);
+            return { valid_structure: true, authentication: 'not_verified', forwarded_to_platform: false };
+        }
+        async function plans() {
+            const response = await provider.fetchPlans(cfg);
+            if (!response.success) throw new CardPreparationError('卡台套餐查询失败，请检查订阅读取权限');
+            result.plans = (response.plans || []).filter(item => Object.values(PROVIDER_PLANS).includes(item.type))
+                .map(item => ({ type: item.type, name: String(item.name || item.type).slice(0,128) }));
+            if (stage !== 'plans' && !result.plans.some(item => item.type === PROVIDER_PLANS[plan])) throw new CardPreparationError('当前套餐未在卡台开放');
+            return { plans: result.plans, selected_plan: plan ? PROVIDER_PLANS[plan] : null };
+        }
+        async function balance() {
+            const response = await provider.request(cfg, 'getAccountBalance');
+            if (!response.success) throw new CardPreparationError('账户余额查询失败，请检查账户读取权限');
+            available = money.units(response.data?.available_balance);
+            result.available_balance = money.decimal(available);
+            return { available_balance: result.available_balance };
+        }
+        async function regions() {
+            const response = await provider.request(cfg, 'getSubscriptionPaymentRegions', { plan_type: PROVIDER_PLANS[plan] });
+            if (!response.success || response.data?.plan_type !== PROVIDER_PLANS[plan] || !Array.isArray(response.data?.payment_regions)) {
+                throw new CardPreparationError('当前套餐地区读取失败或响应不匹配');
+            }
+            const selected = paymentRegion(cfg, plan);
+            const options = response.data.payment_regions.filter(item => /^[A-Z]{2}$/.test(item?.code || ''))
+                .map(item => ({ code: item.code, default: item.default === true }));
+            result.region = { configured: selected || null, mode: selected ? 'configured' : 'platform_default', options };
+            if (selected && !options.some(item => item.code === selected)) throw new CardPreparationError('该套餐保存的地区已不可用，请在默认充值地区中重新选择并保存');
+            return result.region;
+        }
+        async function selectionSnapshot() {
+            if (!planPrice(cfg, plan)) throw new CardPreparationError('请先在后台配置当前套餐的 USD 支付金额，已停止代充');
+            const products = await cards.products(cfg);
+            const listed = await cards.listCards(cfg);
+            const methods = store.cardMethods(cfg.base_url);
+            const existing = await methods.listCards();
+            const saved = existing.map(row => ({ ...row }));
+            for (const card of listed) if (!saved.some(row => Number(row.card_id) === card.card_id)) {
+                saved.push({ card_id: card.card_id, successful_order_count: 0 });
+            }
+            const summaries = listed.map(card => ({ card_id: card.card_id, status: card.provider_status,
+                successful_order_count: saved.find(row => Number(row.card_id) === card.card_id)?.successful_order_count,
+                availability_basis: 'card_errors', disabled_at: saved.find(row => Number(row.card_id) === card.card_id)?.disabled_at,
+                busy: Boolean(saved.find(row => Number(row.card_id) === card.card_id)?.active_job),
+                balance: null, currency: card.currency || null }));
+            result.selection = { action: 'wait', card_id: null, candidate_count: 0, skipped: [], waiting: [],
+                cards: summaries, reserved: false, account_check: 'passed', snapshot_only: true };
+            const retired = new Set();
+            // Mirror lifecycle recovery without changing the saved card or its
+            // intent. A missing list item alone never confirms a deletion.
+            for (const row of saved.filter(row => row.retirement_key)) {
+                const id = Number(row.card_id);
+                const present = listed.some(card => Number(card.card_id) === id);
+                if (!present && row.provider_status === 'DELETED') continue;
+                result.selection.waiting = [{card_id:id,reason:'retirement_unconfirmed'}];
+                if (row.active_job) throw new CardPreparationError('待删除卡片仍有订单占用，实际支付需先确认原订单');
+                const detail = await cards.cardDetail(cfg, id);
+                if (Number(detail?.card_id) !== id || detail?.provider_status !== 'DELETED') {
+                    throw new CardPreparationError('原删卡结果仍未确认，实际支付需要先只读查询确认删除');
+                }
+                retired.add(id);
+                const summary = summaries.find(card => card.card_id === id);
+                if (summary) summary.status = 'DELETED';
+            }
+            result.selection.waiting = [];
+            const readable = listed.filter(card => card.provider_status !== 'DELETED' && !retired.has(Number(card.card_id)));
+            const snapshotNow = Date.now();
+            const relevant = saved.filter(row => readable.some(card => card.card_id === Number(row.card_id)
+                && !['DELETED','CANCELLED','FROZEN'].includes(card.provider_status))
+                && poolPolicy.eligible(row) && !row.active_job);
+            const detailed = await cards.cardDetailsInBatches(cfg, relevant.map(row => Number(row.card_id)), { allowPartial: true });
+            if (relevant.length && !detailed.length) throw new CardPreparationError('批量卡片详情全部缺失，停止选卡，请联系售后');
+            for (const card of detailed) {
+                const summary = summaries.find(item => item.card_id === card.card_id);
+                if (summary) Object.assign(summary, { status: card.provider_status, balance: card.balance_amount, currency: card.currency });
+            }
+            return { saved, listed: readable, detailed, products, now: snapshotNow };
+        }
+        async function concurrency() {
+            const snapshot = await selectionSnapshot();
+            result.concurrency = await simulateSelection({ snapshot, count: concurrentTasks, available,
+                planType: plan, jobPrefix: traceId, priceFor: (_product, type) => planPrice(cfg, type) });
+            delete result.selection;
+            return result.concurrency;
+        }
+        async function selection() {
+            const snapshot = await selectionSnapshot();
+            const { saved, listed: readable } = snapshot;
+            const decision = decideCards({ ...snapshot, jobKey: traceId, planType: plan,
+                priceFor: (_product, type) => planPrice(cfg, type) });
+            const selected = decision.candidates[0];
+            Object.assign(result.selection, { action: decision.action, card_id: selected?.card.card_id || null,
+                candidate_count: decision.candidates.length, skipped: decision.skipped, waiting: decision.waiting });
+            const funding = selected?.fundingAmount || 0n;
+            if (selected) {
+                result.selection.funding_amount = money.cents(funding);
+                if (!selected.fundingSufficient) throw new CardPreparationError('支付卡余额不足，按套餐全额补款后仍不满足最低留存要求，请联系客服');
+            } else if (decision.action === 'unavailable') {
+                throw new CardPreparationError('没有可用支付卡，请核对停用卡的补开申请或手动补充卡片');
+            } else throw new CardPreparationError('卡片被占用或平台状态尚未确认，实际支付需要等待处理；共享等待位最多 1 个');
+            const required = funding;
+            if (cfg.enabled) {
+                const retiring = saved.filter(row => !row.active_job && row.retirement_key
+                    && readable.some(card => card.card_id === Number(row.card_id)));
+                result.selection.maintenance = { current_size:readable.length,
+                    retire_card_ids:retiring.map(row => Number(row.card_id)), funding_amount:money.cents(funding),
+                    required_balance:money.cents(required), fees_included:false, snapshot_only:true };
+            }
+            if (available < required) {
+                result.selection.account_check = 'failed';
+                throw new CardPreparationError('账户可用余额不足以完成本单套餐全额补款，请联系客服；基础预算不含平台额外费用');
+            }
+            return result.selection;
+        }
+        record('preflight_created', '已建立只读支付预检记录', { stage, read_only: true });
+        if (stage === 'session' || stage === 'full') {
+            if (!await step('session', '本地校验 Session；尚未发送卡台', session)) return finish();
+        }
+        if (stage === 'session') return finish();
+        if (!await step('config', '读取已保存的平台配置', async () => {
+            cfg = { ...await store.getGptApiConfig(), auditJobKey: traceId };
+            if (stage !== 'plans' && stage !== 'balance') {
+                if (!PLAN_TYPES.includes(input.plan_type) && !Object.values(PROVIDER_PLANS).includes(input.plan_type)) throw new CardPreparationError('请选择 Plus 或三档 Pro 套餐');
+                plan = paymentPlan(input.plan_type);
+            }
+            return { plan_type: plan || null };
+        })) return finish();
+        const actions = stage === 'full' ? ['plans','balance','regions','cards']
+            : ['cards','concurrency'].includes(stage) ? ['plans','balance',stage] : [stage];
+        const handlers = { plans, balance, regions, cards: selection, concurrency };
+        const titles = { plans: '核对卡台已开放套餐', balance: '读取账户可用余额', regions: '核对本套餐默认支付地区', cards: '读取实时卡片和已确认的成功会员订单次数，模拟选卡与补款决策',
+            concurrency: `读取实时快照，模拟 ${concurrentTasks} 个任务同时进入选卡` };
+        for (const name of actions) if (!await step(name, titles[name], handlers[name])) break;
+        return finish();
+        function finish() {
+            const passed = steps.length > 0 && steps.every(row => row.state === 'passed');
+            const ready = stage === 'full' && passed;
+            record('preflight_completed', passed ? '只读预检完成；未提交 Session、订阅、补款或开卡' : '预检未通过；未执行资金操作', { passed, ready, read_only: true });
+            return { success: true, trace_id: traceId, passed, ready, read_only: true, steps, result };
+        }
+    }
+    return { preflight };
+};

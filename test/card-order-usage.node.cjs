@@ -2,8 +2,8 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fixture = require('./helpers/card-db.cjs');
-const createSync = require('../orbitcard-order-sync');
-const { verifiedSuccess } = require('../orbitcard-order-usage');
+const createSync = require('../src/orbitcard/orbitcard-order-sync');
+const { verifiedSuccess } = require('../src/db/orbitcard-order-usage');
 const proof = (id, cardId = 42) => ({ task_no: `sub-${id}`, client_order_no: `client-${id}`, card_id: cardId,
     status: 'succeeded', subscription_succeeded: true, query_source: 'upstream' });
 const entry = (id, cardId = 42) => ({ clientOrderNo: `client-${id}`, orderId: `sub-${id}`, cardId, snapshot: proof(id, cardId) });
@@ -112,7 +112,7 @@ test('startup imports only verified platform evidence and ignores local success 
         {cursor_id:2,base_url:f.base,card_id:42,client_order_no:'client-no',order_no:'sub-no',snapshot:JSON.stringify({status:'success'}),local_state:'success'},
         {cursor_id:3,base_url:f.base,card_id:42,client_order_no:'client-error',snapshot:'invalid',local_state:'success'}
     ];
-    const usage=require('../orbitcard-order-usage')({...f,runQuery:async(sql,p,options)=>{
+    const usage=require('../src/db/orbitcard-order-usage')({...f,runQuery:async(sql,p,options)=>{
         if(sql.includes('AS cursor_id')) {
             assert.ok(!sql.includes("state='success'"),'local outcome must not be a counting condition');
             return sql.includes('FROM task_logs t')?rows.filter(row=>row.cursor_id>p[0]):[];

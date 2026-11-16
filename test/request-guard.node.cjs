@@ -2,7 +2,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
-const { createRequestGuard } = require('../request-guard');
+const { createRequestGuard } = require('../src/http/request-guard');
 function response() {
     const res = new EventEmitter();
     Object.assign(res, { headers: {}, set(key, value) { this.headers[key] = value; return this; },

@@ -2,8 +2,8 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { classifyFailure, classifyApiError } = require('../orbitcard-error-policy');
-const { disableFailedCard } = require('../orbitcard-card-failure');
+const { classifyFailure, classifyApiError } = require('../src/orbitcard/orbitcard-error-policy');
+const { disableFailedCard } = require('../src/orbitcard/orbitcard-card-failure');
 
 const expected = { orderId: 'SUB-POLICY', clientOrderNo: 'policy-client', cardId: 42,
     planType: 'gpt-plus', email: 'buyer@example.test' };

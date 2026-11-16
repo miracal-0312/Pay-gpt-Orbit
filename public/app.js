@@ -9,8 +9,10 @@ const QUEUE_FULL_MESSAGE = '当前支付卡繁忙，等待队列已满，请 10 
 // Keep provider branding out of customer-facing copy, including stored order
 // messages and upstream errors. API identifiers remain unchanged.
 function publicText(text) {
-    return String(text ?? '').replace(/ORBITCARD_[A-Z0-9_]+/gi, '服务配置')
+    const value = String(text ?? '').replace(/ORBITCARD_[A-Z0-9_]+/gi, '服务配置')
         .replace(/orbit\s*card/gi, '充值服务');
+    return /(?:账户(?:可用)?|支付卡)余额不足/.test(value) && !/联系客服/.test(value)
+        ? `${value}；请联系客服处理` : value;
 }
 function message(text, type = '') { $('statusMessage').textContent = publicText(text); $('statusMessage').className = `message ${type}`; }
 async function requestJson(url, options = {}) {

@@ -34,7 +34,7 @@
 </div><div class="table-wrap"><table><thead><tr><th>卡密</th><th>套餐</th><th>状态</th><th>出库</th><th>操作</th></tr></thead><tbody id="cdkRows"><tr><td colspan="5">打开此页面后读取记录</td></tr></tbody></table></div><small>列表最多显示当前筛选下最近 2000 条；请在上方配置导出范围和出库操作。Orbitcard 确认充值成功后显示已核销。点击「修改状态」可编辑出库状态，也可填写备注并将卡密保存为已核销；核销后系统自动通知商城。已出库或有使用记录的卡密不能删除。</small></div>
 </section>
 <section id="manual" class="view" hidden>
-<div class="panel"><div class="row between"><div><h2>上传 Session 手动开通</h2><p class="muted">提交时实时读取卡台账户、产品和卡片；优先使用符合次数与状态要求的卡，余额不足补差额，无可用卡时停止，不会自动开卡。明确支付失败后最多换两张不同的现有卡重试。</p></div><button id="refreshManualCatalog" type="button" class="secondary">刷新套餐</button></div>
+<div class="panel"><div class="row between"><div><h2>上传 Session 手动开通</h2><p class="muted">提交时实时读取卡台账户、产品和卡片；使用状态正常且未停用的卡，需要补款时按本次套餐完整金额充值。账户余额不足时停止并提示联系客服。明确卡片失败后停用原卡并按所选渠道补开，每条支付链最多尝试 3 次。</p></div><button id="refreshManualCatalog" type="button" class="secondary">刷新套餐</button></div>
 <form id="manualForm" class="stack manual-form">
 <p class="config-note">人工交付会真实扣款，成功后核销 CDK。无需 CDK 的测试请前往 <button type="button" class="secondary" data-open-diagnostic="payment">支付预检与测试</button>。</p>
 <div class="manual-grid"><label>开通套餐<select id="manualPlan" required><option value="">请先读取卡台套餐</option></select></label><label>原请求编号（仅继续准备时填写）<input id="manualRetryId" placeholder="首次提交自动生成；恢复原单时填写原编号" autocomplete="off"></label></div>
@@ -56,7 +56,7 @@
 <label>Pro 100（USD）<input id="planPrice_pro100" inputmode="decimal" maxlength="23" placeholder="留空暂停该套餐"></label>
 <label>Pro 200（USD）<input id="planPrice_pro200" inputmode="decimal" maxlength="23" placeholder="留空暂停该套餐"></label>
 <label>Pro 500（USD）<input id="planPrice_pro500" inputmode="decimal" maxlength="23" placeholder="留空暂停该套餐"></label>
-</div><p class="config-note">卡片目标余额为此处 USD 金额加产品最低留存余额，余额不足时只补差额。此金额与平台收取的 USDT 服务费不同，不是最终扣款报价；实际支付以原订单结果为准。修改地区或平台价格变化时请同步核对金额。点击下方“保存配置”生效。</p></div>
+</div><p class="config-note">支付前要求卡片余额达到此处 USD 金额加产品最低留存余额。需要补款时，充值本次所选套餐的完整 USD 金额；账户余额不足时停止并提示联系客服。此金额与平台收取的 USDT 服务费不同，不是最终扣款报价；实际支付以原订单结果为准。修改地区或平台价格变化时请同步核对金额。点击下方“保存配置”生效。</p></div>
 <div class="config-section payment-regions-section">
 <div class="row between"><div><h3>默认充值地区</h3><p class="muted">四档套餐独立设置，对用户兑换和管理员手动开通同时生效。</p></div><button id="refreshPaymentRegions" type="button" class="secondary">刷新可选地区</button></div>
 <div class="payment-region-grid">
@@ -120,7 +120,7 @@
 <p id="cardSyncState" class="muted" role="status">当前显示本地快照，请同步卡片与订单。成功次数仅统计当前 API 可读取并确认的会员订单，API 不可见的网页订单不计入。</p>
 <div class="panel"><h2>平台卡片</h2><div class="row"><button id="syncCards" class="secondary">同步卡片与订单</button><button id="loadCards" class="secondary">刷新本地记录</button></div><p class="muted">只读取卡片 ID、尾号、状态和余额，不获取完整卡号或 CVV。订阅出现明确的卡片错误后持久化停用并自动补开。成功会员订单次数按原订单号去重统计。管理员可填写原因后人工停用或恢复使用，操作需要二级验证并记录日志。渠道与 BIN 在 <a href="#orbitcard">Orbitcard 配置</a> 中多选。</p><div class="table-wrap"><table class="card-table"><thead><tr><th>卡片</th><th>状态 / 余额</th><th>成功会员订单次数</th><th>任务占用</th><th>使用状态 / 对账</th></tr></thead><tbody id="cardRows"><tr><td colspan="5">打开此页面后读取记录</td></tr></tbody></table></div></div>
 <div class="panel"><h2>卡片消费交易（交易对账）</h2><p class="muted">查询会读取完整分页统计授权流水，指定页明细用于对账；这些流水不参与卡片支付次数限制。授权成功计一次，清算、退款、撤销和拒付不再增加次数；已累计的成功授权不回退。消费授权不代表订阅开通成功，不自动核销 CDK 或退款。需要 transactions:read 权限。</p><div class="row"><label>卡 ID（自动读取）<select id="transactionCardId"><option value="">请先同步平台卡片</option></select></label><label>页码<input id="transactionPage" type="number" min="1" value="1" inputmode="numeric"></label><button id="loadTransactions" class="secondary">查询交易</button></div><pre id="cardTransactions">尚未查询。</pre></div>
-<div class="panel"><h2>申请卡片</h2><p>每张新卡固定首充 20 USD，只选择最低首充不高于 20 的可用产品。卡片加入共享卡池（本地数量不限），供各套餐使用。充值任务会优先复用有次数额度的旧卡，并只补足至后台配置的套餐 USD 卡支付金额 + 产品最低留存余额。提前手动申请的卡片在实际兑换时按需补款。</p><form id="applyCardForm" class="row"><button>首充 20 USD 申请一张卡</button></form><p class="muted">产品按后台配置自动选择，并在申请时核对库存和首充要求。会员充值所需的套餐支付金额请在“Orbitcard 配置”中填写。</p><p id="cardApplicationState" role="status" aria-live="polite"></p></div>
+<div class="panel"><h2>申请卡片</h2><p>每张新卡固定首充 20 USD，只选择最低首充不高于 20 的可用产品。卡片加入共享卡池（本地数量不限），供各套餐使用。充值任务使用状态正常且未停用的卡，成功次数仅作统计。卡内不足时按本次套餐完整 USD 金额补款，支付前核对最低留存要求；账户余额不足时提示联系客服。</p><form id="applyCardForm" class="row"><button>首充 20 USD 申请一张卡</button></form><p class="muted">产品按后台配置自动选择，并在申请时核对库存和首充要求。会员充值所需的套餐支付金额请在“Orbitcard 配置”中填写。</p><p id="cardApplicationState" role="status" aria-live="polite"></p></div>
 <div class="panel"><div class="row between"><h2>开卡申请记录</h2><button id="refreshIssues" class="secondary">确认原开卡 / 补款</button></div><p class="muted">结果待确认时保留同一申请身份，不更换产品或幂等键重开。</p><div class="table-wrap"><table><thead><tr><th>时间 / 申请标识</th><th>产品 / 首充 USD</th><th>用途 / 状态</th><th>平台订单 / 卡 ID</th></tr></thead><tbody id="issueRows"><tr><td colspan="4">打开此页面后读取记录</td></tr></tbody></table></div></div>
 <div class="panel"><h2>卡片补款流水</h2><p class="muted">补款成功后还会核对卡片可用余额。未知结果保留原补款、卡片占用及 CDK；已知订单号只匹配原充值流水，不按金额或时间猜测。</p><div class="table-wrap"><table><thead><tr><th>时间 / 任务</th><th>卡 ID / 本次补款 USD</th><th>状态 / 平台订单</th><th>资金快照</th></tr></thead><tbody id="fundingRows"><tr><td colspan="4">打开此页面后读取记录</td></tr></tbody></table></div></div>
 </section>
@@ -130,6 +130,18 @@
 <div class="panel"><h2>管理员资料</h2><div class="account-forms"><form id="passwordForm" class="stack"><h3>登录密码</h3><label>当前登录密码<input id="oldPassword" type="password" autocomplete="current-password" required></label><label>新登录密码<input id="newPassword" type="password" autocomplete="new-password" minlength="8" required></label><button>修改登录密码</button></form><form id="emailForm" class="stack"><h3>登录邮箱</h3><label>新邮箱<input id="newEmail" type="email" required></label><label>当前登录密码<input id="emailPassword" type="password" autocomplete="current-password" required></label><button>修改邮箱</button></form><form id="secondaryForm" class="stack"><h3>二级密码</h3><label>当前二级密码<input id="oldSecondary" type="password" autocomplete="current-password" required></label><label>新二级密码<input id="newSecondary" type="password" autocomplete="new-password" minlength="8" required></label><button>修改二级密码</button></form></div></div>
 <div class="panel"><h2>后台入口</h2><form id="pathsForm" class="settings-inline-form"><label>登录路径<input id="loginPath" pattern="[a-z0-9-]{2,32}" required></label><label>管理路径<input id="panelPath" pattern="[a-z0-9-]{2,32}" required></label><button>保存入口</button></form></div>
 <div class="panel"><h2>Telegram 通知</h2><form id="telegramForm" class="telegram-form"><div class="config-grid"><label>Bot Token<input id="botToken" type="password" autocomplete="new-password" placeholder="留空保留已保存值"><small id="botState"></small></label><label>管理员 Chat ID<input id="adminChat"></label><label>群组 Chat ID<input id="groupChat"></label></div><div class="checkbox-grid"><label class="check"><input id="notifyAdmin" type="checkbox">通知管理员</label><label class="check"><input id="notifyGroup" type="checkbox">通知群组</label><label class="check"><input id="onSuccess" type="checkbox">订阅成功</label><label class="check"><input id="onFailure" type="checkbox">失败 / 结果待确认</label></div><div class="row"><button>保存通知</button><button class="secondary" type="button" data-open-diagnostic="api">前往通知测试</button></div></form></div>
+<div class="panel"><div class="row between"><h2>管理员邮件通知</h2><button id="refreshEmailNotifications" class="secondary" type="button">刷新邮件配置与记录</button></div>
+<p class="muted">邮件发送至下方配置的管理员邮箱，覆盖账户余额预警、订阅成功和充值失败。读取和修改配置、发送测试邮件均需要二级验证。</p>
+<p id="emailNotificationState" role="status">请先验证二级密码，再读取邮件配置。</p>
+<form id="emailNotificationForm" class="stack"><fieldset id="emailNotificationFields" class="stack" disabled>
+<div class="checkbox-grid"><label class="check"><input id="emailEnabled" type="checkbox">启用自动邮件通知</label><label class="check"><input id="emailLowBalance" type="checkbox" checked>账户低余额预警</label><label class="check"><input id="emailSuccess" type="checkbox" checked>订阅充值成功</label><label class="check"><input id="emailFailure" type="checkbox" checked>充值失败 / 需人工处理</label></div>
+<div class="config-grid"><label>SMTP 服务器<input id="smtpHost" maxlength="253" autocomplete="off" placeholder="smtp.example.com"></label><label>SMTP 端口<input id="smtpPort" type="number" min="1" max="65535" step="1" value="465"></label><label>加密方式<select id="smtpSecurity"><option value="tls">SSL / TLS（常用端口 465）</option><option value="starttls">STARTTLS（常用端口 587）</option></select></label><label>SMTP 账号<input id="smtpUser" maxlength="254" autocomplete="off"></label><label>SMTP 密码 / 授权码<input id="smtpPassword" type="password" maxlength="1024" autocomplete="new-password" placeholder="留空保留已保存值"><small id="smtpPasswordState">未配置密码</small></label><label class="check"><input id="smtpClearPassword" type="checkbox">清除已保存的 SMTP 密码</label></div>
+<div class="config-grid"><label>发件邮箱<input id="emailFrom" type="email" maxlength="254" autocomplete="off" placeholder="notice@example.com"></label><label>管理员收件邮箱<input id="emailTo" type="email" maxlength="254" autocomplete="off" placeholder="admin@example.com"></label><label>余额低于此值时提醒（USD）<input id="emailBalanceThreshold" inputmode="decimal" maxlength="13" value="50.00"></label><label>持续低余额的提醒间隔（分钟）<input id="emailBalanceCooldown" type="number" min="1" max="10080" step="1" value="360"></label></div>
+<p class="config-note">使用邮箱服务商提供的 SMTP 参数与授权码。密码保存后不回显；服务器更改 ADMIN_TOKEN_SECRET 后需重新保存 SMTP 密码。余额查询失败不会当作余额为零；持续低余额按提醒间隔发送，恢复后再次低于阈值会重新提醒。订单邮件不包含完整卡密、Session 或卡片敏感资料。</p>
+<div class="row"><button type="submit">保存邮件配置</button><button id="testEmailNotifications" class="secondary" type="button">发送测试邮件</button></div><p class="muted">测试邮件使用已保存的配置，修改参数后请先保存；即使自动通知未启用，也可发送测试邮件。</p>
+</fieldset></form><p id="emailTestResult" role="status" aria-live="polite">尚未发送测试邮件。</p>
+<div class="table-wrap"><table><thead><tr><th>创建时间 / 类型</th><th>收件邮箱</th><th>状态 / 尝试次数</th><th>发送时间 / 结果</th></tr></thead><tbody id="emailNotificationRows"><tr><td colspan="4">解锁后读取最近 20 条邮件通知</td></tr></tbody></table></div>
+</div>
 <div class="panel"><h2>登录记录</h2><p class="muted">登录审计已集中到调试与日志。</p><button type="button" class="secondary" data-open-diagnostic="login">查看管理员登录记录</button></div>
 </section></main><footer class="admin-footer">YZWAI · Orbitcard 订阅管理<span> · 以原订单确认支付结果</span></footer></div><dialog id="cdkStatusDialog" class="cdk-status-dialog" aria-labelledby="cdkStatusTitle">
 <form id="cdkStatusForm"><fieldset id="cdkStatusFields" class="stack">
@@ -141,15 +153,20 @@
 <p id="cdkStatusError" class="cdk-status-error" role="alert"></p>
 <div class="row"><button type="submit">保存状态</button><button id="cancelCdkStatus" type="button" class="secondary">取消</button></div>
 </fieldset></form></dialog>
-<dialog id="orderStatusDialog" class="cdk-status-dialog" aria-labelledby="orderStatusTitle">
-<form id="orderStatusForm"><fieldset id="orderStatusFields" class="stack">
-<div><h2 id="orderStatusTitle">人工修改订单结果</h2><code id="orderStatusCode"></code></div>
-<label>订单结果<select id="orderEditStatus" required><option value="">请选择核对后的结果</option><option value="success">成功</option><option value="failed">失败（停止自动支付）</option></select></label>
-<label>修改原因<textarea id="orderStatusReason" maxlength="255" required placeholder="填写核对依据及修改原因"></textarea></label>
-<small>请先核对原订单的实际订阅结果。成功会核销卡密，并按已配置的通知设置通知商城；失败会停止自动支付，未核销的卡密保留锁定，已人工核销的卡密仍保持核销。人工核销不限制原订单登记为失败；已确认成功的订单不能改为失败。</small>
-<p id="orderStatusError" class="cdk-status-error" role="alert"></p>
-<div class="row"><button type="submit">保存结果</button><button id="cancelOrderStatus" type="button" class="secondary">取消</button></div>
-</fieldset></form></dialog>
+<dialog id="orderManualDialog" class="cdk-status-dialog" aria-labelledby="orderManualTitle">
+<div><h2 id="orderManualTitle">人工处理订单</h2><code id="orderManualCode"></code></div>
+<p id="orderManualState" role="status">正在读取订单状态…</p>
+<small>所有订单均可记录处理备注。人工确认不代表平台付款成功；未决资金保留占用，不能重复充值。保存需要二级验证。</small>
+<ul id="orderManualAvailability"></ul>
+<form id="orderManualForm"><fieldset id="orderManualFields" class="stack" disabled>
+<label>处理操作<select id="orderManualAction" required><option value="">读取后选择操作</option></select></label>
+<label>处理原因<textarea id="orderManualReason" maxlength="255" required placeholder="填写核对依据、处理结果或后续跟进说明"></textarea></label>
+<button id="orderManualSave" type="submit">保存处理</button>
+</fieldset></form>
+<p id="orderManualError" class="cdk-status-error" role="alert"></p>
+<div class="row"><button id="orderManualReload" type="button" class="secondary">重新读取订单状态</button><button id="cancelOrderManual" type="button" class="secondary">关闭</button></div>
+<details><summary>最近人工处理记录</summary><div id="orderManualHistory" class="diagnostic-output"></div></details>
+</dialog>
 <dialog id="paymentQueueDialog" class="cdk-status-dialog" aria-labelledby="paymentQueueTitle" aria-describedby="paymentQueueMessage"><h2 id="paymentQueueTitle">请稍后下单</h2><p id="paymentQueueMessage">当前支付卡繁忙，等待队列已满，请 10 分钟后再下单。</p><form method="dialog"><button type="submit">知道了</button></form></dialog>
 <dialog id="cardAvailabilityDialog" class="cdk-status-dialog" aria-labelledby="cardAvailabilityTitle">
 <form id="cardAvailabilityForm"><fieldset id="cardAvailabilityFields" class="stack">

@@ -2,9 +2,9 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fixture = require('./helpers/card-db.cjs');
-const createRecovery = require('../order-recovery');
-const { FundingAwaitingError, CardPreparationError, FUNDING_POLL_MS } = require('../orbitcard-card-policy');
-const { PaymentStoppedError } = require('../payment-automation');
+const createRecovery = require('../src/payments/order-recovery');
+const { FundingAwaitingError, CardPreparationError, FUNDING_POLL_MS } = require('../src/orbitcard/orbitcard-card-policy');
+const { PaymentStoppedError } = require('../src/payments/payment-automation');
 
 async function setup({ waiting = true, taskState = 'funding_review', preparationState = 'prepared',
     fundingState = 'pending', orderNo = 'FUND-ORIGINAL' } = {}) {

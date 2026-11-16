@@ -21,7 +21,7 @@ function fixture() {
             return [{ affectedRows: params.length / 2 }];
         }
     };
-    const filename = require.resolve('../mysql-core'), realRequire = createRequire(filename), module = { exports: {} };
+    const filename = require.resolve('../src/db/mysql-core'), realRequire = createRequire(filename), module = { exports: {} };
     new Function('require', 'module', 'exports', fs.readFileSync(filename, 'utf8'))(
         id => id === 'mysql2/promise' ? { createPool: () => ({ query, getConnection: async () => connection }) } : realRequire(id), module, module.exports);
     return { core: module.exports, fail() { fail = true; }, counts: () => ({ writes, commits, rollbacks }) };
@@ -43,7 +43,7 @@ test('configuration batches commit together, preserve unrelated values and roll 
 });
 
 test('shared config writes preserve password versions, Telegram token retention and boolean settings', async () => {
-    const f = fixture(), verify = require('../admin-auth').verifyPassword;
+    const f = fixture(), verify = require('../src/http/admin-auth').verifyPassword;
     const password = await f.core.updateAdminPassword('new-password');
     assert.equal(password.passwordVersion, 2); assert.ok(verify('new-password', password.passwordHash));
     await f.core.updateAdminSecondaryPassword('secondary-password');

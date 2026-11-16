@@ -3,7 +3,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { once } = require('node:events');
 const express = require('express');
-const auth = require('../admin-auth');
+const auth = require('../src/http/admin-auth');
 
 test('shared admin handlers preserve login tokens, 2FA failures and route-specific error statuses', async t => {
     const previous = process.env.ADMIN_TOKEN_SECRET;
@@ -21,7 +21,7 @@ test('shared admin handlers preserve login tokens, 2FA failures and route-specif
         updateOrderStatus: async () => { throw Object.assign(Error('stale order'), { status: 409 }); }
     };
     const app = express(); app.use(express.json());
-    require('../admin-http')(app, { store, ensureStoreReady: async () => {}, getTotalActiveJobs: () => 0 });
+    require('../src/http/admin-http')(app, { store, ensureStoreReady: async () => {}, getTotalActiveJobs: () => 0 });
     const server = app.listen(0, '127.0.0.1'); await once(server, 'listening');
     t.after(async () => {
         server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
@@ -63,7 +63,7 @@ test('shared admin handlers preserve login tokens, 2FA failures and route-specif
 });
 
 test('platform status returns current plans and balance without the removed recent-order query', async t => {
-    const api = require('../orbitcard-client'), previousCheck = api.testConnection;
+    const api = require('../src/orbitcard/orbitcard-client'), previousCheck = api.testConnection;
     const previousSecret = process.env.ADMIN_TOKEN_SECRET;
     process.env.ADMIN_TOKEN_SECRET = 's'.repeat(32);
     api.testConnection = async () => ({success:true,plans:[{type:'gpt-plus'}],balance:{available_balance:'20.00'},checks:[]});
@@ -73,7 +73,7 @@ test('platform status returns current plans and balance without the removed rece
         getGptApiConfig: async () => ({base_url:'https://orbitcard.test',api_key:'configured'})
     };
     const app = express(); app.use(express.json());
-    require('../admin-http')(app, {store,ensureStoreReady:async()=>{},getTotalActiveJobs:()=>0});
+    require('../src/http/admin-http')(app, {store,ensureStoreReady:async()=>{},getTotalActiveJobs:()=>0});
     const server = app.listen(0,'127.0.0.1'); await once(server,'listening');
     t.after(async()=>{
         server.closeAllConnections(); await new Promise(resolve=>server.close(resolve));

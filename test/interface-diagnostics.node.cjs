@@ -6,10 +6,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { createRequire } = require('node:module');
 const { once } = require('node:events');
-const { OPERATIONS } = require('../orbitcard-api-contract');
-const { PROVIDER_PLANS } = require('../plan-registry');
-const { cardScope } = require('../orbitcard-card-policy');
-const createDiagnostics = require('../orbitcard-interface-diagnostics');
+const { OPERATIONS } = require('../src/orbitcard/orbitcard-api-contract');
+const { PROVIDER_PLANS } = require('../src/config/plan-registry');
+const { cardScope } = require('../src/orbitcard/orbitcard-card-policy');
+const createDiagnostics = require('../src/diagnostics/orbitcard-interface-diagnostics');
 const cfg = { base_url: 'https://saved.test', api_key: 'saved-secret-key' };
 const hash = crypto.createHash('sha256').update(cfg.api_key).digest('hex');
 function order(overrides = {}) { return { client_order_no: 'local-client-order', task_no: 'original-task',
@@ -210,9 +210,9 @@ test('single card detail accepts existing client wrappers and aliases but reject
 
 test('new HTTP routes use saved config without secondary auth and preserve existing secondary-auth routes', async t => {
     const express = require('express'), app = express(); app.use(express.json());
-    const f = fixture(), filename = path.resolve(__dirname, '../orbitcard-diagnostics-http.js'), module = { exports: {} }, real = createRequire(filename);
+    const f = fixture(), filename = path.resolve(__dirname, '../src/http/orbitcard-diagnostics-http.js'), module = { exports: {} }, real = createRequire(filename);
     new Function('require', 'module', 'exports', fs.readFileSync(filename, 'utf8'))(
-        name => name === './orbitcard-interface-diagnostics' ? () => f.service : real(name), module, module.exports);
+        name => name === '../diagnostics/orbitcard-interface-diagnostics' ? () => f.service : real(name), module, module.exports);
     module.exports(app, { store: f.store, logs: { push() {} }, requireSecondaryAuth: (_, res) => res.status(403).json({ success: false }) });
     const server = app.listen(0, '127.0.0.1'); await once(server, 'listening');
     t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));

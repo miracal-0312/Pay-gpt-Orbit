@@ -1,8 +1,8 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { readAuthorizations } = require('../orbitcard-authorizations');
-const { CardPreparationError } = require('../orbitcard-card-policy');
+const { readAuthorizations } = require('../src/orbitcard/orbitcard-authorizations');
+const { CardPreparationError } = require('../src/orbitcard/orbitcard-card-policy');
 const cfg = { base_url: 'https://orbitcard.test' };
 const authorization = (id, extra = {}) => ({ transaction_id: String(id), card_id: 42,
     transaction_type: 'Authorization', status: 'approved', ...extra });

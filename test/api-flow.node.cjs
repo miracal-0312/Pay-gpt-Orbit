@@ -12,6 +12,7 @@ after(() => {
     else process.env.ORBITCARD_API_KEY = previousOrbitcardKey;
 });
 function load(name, mocks = {}) {
+    if (name === 'src/server.js') mocks = { './config/load-env': () => false, ...mocks };
     const filename = path.resolve(__dirname, '..', name), module = { exports: {} }, real = createRequire(filename);
     new Function('require','module','exports','__dirname',fs.readFileSync(filename,'utf8'))(
         id => Object.hasOwn(mocks,id) ? mocks[id] : real(id),module,module.exports,path.dirname(filename));
@@ -27,7 +28,7 @@ function fixture(overrides = {}) {
         createOrbitcardTask: async input => { events.push(['claim',input]); return { jobKey: 'job', orbitcardState: 'preparing', orbitcardClientOrderNo: 'original' }; },
         settleOrbitcardTask: async (...args) => { events.push(['settle',...args]); return { applied: true }; }, ...overrides
     };
-    const handler = require('../activation-service')({ store, activeJobs, ensureStoreReady: async () => {},
+    const handler = require('../src/payments/activation-service')({ store, activeJobs, ensureStoreReady: async () => {},
         runWorker: async input => { events.push(['worker',input]); }, log: () => {} });
     async function request(body = { cdk: 'CDK-TEST', session: JSON.stringify(session) }) {
         const res = { code: 200, status(code) { this.code = code; return this; }, json(data) { this.data = data; return data; } };
@@ -123,7 +124,7 @@ test('a synchronous dispatch failure only releases its own still-preparing attem
     const old = process.env.ORBITCARD_API_SECRET; process.env.ORBITCARD_API_SECRET = 'test-secret';
     try {
         const f = fixture();
-        const handler = require('../activation-service')({ store: f.store, activeJobs: f.activeJobs, ensureStoreReady: async () => {}, log() {}, runWorker() { throw new Error('dispatch failure'); } });
+        const handler = require('../src/payments/activation-service')({ store: f.store, activeJobs: f.activeJobs, ensureStoreReady: async () => {}, log() {}, runWorker() { throw new Error('dispatch failure'); } });
         const res = { status(code) { this.code=code; return this; }, json(data) { this.data=data; } };
         await handler({ body: { cdk: 'CDK-TEST', session: JSON.stringify(session) } },res);
         const settlement = f.events.find(event => event[0] === 'settle');
@@ -140,7 +141,7 @@ test('restart recovery releases only prepared tasks and never creates a replacem
         getTaskStatus: async key => ({ job_key: key, cdk_code: 'CDK-TEST', status: key === 'prepared' ? 'running' : 'manual',
             orbitcard_state: key === 'prepared' ? 'prepared' : 'manual', orbitcard_client_order_no: 'fixed-identity' })
     };
-    const recovery = require('../order-recovery')({ store, activeJobs: new Set(), audit: event => audits.push(event),
+    const recovery = require('../src/payments/order-recovery')({ store, activeJobs: new Set(), audit: event => audits.push(event),
         query: { refresh: async input => { calls.push(input); return { success: true, applied: true }; } } });
     await recovery.refreshTask({ job_key: 'prepared', cdk_code: 'CDK-TEST', orbitcard_state: 'prepared' });
     assert.equal(states[0][1].expectedState,'prepared'); assert.equal(states[0][1].orbitcardState,'rejected'); assert.equal(calls.length,0);
@@ -150,7 +151,7 @@ test('restart recovery releases only prepared tasks and never creates a replacem
 });
 test('background reconciliation skips active workers and applies backoff to failed queries', async () => {
     let queries = 0, touches = 0;
-    const recovery = require('../order-recovery')({
+    const recovery = require('../src/payments/order-recovery')({
         activeJobs: new Set(['active']), audit() {},
         store: { acquirePaymentLock: require('./helpers/payment-locks.cjs')().acquirePaymentLock,
             getTaskStatus: async key => ({ job_key: key, cdk_code: 'CDK-TEST', orbitcard_state: 'manual' }),
@@ -172,7 +173,7 @@ test('historical tasks retain reservations and migrations do not drop legacy dat
         runExecute: async (sql,args) => { executed.push([sql,args]); return { affectedRows: 1 }; },
         withTransaction: async fn => fn({}), ensureColumn: async (table,column) => columns.push([table,column]), ensureGptApiConfigDefaults: async () => {}
     };
-    const store = load('mysql-store.js', { './mysql-core': core, './orbitcard-client': { summary: value => value } });
+    const store = load('src/db/mysql-store.js', { './mysql-core': core, '../orbitcard/orbitcard-client': { summary: value => value } });
     await store.ensureReady();
     assert.ok(executed.some(([sql]) => sql.includes('used_at = COALESCE(used_at')));
     assert.ok(executed.some(([sql]) => sql.includes("status = 'manual'")));
@@ -181,13 +182,13 @@ test('historical tasks retain reservations and migrations do not drop legacy dat
 });
 test('new tasks store only the account preview and never a submitted Session', async () => {
     let insert;
-    const store = load('mysql-store.js', { './mysql-core': { runExecute: async (...args) => { insert=args; }, withTransaction() {}, runQuery() {} }, './orbitcard-client': { summary: value => value } });
+    const store = load('src/db/mysql-store.js', { './mysql-core': { runExecute: async (...args) => { insert=args; }, withTransaction() {}, runQuery() {} }, '../orbitcard/orbitcard-client': { summary: value => value } });
     await store.createTaskLog({ tokenPreview: session.user.email, cdkCode: 'TEST', sessionPayload: JSON.stringify(session) });
     assert.ok(!insert[0].includes('session_payload')); assert.ok(!JSON.stringify(insert[1]).includes('synthetic-token'));
 });
 test('administrator signatures require a random secret and secondary auth cannot be bypassed', async () => {
     const old = process.env.ADMIN_TOKEN_SECRET;
-    const auth = require('../admin-auth');
+    const auth = require('../src/http/admin-auth');
     try {
         delete process.env.ADMIN_TOKEN_SECRET; assert.throws(() => auth.resolveAdminTokenSecret());
         process.env.ADMIN_TOKEN_SECRET = 'x'.repeat(32);
@@ -213,15 +214,15 @@ test('API-only HTTP server serves the new UI, protects management and has no ret
         safeOrder: () => ({}),
         runQuery: async () => [{ ok: 1 }], getAdminData: async () => ({ stats: { total: 0 },config: {},logs: [] })
     };
-    const { app } = load('server.js', { './mysql-store': fakeStore, './runtime-log': { push() {}, initialize() {} },
-        './order-recovery': () => ({ refreshTask: async () => ({ success:true, querySkipped:true, waitMs:60000 }) }) });
+    const { app } = load('src/server.js', { './db/mysql-store': fakeStore, './logging/runtime-log': { push() {}, initialize() {} },
+        './payments/order-recovery': () => ({ refreshTask: async () => ({ success:true, querySkipped:true, waitMs:60000 }) }) });
     const server = app.listen(0,'127.0.0.1'); await once(server,'listening');
     t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); if (old === undefined) delete process.env.ADMIN_TOKEN_SECRET; else process.env.ADMIN_TOKEN_SECRET=old; });
     const base = `http://127.0.0.1:${server.address().port}`;
     const home = await fetch(base); assert.equal(home.status,200); assert.ok((await home.text()).includes('/app.js'));
     assert.equal((await fetch(base+'/api/admin/data')).status,401);
     assert.equal((await fetch(base+'/api/admin/orbitcard/cards')).status,401);
-    const token = require('../admin-auth').issueAdminToken(1,'admin@example.test').token;
+    const token = require('../src/http/admin-auth').issueAdminToken(1,'admin@example.test').token;
     const headers = { Authorization: `Bearer ${token}` };
     for (const route of ['/api/admin/browser-pool','/api/admin/cards','/api/admin/addresses','/api/admin/proxies','/api/admin/hcaptcha','/api/admin/checkout/plans','/api/admin/billing']) assert.equal((await fetch(base+route,{ headers })).status,404,route);
     assert.equal((await fetch(base+'/api/webhooks/card-issue',{ method: 'POST',headers: { 'Content-Type': 'application/json' },body:'{}' })).status,404);
@@ -238,12 +239,12 @@ test('original order query returns the saved account and readable plan without e
     const task = { job_key: 'paid-job', orbitcard_client_order_no: 'paid-order', status: 'success', orbitcard_state: 'success',
         orbitcard_email: 'paid@example.test', session_payload: 'private-session', orbitcard_api_key_hash: 'private-key',
         gpt_api_raw: JSON.stringify({ accessToken: 'private-token', session_json: { accessToken: 'private-nested' } }) };
-    const { app } = load('server.js', { './mysql-store': {
+    const { app } = load('src/server.js', { './db/mysql-store': {
         ensureReady: async () => {}, getAdminPaths: async () => ({ loginPath: 'admin-login', panelPath: 'admin' }),
         getOrbitcardTaskByCdk: async cdk => cdk === 'CDK-TEST' ? task : null,
-        safeOrder: require('../mysql-store').safeOrder
-    }, './runtime-log': { push() {}, initialize() {} },
-    './order-recovery': () => ({ refreshTask: async () => ({ success: true, querySkipped: true }) }) });
+        safeOrder: require('../src/db/mysql-store').safeOrder
+    }, './logging/runtime-log': { push() {}, initialize() {} },
+    './payments/order-recovery': () => ({ refreshTask: async () => ({ success: true, querySkipped: true }) }) });
     const server = app.listen(0, '127.0.0.1'); await once(server, 'listening');
     t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
     const query = cdk => fetch(`http://127.0.0.1:${server.address().port}/api/cdk/orbitcard/status`, {
@@ -275,7 +276,7 @@ test('original order query returns the saved account and readable plan without e
 test('CDK status API distinguishes confirmed redemption from reservations and fails closed on lookup errors', async t => {
     let row = null, fail = false;
     const queries = [];
-    const cdkStore = load('mysql-store.js', { './mysql-core': {
+    const cdkStore = load('src/db/mysql-store.js', { './mysql-core': {
         runQuery: async (sql, args) => {
             queries.push([sql, args]);
             if (fail) throw new Error('private database failure');
@@ -284,11 +285,11 @@ test('CDK status API distinguishes confirmed redemption from reservations and fa
         runExecute: async () => { throw new Error('status lookup must not write'); },
         withTransaction: async () => { throw new Error('status lookup must not mutate orders'); }
     } });
-    const { app } = load('server.js', { './mysql-store': {
+    const { app } = load('src/server.js', { './db/mysql-store': {
         ensureReady: async () => {},
         getAdminPaths: async () => ({ loginPath: 'admin-login', panelPath: 'admin' }),
         getCdkRedemptionStatus: cdkStore.getCdkRedemptionStatus
-    }, './runtime-log': { push() {}, initialize() {} } });
+    }, './logging/runtime-log': { push() {}, initialize() {} } });
     const server = app.listen(0, '127.0.0.1'); await once(server, 'listening');
     t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
     const request = body => fetch(`http://127.0.0.1:${server.address().port}/api/cdk/status`, {
@@ -343,7 +344,7 @@ test('CDK status API distinguishes confirmed redemption from reservations and fa
 
 test('production dependency graph and Dockerfile contain no browser or Python runtimes', () => {
     const root = path.resolve(__dirname,'..'), lock = JSON.parse(fs.readFileSync(path.join(root,'package-lock.json'),'utf8'));
-    assert.deepEqual(Object.keys(require('../package.json').dependencies).sort(),['axios','express','mysql2','proxy-addr','ws']);
+    assert.deepEqual(Object.keys(require('../package.json').dependencies).sort(),['axios','express','mysql2','nodemailer','proxy-addr','ws']);
     assert.ok(Object.keys(lock.packages).every(key => !/playwright|puppeteer|torch|opencv|transformers/.test(key)));
     const dockerfile = fs.readFileSync(path.join(root,'Dockerfile'),'utf8');
     assert.ok(!/python|pip install|playwright|chromium|xvfb|vnc|apt-get/i.test(dockerfile));
@@ -371,11 +372,11 @@ test('HTTP redemption carries the Session only to Orbitcard and exposes live ver
         safeOrder: () => ({})
     };
     const challenge = { id:'challenge',url:'https://challenge.example.test/private-captcha',expires_at:new Date(Date.now()+60000).toISOString() };
-    const { app, activeJobs } = load('server.js', {
-        './mysql-store':store,'./runtime-log':{ push:event => events.push(event) },
-        './telegram-notify':{ notifyTelegramEvent:async () => completed() },
-        './orbitcard-query':{ refresh:async () => { throw new Error('must not duplicate active polling'); } },
-        './orbitcard-worker':{ run:async options => {
+    const { app, activeJobs } = load('src/server.js', {
+        './db/mysql-store':store,'./logging/runtime-log':{ push:event => events.push(event) },
+        './integrations/telegram-notify':{ notifyTelegramEvent:async () => completed() },
+        './orbitcard/orbitcard-query':{ refresh:async () => { throw new Error('must not duplicate active polling'); } },
+        './payments/orbitcard-worker':{ run:async options => {
             assert.equal(options.session.accessToken,'synthetic-token'); assert.equal(options.clientOrderNo,'stable-client');
             await options.setProgress('running',60,'请完成验证',{ orbitcardState:'pending',gptApiOrderId:'SUB-1' });
             options.broadcast(challenge); visible(); await gate;

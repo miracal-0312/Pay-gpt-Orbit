@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { planFor, cardScope, settlementState } = require('../orbitcard-card-policy');
+const { planFor, cardScope, settlementState } = require('../src/orbitcard/orbitcard-card-policy');
 
 test('historical and provider plan names map to the right plan', () => {
     for (const plan of ['pro100', 'pro200', 'pro500', 'pro_5x', 'pro_20x', 'gpt-pro-5x', 'gpt-pro-20x', 'gpt-pro-25x']) {

@@ -1,7 +1,7 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { PROVIDER_PLANS } = require('../plan-registry');
+const { PROVIDER_PLANS } = require('../src/config/plan-registry');
 const fs = require('node:fs');
 const path = require('node:path');
 const { createRequire } = require('node:module');
@@ -12,16 +12,16 @@ function load(name, mocks = {}) {
     const realRequire = createRequire(filename);
     const module = { exports: {} };
     new Function('require', 'module', 'exports', fs.readFileSync(filename, 'utf8'))(
-        id => Object.hasOwn(mocks, id) ? mocks[id] : id === './runtime-log' ? { push() {} } : realRequire(id), module, module.exports);
+        id => Object.hasOwn(mocks, id) ? mocks[id] : id === '../logging/runtime-log' ? { push() {} } : realRequire(id), module, module.exports);
     return module.exports;
 }
 
 function modules() {
-    const api = load('orbitcard-client.js', { axios: { request: async () => { throw new Error('Unexpected network request'); } } });
-    const domain = load('orbitcard-cdk.js', { './orbitcard-client': api });
-    const factory = load('orbitcard-cdk-store.js', { './orbitcard-cdk': domain });
-    const worker = load('orbitcard-worker.js', { './orbitcard-client': api, './orbitcard-cdk': domain });
-    const query = load('orbitcard-query.js', { './orbitcard-client': api, './orbitcard-cdk': domain });
+    const api = load('src/orbitcard/orbitcard-client.js', { axios: { request: async () => { throw new Error('Unexpected network request'); } } });
+    const domain = load('src/payments/orbitcard-cdk.js', { '../orbitcard/orbitcard-client': api });
+    const factory = load('src/db/orbitcard-cdk-store.js', { '../payments/orbitcard-cdk': domain });
+    const worker = load('src/payments/orbitcard-worker.js', { '../orbitcard/orbitcard-client': api, './orbitcard-cdk': domain });
+    const query = load('src/orbitcard/orbitcard-query.js', { './orbitcard-client': api, '../payments/orbitcard-cdk': domain });
     return { api, domain, factory, worker, query };
 }
 
@@ -92,7 +92,7 @@ test('worker requires a persisted client order identity before any API call or c
     const {worker,api}=modules(); let calls=0;
     api.fetchPlans=async()=>{calls++;throw Error('unexpected plans call');};
     api.request=async()=>{calls++;throw Error('unexpected API call');};
-    const {CardPreparationError}=require('../orbitcard-card-policy');
+    const {CardPreparationError}=require('../src/orbitcard/orbitcard-card-policy');
     for(const clientOrderNo of [undefined,null,'','   ']) {
         await assert.rejects(worker.run({cfg:{},planType:'plus',clientOrderNo,cdk:'OLD-CDK',attemptKey:'old-fallback',
             selectCard:async()=>{calls++;throw Error('unexpected allocation');}}),
@@ -344,8 +344,8 @@ test('unavailable regions and failed or mismatched region responses stop before 
 });
 
 test('platform default and legacy aliases preserve region behavior without an unnecessary upstream query', async () => {
-    const { normalizePaymentRegions, paymentRegion } = require('../orbitcard-config');
-    const gateway = require('../orbitcard-subscription-service')({ request: async () => assert.fail('default needs no region lookup') });
+    const { normalizePaymentRegions, paymentRegion } = require('../src/config/orbitcard-config');
+    const gateway = require('../src/orbitcard/orbitcard-subscription-service')({ request: async () => assert.fail('default needs no region lookup') });
     const session = { user: { email: 'target@example.test' }, account: {}, accessToken: 'test-session' };
     const cfg = { orbitcard_payment_regions: normalizePaymentRegions({ pro100: 'US' }) };
     assert.equal(paymentRegion(cfg, 'pro_5x'), 'US'); assert.equal(paymentRegion(cfg, 'gpt-pro-5x'), 'US');
@@ -520,7 +520,7 @@ test('activation errors before acquiring a CDK cannot roll back somebody else’
     const deps = { ensureStoreReady: async () => {}, activeJobs: new Set(),
         store: { getMaintenanceModeState: async () => ({}), getMaxConcurrentActivations: async () => 5,
             verifyCdkDetails: async () => { throw new Error('temporary database error'); }, settleOrbitcardTask: async () => { rollbacks++; } } };
-    const handler = require('../activation-service')(deps);
+    const handler = require('../src/payments/activation-service')(deps);
     let status;
     const res = { status(n) { status = n; return this; }, json(data) { return data; } };
     await handler({ body: { cdk: 'CDK-TEST', session: JSON.stringify({ accessToken: 'token', user: { email: 'user@example.test' }, account: {} }) } }, res);

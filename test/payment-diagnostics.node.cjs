@@ -3,10 +3,10 @@ const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), os = require('node:os');
 const { createRequire } = require('node:module');
-const createDiagnostics = require('../orbitcard-diagnostics');
-const { PROVIDER_PLANS } = require('../plan-registry');
-const { CardDataError } = require('../orbitcard-card-policy');
-const cardApi = require('../orbitcard-cards-client');
+const createDiagnostics = require('../src/diagnostics/orbitcard-diagnostics');
+const { PROVIDER_PLANS } = require('../src/config/plan-registry');
+const { CardDataError } = require('../src/orbitcard/orbitcard-card-policy');
+const cardApi = require('../src/orbitcard/orbitcard-cards-client');
 const session = { accessToken: 'never-log-access', sessionToken: 'never-log-session', account: {}, user: { email: 'preview@example.test' } };
 const authorization=(id,card_id=42)=>({transaction_id:id,card_id,transaction_type:'Authorization',status:'success',authorization_amount:'15.54',currency:'USD'});
 function fixture() {
@@ -70,8 +70,8 @@ test('concurrent preflight assigns distinct cards and admits just one waiting ta
     assert.deepEqual(sim.tasks.slice(0, 3).map(row => row.card_id), [42, 44, 43]);
     assert.equal(sim.initial_contention.tasks, 10);
     assert.equal(sim.database_locks_tested, false);
-    assert.equal(sim.budget.reserved, '26.00000000');
-    assert.equal(sim.budget.remaining, '74.00000000');
+    assert.equal(sim.budget.reserved, '32.00000000');
+    assert.equal(sim.budget.remaining, '68.00000000');
     assert.equal(f.calls.filter(([op]) => op === 'getCardList').length, 1);
     assert.equal(f.calls.filter(([op]) => op === 'cardDetail').length, 1);
     assert.equal(f.calls.filter(([op]) => op === 'cardTransaction').length, 0);
@@ -92,11 +92,11 @@ test('preflight and simulation use durable disable markers while counts remain s
 
 test('concurrent selection shares the funding budget instead of spending the same balance for every task', async () => {
     const f = managedPool(3, '4.37');
-    f.cfg.orbitcard_plan_prices.plus = '17.00'; f.state.available = '13.00';
+    f.cfg.orbitcard_plan_prices.plus = '17.00'; f.state.available = '17.00';
     const sim = (await f.service.preflight({ stage: 'concurrency', plan_type: 'plus', concurrent_tasks: 3 })).result.concurrency;
     assert.equal(sim.summary.assigned, 1); assert.equal(sim.summary.blocked, 2);
-    assert.equal(sim.tasks[0].funding_amount, '12.63');
-    assert.equal(sim.budget.remaining, '0.37000000');
+    assert.equal(sim.tasks[0].funding_amount, '17.00');
+    assert.equal(sim.budget.remaining, '0.00000000');
     assert.ok(sim.tasks.slice(1).every(row => row.card_id === null && row.reason === 'account_balance'));
     assert.deepEqual(f.writes, []);
 });
@@ -167,7 +167,7 @@ test('full preflight checks all four plans with readonly authorization queries',
 test('preflight models funding and reports disabled cards without making replacement writes',async()=>{
     const fund=fixture();fund.state.details=[{...fund.state.live[0],balance_amount:'2.00'}];
     const funding=await fund.service.preflight({stage:'cards',plan_type:'plus'});
-    assert.equal(funding.result.selection.action,'fund');assert.equal(funding.result.selection.funding_amount,'14.00');
+    assert.equal(funding.result.selection.action,'fund');assert.equal(funding.result.selection.funding_amount,'16.00');
     const open=fixture();open.state.rows[0].successful_order_count=7;open.state.rows[0].disabled_at='2026-11-16';
     const opening=await open.service.preflight({stage:'cards',plan_type:'plus'});
     assert.equal(opening.passed,false);assert.equal(opening.result.selection.action,'unavailable');assert.equal(opening.result.selection.opening,undefined);
@@ -175,14 +175,14 @@ test('preflight models funding and reports disabled cards without making replace
     assert.deepEqual(open.writes,[]);
 });
 
-test('preflight checks the actual funding deficit and does not require account funds for a funded card',async()=>{
+test('preflight checks the full-plan funding amount and does not require account funds for a funded card',async()=>{
     const funded=fixture();funded.state.available='0.00';
     const pay=await funded.service.preflight({stage:'cards',plan_type:'plus'});
     assert.equal(pay.passed,true);assert.equal(pay.result.selection.action,'pay');assert.deepEqual(funded.writes,[]);
-    const sufficient=fixture();sufficient.state.available='14.00';sufficient.state.details=[{...sufficient.state.live[0],balance_amount:'2.00'}];
+    const sufficient=fixture();sufficient.state.available='16.00';sufficient.state.details=[{...sufficient.state.live[0],balance_amount:'2.00'}];
     const fund=await sufficient.service.preflight({stage:'cards',plan_type:'plus'});
-    assert.equal(fund.passed,true);assert.equal(fund.result.selection.action,'fund');assert.equal(fund.result.selection.funding_amount,'14.00');
-    sufficient.state.available='13.99';
+    assert.equal(fund.passed,true);assert.equal(fund.result.selection.action,'fund');assert.equal(fund.result.selection.funding_amount,'16.00');
+    sufficient.state.available='15.99';
     const short=await sufficient.service.preflight({stage:'cards',plan_type:'plus'});
     assert.equal(short.passed,false);assert.deepEqual(sufficient.writes,[]);
 });
@@ -193,9 +193,9 @@ test('preflight rejects missing configured USD prices without financial writes',
     assert.equal(result.passed,false);assert.deepEqual(f.writes,[]);
 });
 
-test('enabled preflight budgets only the selected deficit regardless of pool size',async()=>{
+test('enabled preflight budgets one full-plan topup regardless of pool size',async()=>{
     for(const count of [1,4,5,6,25]) for(const balance of ['20.00','2.00']) {
-        const f=managedPool(count,balance),required=balance==='2.00'?'14.00':'0.00';f.state.available=required;
+        const f=managedPool(count,balance),required=balance==='2.00'?'16.00':'0.00';f.state.available=required;
         const before=structuredClone(f.state.rows);
         const enough=await f.service.preflight({stage:'cards',plan_type:'plus'});
         assert.equal(enough.passed,true);
@@ -203,7 +203,7 @@ test('enabled preflight budgets only the selected deficit regardless of pool siz
         assert.deepEqual(maintenance,{current_size:count,retire_card_ids:[],funding_amount:required,
             required_balance:required,fees_included:false,snapshot_only:true});
         if(Number(required)>0) {
-            f.state.available='13.99';
+            f.state.available='15.99';
             const short=await f.service.preflight({stage:'cards',plan_type:'plus'});
             assert.equal(short.passed,false);assert.equal(short.result.selection.account_check,'failed');
         }
@@ -355,7 +355,7 @@ test('invalid Session, disabled region, insufficient balance and broken batch de
 const logDir=fs.mkdtempSync(path.join(os.tmpdir(),'orbit-diag-'));
 after(()=>{assert.ok(path.basename(logDir).startsWith('orbit-diag-'));fs.rmSync(logDir,{recursive:true,force:true});});
 function logger() {
-    const name=path.resolve(__dirname,'../runtime-log.js'),module={exports:{}},real=createRequire(name);
+    const name=path.resolve(__dirname,'../src/logging/runtime-log.js'),module={exports:{}},real=createRequire(name);
     new Function('require','module','exports','__dirname','process',fs.readFileSync(name,'utf8'))(real,module,module.exports,path.dirname(name),{...process,env:{...process.env,TASK_LOG_DIR:logDir}});
     return module.exports;
 }
@@ -378,7 +378,7 @@ test('trace pagination reads durable logs after cache clearing and restart, vali
 test('diagnostics endpoints enforce secondary auth and never accept arbitrary upstream operations',async t=>{
     const express=require('express'),{once}=require('node:events'),app=express();app.use(express.json());
     const logs=logger();
-    require('../orbitcard-diagnostics-http')(app,{store:{getGptApiConfig:async()=>{throw Error('Must not need config for session');}},logs,
+    require('../src/http/orbitcard-diagnostics-http')(app,{store:{getGptApiConfig:async()=>{throw Error('Must not need config for session');}},logs,
         requireSecondaryAuth:(req,res,next)=>req.headers['x-admin-secondary-token']==='test-secondary'?next():res.status(403).json({success:false})});
     const server=app.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>new Promise(resolve=>{server.closeAllConnections();server.close(resolve);}));
     const base=`http://127.0.0.1:${server.address().port}/api/admin/orbitcard/diagnostics`;

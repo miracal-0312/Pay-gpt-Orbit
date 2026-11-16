@@ -15,14 +15,14 @@ function load(name, mocks = {}) {
         id => Object.hasOwn(mocks, id) ? mocks[id] : real(id), module, module.exports, path.dirname(filename));
     return module.exports;
 }
-const safety = require('../log-safety');
+const safety = require('../src/logging/log-safety');
 test('audit files survive reload and cache clearing, preserve long lines and redact credentials', () => {
-    const logs = load('runtime-log.js');
+    const logs = load('src/logging/runtime-log.js');
     logs.push({ jobKey: 'audit-test', text: 'x'.repeat(12000) });
     logs.push({ jobKey: 'audit-test', text: 'access_token=secret-token\nBearer opaque-token\n4111 1111 1111 1111', data: { session_json: 'private' } });
     assert.equal(logs.tail(2)[0].text.length, 12000);
     logs.clear(); assert.equal(logs.stats().count, 0);
-    const restored = load('runtime-log.js'); assert.equal(restored.stats().count, 2);
+    const restored = load('src/logging/runtime-log.js'); assert.equal(restored.stats().count, 2);
     const raw = fs.readFileSync(restored.taskFile('audit-test'), 'utf8');
     for (const secret of ['secret-token','opaque-token','4111 1111','private']) assert.ok(!raw.includes(secret));
     assert.throws(() => restored.taskFile('../escape'));
@@ -34,7 +34,7 @@ test('HMAC signs the exact request bytes, host, path and stable idempotency iden
     process.env.ORBITCARD_API_KEY = 'test-key';
     const calls = [], events = [];
     try {
-        const api = load('orbitcard-client.js', { './runtime-log': { push: event => events.push(event) }, axios: { request: async request => {
+        const api = load('src/orbitcard/orbitcard-client.js', { '../logging/runtime-log': { push: event => events.push(event) }, axios: { request: async request => {
             calls.push(request); return { status: 200, data: { code: 0, data: { task_no: 'SUB-1' } } };
         } } });
         await api.request({ api_key: 'test-key', base_url: 'https://orbitcard.test:8443', auditJobKey: 'job' }, 'createSubscription', { client_order_no:'stable-id',plan_type:'gpt-plus',card_id:42,authorized:true,session_json: { accessToken: 'private', text: '中文' } }, 'stable-id');
@@ -54,7 +54,7 @@ test('HTTP and network errors generate safe history; nested fields cannot smuggl
     process.env.ORBITCARD_API_KEY = 'test-key';
     const events = []; let throws = false;
     try {
-        const api = load('orbitcard-client.js', { './runtime-log': { push: event => events.push(event) }, axios: { request: async () => {
+        const api = load('src/orbitcard/orbitcard-client.js', { '../logging/runtime-log': { push: event => events.push(event) }, axios: { request: async () => {
             if (throws) throw new Error('full request Session: private');
             return { status: 502, headers: { 'retry-after': '12' }, data: { code: 59018, request_error: { code: 'relay_timeout', submission_outcome: 'unknown' }, data: { error_code: { accessToken: 'private' } } } };
         } } });
@@ -72,7 +72,7 @@ test('HTTP and network errors generate safe history; nested fields cannot smuggl
 });
 test('sequential original-order requests honor cooldown and Retry-After', async () => {
     let calls = 0;
-    const query = load('orbitcard-query.js', { './orbitcard-client': { request: async () => { calls++; return { success: false, status: 429, retryAfterMs: 20000 }; } }, './orbitcard-cdk': {} });
+    const query = load('src/orbitcard/orbitcard-query.js', { './orbitcard-client': { request: async () => { calls++; return { success: false, status: 429, retryAfterMs: 20000 }; } }, '../payments/orbitcard-cdk': {} });
     const input = { cfg: { base_url: 'https://orbitcard.test' }, task: { job_key: 'cooldown', orbitcard_base_url: 'https://orbitcard.test', orbitcard_client_order_no: 'original', orbitcard_plan_type: 'plus' } };
     await Promise.all([query.refresh(input), query.refresh(input)]);
     const result = await query.refresh(input); assert.equal(calls, 1); assert.ok(result.retryAfterMs > 15000);
@@ -87,7 +87,7 @@ test('malformed retry hints cannot discard a valid Retry-After header or nested 
     });
     for (const headers of [{ 'retry-after': '120' }, {}]) {
         let calls = 0;
-        const api = load('orbitcard-client.js', { './runtime-log': { push() {} }, axios: { request: async () => {
+        const api = load('src/orbitcard/orbitcard-client.js', { '../logging/runtime-log': { push() {} }, axios: { request: async () => {
             calls++;
             return { status: 429, headers, data: { code: 59018,
                 request_error: { retry_after_seconds: 'invalid' },
@@ -103,7 +103,7 @@ test('malformed retry hints cannot discard a valid Retry-After header or nested 
 });
 test('task subscriptions require a matching CDK or a current administrator token', async () => {
     const deps = { store: { getTaskStatus: async () => ({ cdk_code: 'CDK-SECRET' }), getAdminAuthConfig: async () => ({ passwordVersion: 2 }) }, verifyAdminToken: token => token === 'valid' ? { pv: 2 } : token === 'old' ? { pv: 1 } : null };
-    const { authorize } = require('../task-subscription');
+    const { authorize } = require('../src/realtime/task-subscription');
     assert.equal(await authorize({ jobKey: 'job' }, deps), false);
     assert.equal(await authorize({ jobKey: 'job', cdk: 'wrong' }, deps), false);
     assert.equal(await authorize({ jobKey: 'job', cdk: 'CDK-SECRET' }, deps), true);

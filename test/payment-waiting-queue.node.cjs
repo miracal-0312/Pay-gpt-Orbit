@@ -1,8 +1,8 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { createPaymentWaitingQueue, PaymentQueueFullError, queueFeedback, FULL_MESSAGE } = require('../payment-waiting-queue');
-const { CardBusyError, CardPreparationError, FundingAwaitingError } = require('../orbitcard-card-policy');
+const { createPaymentWaitingQueue, PaymentQueueFullError, queueFeedback, FULL_MESSAGE } = require('../src/payments/payment-waiting-queue');
+const { CardBusyError, CardPreparationError, FundingAwaitingError } = require('../src/orbitcard/orbitcard-card-policy');
 const locks = require('./helpers/payment-locks.cjs');
 const session = { accessToken: 'synthetic', user: { email: 'fixture@example.test' }, account: {} };
 const flush = () => new Promise(resolve => setImmediate(resolve));
@@ -68,7 +68,7 @@ test('waiting cancellation settles real CDK transactions without creating a card
         });
         const queue=createPaymentWaitingQueue({store:f.store,activeJobs,now:()=>now,waitMs:5000,
             sleep:()=>new Promise(resolve=>{resume=resolve;})});
-        const handler=require('../activation-service')({store:f.store,activeJobs,waitingQueue:queue,
+        const handler=require('../src/payments/activation-service')({store:f.store,activeJobs,waitingQueue:queue,
             ensureStoreReady:async()=>{},log(){},runWorker:()=>assert.fail('waiting task cannot submit')});
         const res={status(code){this.code=code;return this;},json(data){this.data=data;}};
         await handler({body:{cdk:'CODE-WAIT',session:input}},res);await flush();
@@ -91,7 +91,7 @@ test('restart recovery releases an unsubmitted waiter but preserves a retry CDK 
         f.db.tasks[0].message='支付卡繁忙，排队等待';
         if(retry)f.db.tasks[0].orbitcard_retry_attempt_no=2;
         f.store.getGptApiConfig=async()=>({enabled:true,base_url:f.base,api_key:'key'});
-        const recovery=require('../order-recovery')({store:f.store,activeJobs,audit(){},
+        const recovery=require('../src/payments/order-recovery')({store:f.store,activeJobs,audit(){},
             query:{refresh:async()=>assert.fail('unsubmitted waiting order has no subscription')}});
         await recovery.refreshTask(await f.store.getTaskStatus(task.jobKey));
         assert.equal(f.db.tasks[0].orbitcard_state,retry?'support_locked':'rejected');
@@ -166,7 +166,7 @@ test('CDK admission queues one request, preserves its identity, and rejects over
             tasks.set(cdk,{job_key:task.jobKey,orbitcard_client_order_no:task.orbitcardClientOrderNo,status:'running',message:'排队等待'});return task;},
         settleOrbitcardTask:async()=>({applied:true})
     });
-    const handler=require('../activation-service')({store:f.store,ensureStoreReady:async()=>{},activeJobs:f.activeJobs,
+    const handler=require('../src/payments/activation-service')({store:f.store,ensureStoreReady:async()=>{},activeJobs:f.activeJobs,
         waitingQueue:f.queue,log(){},runWorker:async({task})=>{dispatched.push(task.jobKey);await f.queue.allocate({key:task.jobKey,session,cfg:task.apiConfig,allocate:async()=>42});}});
     async function request(cdk){const res={code:200,headers:{},set(key,value){this.headers[key]=value;},status(code){this.code=code;return this;},json(data){this.data=data;return data;}};await handler({body:{cdk,session}},res);return res;}
     const second=await request('SECOND');assert.equal(second.code,200);assert.equal(second.data.queued,true);

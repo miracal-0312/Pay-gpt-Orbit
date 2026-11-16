@@ -1,13 +1,13 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const factory = require('../payment-automation');
+const factory = require('../src/payments/payment-automation');
 const fixture = require('./helpers/card-db.cjs');
 
 test('recovery stops a historical queued retry without querying or submitting payment', async () => {
     const f = fixture(), task = await f.claim();
     f.db.tasks[0].orbitcard_state = 'retry_waiting';
-    const recovery = require('../order-recovery')({ store: f.store, activeJobs: new Set(), audit() {},
+    const recovery = require('../src/payments/order-recovery')({ store: f.store, activeJobs: new Set(), audit() {},
         query: { refresh: async () => assert.fail('an unsubmitted retry must not query a subscription') } });
     await recovery.refreshTask(f.db.tasks[0]);
     assert.equal(f.db.tasks.length, 1);
@@ -81,7 +81,7 @@ test('payment worker exits a manual handoff without allocating cards or mutating
     const f = fixture(), task = await f.claim();
     Object.assign(f.db.tasks[0], { status: 'manual', orbitcard_state: 'prepared' });
     const activeJobs = new Set([task.jobKey]), challenges = new Map([[task.jobKey, {}]]), calls = [];
-    const core = require('../payment-service')({ store: f.store, cardService: { allocate: async () => assert.fail('must not allocate') },
+    const core = require('../src/payments/payment-service')({ store: f.store, cardService: { allocate: async () => assert.fail('must not allocate') },
         worker: { run: async () => assert.fail('must exit before entering payment') }, activeJobs, activeChallenges: challenges,
         audit() {}, broadcast() {}, log: (...args) => calls.push(args), notify: async () => {} });
     await core.run({ task: { ...task, apiConfig: {} }, cdk: 'CODE-1', planType: 'plus', session: {} });
@@ -92,7 +92,7 @@ test('payment worker exits a manual handoff without allocating cards or mutating
 
 test('subscription guard runs immediately before the write and blocks handoff after card preparation', async () => {
     let writes = 0;
-    const service = require('../orbitcard-subscription-service')({ request: async () => { writes++; } });
+    const service = require('../src/orbitcard/orbitcard-subscription-service')({ request: async () => { writes++; } });
     await assert.rejects(service.submit({ paymentGuard: { assertAllowed: async () => { throw new factory.PaymentStoppedError('stopped'); } } }, {}), factory.PaymentStoppedError);
     assert.equal(writes, 0);
 });
@@ -123,11 +123,11 @@ test('funding reconciliation survives manual redemption without enabling another
 test('a failed or stale preparation settlement never logs an unconfirmed CDK release', async () => {
     for (const throws of [false, true]) {
         const f = fixture(), task = await f.claim(), logs = [];
-        const core = require('../payment-service')({ store: { ...f.store, settleOrbitcardTask: async (key, input) => {
+        const core = require('../src/payments/payment-service')({ store: { ...f.store, settleOrbitcardTask: async (key, input) => {
             if (input.orbitcardState !== 'rejected') return f.store.settleOrbitcardTask(key, input);
             if (throws) throw new Error('database unavailable');
             return { applied: false, status: 'running' };
-        } }, cardService: { allocate: async () => { throw new (require('../orbitcard-card-policy').CardPreparationError)('card busy'); } },
+        } }, cardService: { allocate: async () => { throw new (require('../src/orbitcard/orbitcard-card-policy').CardPreparationError)('card busy'); } },
         worker: { run: async () => assert.fail('must not submit') }, activeJobs: new Set(), activeChallenges: new Map(),
         audit() {}, broadcast() {}, log: (...args) => logs.push(args), notify: async () => {} });
         await core.run({ task: { ...task, apiConfig: {} }, planType: 'plus', session: {} });

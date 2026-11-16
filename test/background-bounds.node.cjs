@@ -21,7 +21,7 @@ function credentials(t) {
 test('slow Orbitcard requests have bounded concurrency and response size, and failures release slots', async t => {
     credentials(t);
     const pending = [], calls = [];
-    const api = load('orbitcard-client.js', { './runtime-log': { push() {} }, axios: { request: options => {
+    const api = load('src/orbitcard/orbitcard-client.js', { '../logging/runtime-log': { push() {} }, axios: { request: options => {
         calls.push(options); return new Promise((resolve, reject) => pending.push({ resolve, reject }));
     } } });
     const requests = Array.from({ length: 32 }, () => api.request({}, 'getAccountBalance'));
@@ -42,7 +42,7 @@ test('slow Orbitcard requests have bounded concurrency and response size, and fa
 test('untrusted Retry-After values cannot create infinite cooldowns', async t => {
     credentials(t);
     let calls = 0;
-    const api = load('orbitcard-client.js', { './runtime-log': { push() {} }, axios: { request: async () => {
+    const api = load('src/orbitcard/orbitcard-client.js', { '../logging/runtime-log': { push() {} }, axios: { request: async () => {
         calls++; return { status: 429, headers: { 'retry-after': '1e300' }, data: {} };
     } } });
     const first = await api.request({}, 'getAccountBalance');
@@ -52,9 +52,9 @@ test('untrusted Retry-After values cannot create infinite cooldowns', async t =>
 });
 test('query cache stays bounded and retains recent order cooldowns', async () => {
     let calls = 0;
-    const query = load('orbitcard-query.js', {
+    const query = load('src/orbitcard/orbitcard-query.js', {
         './orbitcard-client': { request: async () => { calls++; return { success: false, retryAfterMs: Infinity }; } },
-        './orbitcard-cdk': {}
+        '../payments/orbitcard-cdk': {}
     });
     const input = key => ({ cfg: { base_url: 'https://orbitcard.test' }, task: {
         job_key: key, orbitcard_client_order_no: key, orbitcard_base_url: 'https://orbitcard.test', orbitcard_plan_type: 'plus'
@@ -68,7 +68,7 @@ test('query cache stays bounded and retains recent order cooldowns', async () =>
 test('background failures back off progressively and successful queries reset the delay', async () => {
     let clock = 100000, calls = 0, success = false;
     const task = { job_key: 'job', cdk_code: 'code', orbitcard_state: 'pending' };
-    const recovery = require('../order-recovery')({ now: () => clock, activeJobs: new Set(), audit() {},
+    const recovery = require('../src/payments/order-recovery')({ now: () => clock, activeJobs: new Set(), audit() {},
         store: {
             acquirePaymentLock: async () => ({ assertOwned: async () => {}, release: async () => {} }),
             getTaskStatus: async () => task, listRecoverableOrbitcardTasks: async () => [task],
@@ -85,7 +85,7 @@ test('background failures back off progressively and successful queries reset th
 });
 test('Telegram uses bounded concurrency and deduplicates shared notification destinations', async () => {
     const pending = [], calls = [];
-    const telegram = load('telegram-notify.js', { axios: { post: async (...args) => {
+    const telegram = load('src/integrations/telegram-notify.js', { axios: { post: async (...args) => {
         calls.push(args); await new Promise(resolve => pending.push(resolve)); return { data: { ok: true } };
     } } });
     const requests = Array.from({ length: 8 }, () => telegram.sendTelegramMessage('bot', 'chat', 'test'));

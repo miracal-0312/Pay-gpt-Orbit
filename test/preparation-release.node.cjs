@@ -19,7 +19,7 @@ test('confirmed original card applications release unsubmitted tasks without cre
     for (const state of ['ready', 'failed']) for (const redeemed of [false, true]) {
         const f = await setup(state);
         if (redeemed) f.db.cdks[0].manual_redeemed_at = 'done';
-        const recovery = require('../order-recovery')({ store: f.store, activeJobs: new Set(), audit() {},
+        const recovery = require('../src/payments/order-recovery')({ store: f.store, activeJobs: new Set(), audit() {},
             query: { refresh: async () => assert.fail('subscription was never submitted') } });
         assert.equal((await recovery.refreshTask(f.db.tasks[0])).applied, true);
         assert.equal(f.db.tasks[0].orbitcard_state, redeemed ? 'support_locked' : 'rejected');

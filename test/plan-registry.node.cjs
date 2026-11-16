@@ -3,7 +3,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const registry = require('../plan-registry');
+const registry = require('../src/config/plan-registry');
 test('four CDK plans remain distinct and old plan names are read-only aliases', () => {
     assert.deepEqual(registry.PLAN_TYPES, ['plus','pro100','pro200','pro500']);
     assert.equal(registry.normalizePlanType('pro_5x'), 'pro100');
