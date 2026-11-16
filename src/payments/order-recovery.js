@@ -16,7 +16,8 @@ module.exports = function createRecovery({ store, query, activeJobs, audit, noti
     }
     async function refreshTask(task) {
         if (activeJobs.has(task.job_key)) return { success: true, querySkipped: true };
-        const guard = await store.acquirePaymentLock(cdkLockKey(task.cdk_code));
+        const guard = await store.acquirePaymentLock(task.manual_local_released_at
+            ? `reconcile:${task.job_key.toLowerCase()}` : cdkLockKey(task.cdk_code));
         if (!guard) return { success: true, querySkipped: true, waitMs: 5000 };
         try {
             await guard.assertOwned();
@@ -32,7 +33,7 @@ module.exports = function createRecovery({ store, query, activeJobs, audit, noti
         const lockSupport = (...args) => mutate('lockOrbitcardSupport', args);
         const recordFailure = (...args) => mutate('recordOrbitcardPaymentFailure', args);
         if (activeJobs.has(task.job_key)) return { success: true, querySkipped: true };
-        if (requiresManualHandling(task) && !['submitting', 'pending', 'manual', 'funding_waiting', 'funding_review', 'funding_pending', 'card_pending'].includes(task.orbitcard_state)) {
+        if (requiresManualHandling(task) && !['submitting', 'pending', 'manual', 'success', 'funding_waiting', 'funding_review', 'funding_pending', 'card_pending'].includes(task.orbitcard_state)) {
             return { success: true, querySkipped: true };
         }
         if (task.orbitcard_state === 'retry_waiting') {

@@ -52,7 +52,7 @@ function retryableFailure(snapshot, expected) {
 function retryableTask(task) {
     try {
         const attempt = Number(task?.orbitcard_retry_attempt_no);
-        return task?.status === 'running' && !task.manual_redeemed_at && task.orbitcard_state === 'retry_waiting'
+        return task?.status === 'running' && !task.manual_redeemed_at && !task.manual_result && !task.manual_local_released_at && task.orbitcard_state === 'retry_waiting'
             && Number.isSafeInteger(attempt) && attempt >= 1 && attempt < MAX_PAYMENT_ATTEMPTS
             && retryableFailure(JSON.parse(task.gpt_api_raw || '{}'), {
             orderId: task.gpt_api_order_id, clientOrderNo: task.orbitcard_client_order_no, cardId: task.orbitcard_card_id,

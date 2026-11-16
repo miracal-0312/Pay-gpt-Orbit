@@ -66,7 +66,19 @@ test('mutations forward explicit preconditions and derive actor and order identi
         assert.equal(response.status, 200); assert.equal(response.body.success, true);
         assert.equal(response.headers.get('cache-control'), 'no-store');
         assert.deepEqual(f.calls.at(-1), ['apply', { kind, id, action, expectedRevision: 'reviewed-revision',
-            reason: '核对原单后处理', adminEmail: 'operator@example.test' }]);
+            releaseLocalHold: undefined, reason: '核对原单后处理', adminEmail: 'operator@example.test' }]);
+    }
+});
+
+test('local release forwards only the explicit option and cannot forge its actor or timestamps', async t => {
+    const f = await fixture(t);
+    for (const [kind, path, id] of routes) for (const releaseLocalHold of [false, true]) {
+        const response = await f.request(path, { action: 'success', expected_revision: 'reviewed-revision',
+            reason: '其他卡已完成人工交付', release_local_hold: releaseLocalHold,
+            manual_local_released_by: 'forged@example.test', manual_local_released_at: 'forged' });
+        assert.equal(response.status, 200);
+        assert.deepEqual(f.calls.at(-1), ['apply', { kind, id, action: 'success', expectedRevision: 'reviewed-revision',
+            releaseLocalHold, reason: '其他卡已完成人工交付', adminEmail: 'operator@example.test' }]);
     }
 });
 

@@ -31,17 +31,24 @@ function broadcast(jobKey, data) {
 }
 function publicOrder(task) {
     const planType = PROVIDER_TO_PLAN[task.orbitcard_plan_type] || task.orbitcard_plan_type || null;
+    const manualResult = ['success', 'failed'].includes(task.manual_result) ? task.manual_result : null;
+    const manuallyRedeemed = Boolean(task.manual_redeemed_at);
+    const status = manualResult || (manuallyRedeemed ? 'success' : task.orbitcard_state === 'retry_waiting' ? 'retry' : task.status);
+    const message = manualResult === 'success' ? '订单已由人工售后完成交付' : manualResult === 'failed' ? '订单已由人工确认失败，请联系客服处理'
+        : manuallyRedeemed ? '卡密已由人工售后核销' : task.message;
+    const cdkState = manualResult === 'success' || manuallyRedeemed ? 'redeemed'
+        : manualResult === 'failed' ? task.manual_local_released_at ? 'available' : 'reserved'
+            : task.orbitcard_state === 'success' ? 'redeemed' : ['failed','rejected'].includes(task.orbitcard_state) ? 'available' : 'reserved';
     return { provider: task.orbitcard_client_order_no ? 'orbitcard' : 'history',
         jobKey: task.orbitcard_retry_root_job_key || task.job_key,
         attemptJobKey: task.job_key, attempt: Number(task.orbitcard_retry_attempt_no || 1),
-        status: task.manual_redeemed_at ? 'success' : task.orbitcard_state === 'retry_waiting' ? 'retry' : task.status,
-        message: task.manual_redeemed_at ? '卡密已由人工售后核销' : task.message,
-        queued: waitingQueue.has(task.job_key), ...queueFeedback(task.manual_redeemed_at ? '' : task.message),
-        progress: task.manual_redeemed_at ? 100 : Number(task.progress || 0),
+        status, message,
+        queued: manualResult ? false : waitingQueue.has(task.job_key), ...queueFeedback(manualResult || manuallyRedeemed ? '' : task.message),
+        progress: manualResult === 'success' || !manualResult && manuallyRedeemed ? 100 : manualResult === 'failed' ? 0 : Number(task.progress || 0),
         target_email: task.orbitcard_email || null,
         plan_type: planType, plan_label: PLAN_LABELS[planType] || planType,
         order_id: task.gpt_api_order_id || null, client_order_no: task.orbitcard_client_order_no || null,
-        cdk_state: task.manual_redeemed_at || task.orbitcard_state === 'success' ? 'redeemed' : ['failed','rejected'].includes(task.orbitcard_state) ? 'available' : 'reserved',
+        cdk_state: cdkState,
         order: store.safeOrder(task.gpt_api_raw) };
 }
 async function notify(task) {

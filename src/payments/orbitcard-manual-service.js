@@ -14,6 +14,8 @@ const REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-
 const PLAN_ID = /^[a-z][a-z0-9_-]{0,63}$/;
 const SUPPORTED_PLANS = Object.freeze(Object.keys(CDK_PLAN));
 const CDK_CODE = /^[A-Za-z0-9_-]{4,32}$/;
+const recoveryKeys = order => order.manual_local_released_at
+    ? [`reconcile:${order.client_order_no.toLowerCase()}`] : manualLockKeys(order.request_id, order.cdk_code);
 
 class ManualOrderError extends Error {
     constructor(message, status = 400) { super(message); this.status = status; }
@@ -77,6 +79,11 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
         return { request_id: order.request_id, client_order_no: order.client_order_no,
             task_no: order.task_no || null, plan_type: order.plan_type, plan_name: order.plan_name,
             target_email: order.target_email, card_id: Number(order.card_id) || null, state: order.state,
+            manual_result: order.manual_result || null, manual_result_reason: order.manual_result_reason || null,
+            manual_result_by: order.manual_result_by || null, manual_result_at: order.manual_result_at || null,
+            manual_local_released_at: order.manual_local_released_at || null,
+            manual_local_released_by: order.manual_local_released_by || null,
+            manual_local_release_reason: order.manual_local_release_reason || null,
             mode: order.mode, cdk_code: order.cdk_code || null, attempt: manualHistory(order).length + 1,
             attempts: manualHistory(order),
             message: order.message || '', ...(waitingQueue ? require('./payment-waiting-queue').queueFeedback(order.message) : {}),
@@ -137,7 +144,7 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
             || existing.mode !== mode || (existing.cdk_code || '') !== code)) {
             throw new ManualOrderError('此请求编号已用于另一笔管理员订单', 409);
         }
-        if (existing && !['preparing','prepared','retry_waiting'].includes(existing.state)) return publicOrder(existing);
+        if (existing && (existing.manual_result || existing.manual_local_released_at || !['preparing','prepared','retry_waiting'].includes(existing.state))) return publicOrder(existing);
         if (waitingQueue?.isFull() && !waitingQueue.has(existing?.client_order_no || `manual-${requestId}`)) {
             throw new (require('./payment-waiting-queue').PaymentQueueFullError)();
         }
@@ -365,7 +372,7 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
 
     async function recoverFunding(order, existingGuard = null, knownCfg = null) {
         if ((nextQueryAt.get(order.request_id) || 0) > now()) return;
-        const guard = existingGuard || await store.acquirePaymentLock(manualLockKeys(order.request_id, order.cdk_code));
+        const guard = existingGuard || await store.acquirePaymentLock(recoveryKeys(order));
         if (!guard) return;
         try {
             await guard.assertOwned();
@@ -462,7 +469,7 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
         // allocation, including retry_waiting rows created by older versions.
         await cfg.executionGuard?.assertOwned();
         if (store.reviewManualRetry) order = await store.reviewManualRetry(order.request_id, order.client_order_no);
-        if (!order || order.state !== 'retry_waiting') {
+        if (!order || order.manual_result || order.manual_local_released_at || order.state !== 'retry_waiting') {
             if (order) retrySessions.delete(order.request_id);
             return publicOrder(order);
         }
@@ -546,7 +553,7 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
     async function refresh(requestId, knownCfg = null) {
         const order = await store.getManualOrder(requestId);
         if (!order) throw new ManualOrderError('管理员订单不存在', 404);
-        const guard = await store.acquirePaymentLock(manualLockKeys(requestId, order.cdk_code));
+        const guard = await store.acquirePaymentLock(recoveryKeys(order));
         if (!guard) return get(requestId);
         let background = null;
         try { await guard.assertOwned(); return await refreshOwned(requestId, knownCfg, guard, pending => { background = pending; }); }
@@ -629,7 +636,7 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
                         continue;
                     }
                     if (['preparing','card_pending'].includes(order.state)) {
-                        const guard = await store.acquirePaymentLock(manualLockKeys(order.request_id, order.cdk_code));
+                        const guard = await store.acquirePaymentLock(recoveryKeys(order));
                         if (!guard) continue;
                         try {
                             await guard.assertOwned();
@@ -639,7 +646,7 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
                         continue;
                     }
                     if (order.state === 'prepared') {
-                        const guard = await store.acquirePaymentLock(manualLockKeys(order.request_id, order.cdk_code));
+                        const guard = await store.acquirePaymentLock(recoveryKeys(order));
                         if (!guard) continue;
                         try {
                             await guard.assertOwned();

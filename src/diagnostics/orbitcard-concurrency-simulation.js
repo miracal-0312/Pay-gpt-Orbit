@@ -16,8 +16,9 @@ function taskCount(value = 10) {
 async function simulateSelection({ snapshot, count, available, planType, priceFor, jobPrefix }) {
     count = taskCount(count);
     const saved = snapshot.saved.map(row => ({ ...row }));
+    const { listed, detailed, excludedCardIds } = snapshot;
     let remaining = available, tail = Promise.resolve(), waiting = 0;
-    const decide = jobKey => decideCards({ ...snapshot, saved, jobKey, planType, priceFor });
+    const decide = jobKey => decideCards({ saved, listed, detailed, excludedCardIds, jobKey, planType, priceFor });
     const initial = decide(`${jobPrefix}-initial`);
     const initialCard = initial.candidates[0]?.card.card_id || null;
     const initialWaiting = Object.fromEntries([...new Set(initial.waiting.map(row => row.reason))]

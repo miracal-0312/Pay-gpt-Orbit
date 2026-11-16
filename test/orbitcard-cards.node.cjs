@@ -870,7 +870,7 @@ async function runPaymentCore({ plan = 'plus', balance = 50, empty = false, resu
     return { ...f, requests, notices, waitingQueue };
 }
 
-test('a card-declined subscription opens and funds a replacement then completes the original retry chain', async () => {
+test('a card-declined subscription with no healthy alternative opens one funded replacement and completes its retry', async () => {
     const f = await runPaymentCore({ result: ['failed', 'success'], failureCode: 'card_declined' });
     assert.equal(f.db.tasks.length, 2);
     assert.equal(f.db.tasks.at(-1).orbitcard_state, 'success');
@@ -879,7 +879,7 @@ test('a card-declined subscription opens and funds a replacement then completes 
     assert.equal(submissions.length, 2);
     assert.notEqual(submissions[0].body.card_id, submissions[1].body.card_id);
     assert.equal(f.calls.filter(call => call.operation === 'createCard').length, 1);
-    assert.equal(f.calls.filter(call => call.operation === 'rechargeCard').length, 1);
+    assert.equal(f.calls.filter(call => call.operation === 'rechargeCard').length, 0);
     assert.equal(f.db.issues[0].replacement_for_job_key, f.db.tasks[0].job_key);
     assert.equal(f.notices.length, 1);
 });
@@ -1148,20 +1148,19 @@ test('payment core uses three different cards for confirmed card failures and st
     assert.ok(f.db.cdks[0].used_at);
     const writes=f.requests.filter(row=>row.operation==='createSubscription');
     assert.equal(writes.length,3,f.db.tasks.at(-1).message);assert.equal(new Set(writes.map(row=>row.key)).size,3);
-    assert.deepEqual(writes.map(row=>row.body.card_id),[42,...f.db.issues.map(row=>row.card_id)]);
+    assert.deepEqual(writes.map(row=>row.body.card_id),[42,43,44]);
     assert.equal(new Set(writes.map(row=>row.body.card_id)).size,3);
     assert.deepEqual(f.db.tasks.map(row=>row.orbitcard_retry_attempt_no),[1,2,3]);
     assert.ok(f.db.cards.every(row=>(row.authorization_count===0||row.authorization_count==null)&&!row.active_job));
-    assert.equal(f.calls.filter(row=>row.operation==='createCard').length,2);
-    assert.equal(f.calls.filter(row=>row.operation==='rechargeCard').length,2);
-    assert.deepEqual(f.db.fundings.map(row=>row.amount),['20.00','20.00']);
-    assert.deepEqual(f.db.issues.map(row=>row.replacement_for_job_key),f.db.tasks.slice(0,2).map(row=>row.job_key));
+    assert.equal(f.calls.filter(row=>row.operation==='createCard').length,0);
+    assert.equal(f.calls.filter(row=>row.operation==='rechargeCard').length,0);
+    assert.deepEqual(f.db.fundings,[]); assert.deepEqual(f.db.issues,[]);
     assert.ok(writes.every(row=>f.db.cards.find(card=>card.card_id===row.body.card_id).disabled_at));
-    assert.ok(f.db.cards.filter(card=>[43,44,45].includes(card.card_id)).every(card=>!card.disabled_at&&!card.active_job));
+    assert.ok(!f.db.cards.find(card=>card.card_id===45).disabled_at);
     // Pool maintenance may replace the last failed card, but it cannot restart
     // the settled payment chain or reset its persisted attempt budget.
     await f.service.recover(cfg);
-    assert.equal(f.calls.filter(row=>row.operation==='createCard').length,3);
+    assert.equal(f.calls.filter(row=>row.operation==='createCard').length,1);
     assert.equal(f.requests.filter(row=>row.operation==='createSubscription').length,3);
     assert.equal(f.db.tasks.length,3);assert.equal(f.db.tasks.at(-1).orbitcard_state,'support_locked');
 });
@@ -1173,8 +1172,9 @@ test('a successful second or third card stops the retry chain and sends one fina
         assert.equal(f.db.tasks.at(-1).orbitcard_state,'success');assert.equal(f.notices.length,1);
         assert.equal(f.notices[0].status,'success');
         assert.ok(f.db.tasks.every(task=>task.orbitcard_retry_root_job_key===f.db.tasks[0].job_key));
-        assert.equal(f.calls.filter(row=>row.operation==='createCard').length,result.length-1);
-        assert.equal(f.calls.filter(row=>row.operation==='rechargeCard').length,result.length-1);
+        assert.equal(f.calls.filter(row=>row.operation==='createCard').length,0);
+        assert.equal(f.calls.filter(row=>row.operation==='rechargeCard').length,0);
+        assert.deepEqual(f.requests.filter(row=>row.operation==='createSubscription').map(row=>row.body.card_id),[42,43,44].slice(0,result.length));
     }
 });
 
@@ -1185,9 +1185,9 @@ test('an unknown second-card result retains that order and cannot spend the thir
     const secondCard=f.requests.filter(row=>row.operation==='createSubscription')[1].body.card_id;
     assert.equal(f.db.cards.find(card=>card.card_id===secondCard).active_job,f.db.tasks.at(-1).job_key);
     assert.equal(f.db.cards.find(card=>card.card_id===secondCard).disabled_at,undefined);
-    assert.equal(f.calls.filter(row=>row.operation==='createCard').length,1);
-    assert.equal(f.calls.filter(row=>row.operation==='rechargeCard').length,1);
-    assert.equal(f.db.fundings[0].card_id,secondCard);assert.equal(f.db.fundings[0].state,'ready');
+    assert.equal(f.calls.filter(row=>row.operation==='createCard').length,0);
+    assert.equal(f.calls.filter(row=>row.operation==='rechargeCard').length,0);
+    assert.equal(secondCard,43); assert.equal(f.db.fundings.length,0);
     assert.ok(f.db.cdks[0].used_at);
 });
 
@@ -1605,5 +1605,103 @@ test('busy and inactive cards never cause automatic opening',async()=>{
         if(status==='ACTIVE')f.db.cards[0].active_job='other';const task=await f.claim();
         await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),status==='ACTIVE'?/正在使用|授权记录同步/:/没有可用|原开卡/);
         assert.equal(f.calls.filter(call=>['createCard','rechargeCard'].includes(call.operation)).length,0);
+    }
+});
+
+test('existing cards ignore opening-catalog failures and opening-only channel, BIN and amount restrictions',async()=>{
+    const cases=[
+        {name:'catalog unavailable',catalog:async()=>{throw new Error('opening catalog unavailable');}},
+        {name:'empty catalog',catalog:async()=>({success:true,data:{list:[]}})},
+        {name:'old product absent',productCode:'withdrawn-product',catalog:async()=>({success:true,data:{list:[{...product,product_code:'new-product'}]}})},
+        {name:'missing card product',productCode:'',catalog:async()=>({success:true,data:{list:[product]}})},
+        {name:'unselected channel',config:{orbitcard_product_codes:['different-channel']}},
+        {name:'unselected BIN',config:{orbitcard_bins:['99999999']}},
+        {name:'low opening maximum',config:{orbitcard_max_initial_amount:'1.00'}},
+        {name:'large retained reserve',catalog:async()=>({success:true,data:{list:[{...product,min_retained_balance:'9999.00'}]}})}
+    ];
+    for(const scenario of cases)for(const balance of [20,5]) {
+        const f=serviceFixture({getProductCode:scenario.catalog||(async()=>assert.fail('Opening-only configuration must not cause a product lookup'))}),card=await f.addCard();
+        f.setCards([{...card,status:'ACTIVE',balance,product_code:scenario.productCode??card.product_code}]);
+        if(balance===20)f.setAccount(0);
+        const task=await f.claim(),config={...cfg,...scenario.config};
+        assert.equal(await f.service.allocate(config,task.jobKey,'plus'),42,scenario.name);
+        assert.equal(f.calls.some(call=>call.operation==='getProductCode'),false,scenario.name);
+        assert.equal(f.calls.some(call=>call.operation==='createCard'),false,scenario.name);
+        const fundings=f.calls.filter(call=>call.operation==='rechargeCard');
+        assert.deepEqual(fundings.map(call=>call.body),balance===20?[]:[{card_id:42,amount:'20.00'}],scenario.name);
+        assert.equal(f.db.fundings.length,balance===20?0:1);
+        if(balance<20)assert.equal(f.db.fundings[0].target_balance,'20.00000000');
+    }
+});
+
+test('opening independence does not admit disabled, retiring, occupied or inactive cards',async()=>{
+    const f=serviceFixture({getProductCode:async()=>assert.fail('No new card is needed')}),cards=[];
+    for(let id=42;id<=46;id++)cards.push({...await f.addCard(id),status:id===45?'FROZEN':'ACTIVE',balance:20});
+    f.setCards(cards);
+    Object.assign(f.db.cards.find(card=>card.card_id===42),{disabled_at:'2026-11-17',disabled_code:'manual'});
+    Object.assign(f.db.cards.find(card=>card.card_id===43),{retirement_key:'existing-retirement'});
+    Object.assign(f.db.cards.find(card=>card.card_id===44),{active_job:'another-order'});
+    const task=await f.claim();
+    assert.equal(await f.service.allocate({...cfg,orbitcard_product_codes:['unselected'],orbitcard_bins:['99999999'],
+        orbitcard_max_initial_amount:'1.00'},task.jobKey,'plus'),46);
+    assert.equal(f.db.cards.find(card=>card.card_id===44).active_job,'another-order');
+    assert.ok(f.db.cards.find(card=>card.card_id===42).disabled_at);
+    assert.equal(f.db.cards.find(card=>card.card_id===43).retirement_key,'existing-retirement');
+    assert.equal(f.calls.some(call=>['getProductCode','createCard','rechargeCard','deleteCard'].includes(call.operation)),false);
+});
+
+test('healthy inventory is used before a declined card replacement even when the opening catalog is down',async()=>{
+    const f=await runPaymentCore({result:['failed','success'],failureCode:'card_declined',count:2,balance:20,
+        cardOverrides:{getProductCode:async()=>assert.fail('Healthy retry inventory must not query opening products')}});
+    assert.equal(f.db.tasks.at(-1).orbitcard_state,'success');
+    assert.deepEqual(f.requests.filter(call=>call.operation==='createSubscription').map(call=>call.body.card_id),[42,43]);
+    assert.ok(f.db.cards.find(card=>card.card_id===42).disabled_at);
+    assert.equal(f.calls.some(call=>['getProductCode','createCard','rechargeCard'].includes(call.operation)),false);
+    assert.equal(f.db.issues.length,0);assert.equal(f.db.fundings.length,0);assert.equal(f.notices.length,1);
+});
+
+test('actual replacement still enforces the selected opening channel, BIN and maximum initial amount',async()=>{
+    for(const config of [{orbitcard_product_codes:['other-product']},{orbitcard_bins:['99999999']},{orbitcard_max_initial_amount:'1.00'}]) {
+        const f=serviceFixture(),card=await f.addCard(),old=await f.claim();
+        f.setCards([{...card,status:'ACTIVE',balance:20}]);
+        Object.assign(f.db.cards[0],{disabled_at:'2026-11-17',disabled_code:'card_declined',disabled_job_key:old.jobKey});
+        const task=await f.claim();
+        await assert.rejects(f.service.allocate({...cfg,...config},task.jobKey,'plus'),/没有符合|上限|20 USD|产品/);
+        assert.ok(f.calls.some(call=>call.operation==='getProductCode'));
+        assert.equal(f.calls.some(call=>['createCard','rechargeCard'].includes(call.operation)),false);
+        assert.equal(f.db.issues.length,0);assert.equal(f.db.fundings.length,0);
+    }
+});
+
+test('a historical ready issue uses its original card without consulting current opening metadata',async()=>{
+    for(const balance of [20,5]) {
+        const f=serviceFixture({getProductCode:async()=>assert.fail('Ready original card must not query opening products')}),card=await f.addCard(),task=await f.claim();
+        f.setCards([{...card,status:'ACTIVE',balance,product_code:'withdrawn-product'}]);
+        await f.seedHistoricalIssue({issue_key:'original-ready',job_key:task.jobKey,plan_type:'plus',product_code:'withdrawn-product',amount:'20.00',
+            credential_hash:crypto.createHash('sha256').update(cfg.api_key).digest('hex'),request_body:JSON.stringify({product_code:'withdrawn-product',amount:'20.00',quantity:1})});
+        await f.store.cardMethods(cfg.base_url).completeIssue({issue_key:'original-ready'},card);
+        const before=structuredClone(f.db.issues[0]);
+        assert.equal(await f.service.allocate({...cfg,orbitcard_product_codes:['new-channel'],orbitcard_bins:['99999999'],
+            orbitcard_max_initial_amount:'1.00'},task.jobKey,'plus'),42);
+        assert.deepEqual(f.db.issues[0],before);
+        assert.equal(f.calls.some(call=>['getProductCode','createCard'].includes(call.operation)),false);
+        assert.deepEqual(f.calls.filter(call=>call.operation==='rechargeCard').map(call=>call.body),balance===20?[]:[{card_id:42,amount:'20.00'}]);
+    }
+});
+
+test('historical ready funding preserves its original higher target, amount, body and key without product lookup',async()=>{
+    for(const balance of [20,21]) {
+        const f=serviceFixture({getProductCode:async()=>assert.fail('Original funding must not query opening products')}),card=await f.addCard(),task=await f.claim();
+        f.setCards([{...card,status:'ACTIVE',balance,product_code:'withdrawn-product'}]);
+        const methods=f.store.cardMethods(cfg.base_url);await methods.reserveCard(42,task.jobKey,'plus');
+        await methods.createFunding({funding_key:'historical-key',job_key:task.jobKey,plan_type:'plus',card_id:42,
+            credential_hash:crypto.createHash('sha256').update(cfg.api_key).digest('hex'),
+            request_body:JSON.stringify({card_id:42,amount:'16.00'}),amount:'16.00',target_balance:'21.00'});
+        await methods.updateFunding('historical-key',{state:'ready',order_no:'original-flow'});
+        const before=structuredClone(f.db.fundings[0]),config={...cfg,orbitcard_product_codes:['different-channel'],orbitcard_max_initial_amount:'1.00'};
+        if(balance===20)await assert.rejects(f.service.allocate(config,task.jobKey,'plus'),/原补款卡片尚未满足支付金额/);
+        else assert.equal(await f.service.allocate(config,task.jobKey,'plus'),42);
+        assert.deepEqual(f.db.fundings[0],before);assert.equal(f.db.cards[0].active_job,task.jobKey);
+        assert.equal(f.calls.some(call=>['getProductCode','createCard','rechargeCard'].includes(call.operation)),false);
     }
 });

@@ -34,7 +34,7 @@
 </div><div class="table-wrap"><table><thead><tr><th>卡密</th><th>套餐</th><th>状态</th><th>出库</th><th>操作</th></tr></thead><tbody id="cdkRows"><tr><td colspan="5">打开此页面后读取记录</td></tr></tbody></table></div><small>列表最多显示当前筛选下最近 2000 条；请在上方配置导出范围和出库操作。Orbitcard 确认充值成功后显示已核销。点击「修改状态」可编辑出库状态，也可填写备注并将卡密保存为已核销；核销后系统自动通知商城。已出库或有使用记录的卡密不能删除。</small></div>
 </section>
 <section id="manual" class="view" hidden>
-<div class="panel"><div class="row between"><div><h2>上传 Session 手动开通</h2><p class="muted">提交时实时读取卡台账户、产品和卡片；使用状态正常且未停用的卡，需要补款时按本次套餐完整金额充值。账户余额不足时停止并提示联系客服。明确卡片失败后停用原卡并按所选渠道补开，每条支付链最多尝试 3 次。</p></div><button id="refreshManualCatalog" type="button" class="secondary">刷新套餐</button></div>
+<div class="panel"><div class="row between"><div><h2>上传 Session 手动开通</h2><p class="muted">提交时实时读取卡台账户和现有卡片；使用状态正常且未停用的卡，需要补款时按本次套餐完整金额充值。账户余额不足时停止并提示联系客服。明确卡片失败后停用原卡并按所选渠道补开，每条支付链最多尝试 3 次。</p></div><button id="refreshManualCatalog" type="button" class="secondary">刷新套餐</button></div>
 <form id="manualForm" class="stack manual-form">
 <p class="config-note">人工交付会真实扣款，成功后核销 CDK。无需 CDK 的测试请前往 <button type="button" class="secondary" data-open-diagnostic="payment">支付预检与测试</button>。</p>
 <div class="manual-grid"><label>开通套餐<select id="manualPlan" required><option value="">请先读取卡台套餐</option></select></label><label>原请求编号（仅继续准备时填写）<input id="manualRetryId" placeholder="首次提交自动生成；恢复原单时填写原编号" autocomplete="off"></label></div>
@@ -56,7 +56,7 @@
 <label>Pro 100（USD）<input id="planPrice_pro100" inputmode="decimal" maxlength="23" placeholder="留空暂停该套餐"></label>
 <label>Pro 200（USD）<input id="planPrice_pro200" inputmode="decimal" maxlength="23" placeholder="留空暂停该套餐"></label>
 <label>Pro 500（USD）<input id="planPrice_pro500" inputmode="decimal" maxlength="23" placeholder="留空暂停该套餐"></label>
-</div><p class="config-note">支付前要求卡片余额达到此处 USD 金额加产品最低留存余额。需要补款时，充值本次所选套餐的完整 USD 金额；账户余额不足时停止并提示联系客服。此金额与平台收取的 USDT 服务费不同，不是最终扣款报价；实际支付以原订单结果为准。修改地区或平台价格变化时请同步核对金额。点击下方“保存配置”生效。</p></div>
+</div><p class="config-note">支付前要求卡片余额达到此处套餐 USD 金额，不叠加开卡产品最低留存。需要补款时，充值本次所选套餐的完整 USD 金额；账户余额不足时停止并提示联系客服。此金额与平台收取的 USDT 服务费不同，不是最终扣款报价；实际支付以原订单结果为准。修改地区或平台价格变化时请同步核对金额。点击下方“保存配置”生效。</p></div>
 <div class="config-section payment-regions-section">
 <div class="row between"><div><h3>默认充值地区</h3><p class="muted">四档套餐独立设置，对用户兑换和管理员手动开通同时生效。</p></div><button id="refreshPaymentRegions" type="button" class="secondary">刷新可选地区</button></div>
 <div class="payment-region-grid">
@@ -68,7 +68,7 @@
 <p id="paymentRegionState" class="muted" role="status">选择后点击下方“保存配置”。</p>
 <p class="config-note">“平台默认”不传地区参数，由 Orbitcard 决定。指定地区在支付准备前实时核验，停用时会停止本次支付。配置只用于尚未提交的新订阅，已提交订单继续查询原单。最终扣款以平台订单结果为准。</p>
 </div>
-<div class="config-section"><h3>选卡与开卡设置</h3>
+<div class="config-section"><h3>开卡偏好与服务费设置</h3>
 <div class="row between"><p class="config-note">订阅出现明确的卡片错误后停用原卡并自动补开。成功订单数保留为统计，卡片可用性按错误记录与实时状态判定。</p><button id="refreshOpeningProducts" type="button" class="secondary">读取渠道与卡段</button></div>
 <div class="config-grid">
 <label>开卡渠道（product_code，可多选）<select id="productCodes" multiple size="6" aria-describedby="openingProductsState"></select></label>
@@ -78,7 +78,7 @@
 </div>
 <p id="openingProductsState" class="config-note" role="status">从卡台读取选项。按住 Ctrl 或 Command 可多选；两项分别留空表示全部，渠道与卡段同时选择时取交集。选择后点击“保存配置”。</p>
 <div class="card-preview"><div class="row between"><strong>平台卡片 ID（自动读取）</strong><button id="refreshCardIds" type="button" class="secondary">重新读取</button></div><p id="cardIdPreview" class="muted" role="status">配置凭据后读取。</p></div>
-<p class="muted">补开和手动开卡均使用所选渠道与卡段，每张首充 20 USD。补开结果待确认时查询原申请，卡片就绪后继续订单。</p></div>
+<p class="muted">渠道、BIN 和开卡产品规则仅用于手动开卡与错误补开，每张首充 20 USD；不筛选现有支付卡，也不限制现有卡的充值使用。补开结果待确认时查询原申请，卡片就绪后继续订单。</p></div>
 <div class="config-footer"><label class="check"><input id="apiEnabled" type="checkbox">开放新充值订单</label><button type="submit">保存配置</button></div>
 </form></div>
 </section>
@@ -120,7 +120,7 @@
 <p id="cardSyncState" class="muted" role="status">当前显示本地快照，请同步卡片与订单。成功次数仅统计当前 API 可读取并确认的会员订单，API 不可见的网页订单不计入。</p>
 <div class="panel"><h2>平台卡片</h2><div class="row"><button id="syncCards" class="secondary">同步卡片与订单</button><button id="loadCards" class="secondary">刷新本地记录</button></div><p class="muted">只读取卡片 ID、尾号、状态和余额，不获取完整卡号或 CVV。订阅出现明确的卡片错误后持久化停用并自动补开。成功会员订单次数按原订单号去重统计。管理员可填写原因后人工停用或恢复使用，操作需要二级验证并记录日志。渠道与 BIN 在 <a href="#orbitcard">Orbitcard 配置</a> 中多选。</p><div class="table-wrap"><table class="card-table"><thead><tr><th>卡片</th><th>状态 / 余额</th><th>成功会员订单次数</th><th>任务占用</th><th>使用状态 / 对账</th></tr></thead><tbody id="cardRows"><tr><td colspan="5">打开此页面后读取记录</td></tr></tbody></table></div></div>
 <div class="panel"><h2>卡片消费交易（交易对账）</h2><p class="muted">查询会读取完整分页统计授权流水，指定页明细用于对账；这些流水不参与卡片支付次数限制。授权成功计一次，清算、退款、撤销和拒付不再增加次数；已累计的成功授权不回退。消费授权不代表订阅开通成功，不自动核销 CDK 或退款。需要 transactions:read 权限。</p><div class="row"><label>卡 ID（自动读取）<select id="transactionCardId"><option value="">请先同步平台卡片</option></select></label><label>页码<input id="transactionPage" type="number" min="1" value="1" inputmode="numeric"></label><button id="loadTransactions" class="secondary">查询交易</button></div><pre id="cardTransactions">尚未查询。</pre></div>
-<div class="panel"><h2>申请卡片</h2><p>每张新卡固定首充 20 USD，只选择最低首充不高于 20 的可用产品。卡片加入共享卡池（本地数量不限），供各套餐使用。充值任务使用状态正常且未停用的卡，成功次数仅作统计。卡内不足时按本次套餐完整 USD 金额补款，支付前核对最低留存要求；账户余额不足时提示联系客服。</p><form id="applyCardForm" class="row"><button>首充 20 USD 申请一张卡</button></form><p class="muted">产品按后台配置自动选择，并在申请时核对库存和首充要求。会员充值所需的套餐支付金额请在“Orbitcard 配置”中填写。</p><p id="cardApplicationState" role="status" aria-live="polite"></p></div>
+<div class="panel"><h2>申请卡片</h2><p>每张新卡固定首充 20 USD，只选择最低首充不高于 20 的可用产品。卡片加入共享卡池（本地数量不限），供各套餐使用。充值任务使用状态正常且未停用的卡，成功次数仅作统计。卡内不足时按本次套餐完整 USD 金额补款，支付前核对余额足额；账户余额不足时提示联系客服。</p><form id="applyCardForm" class="row"><button>首充 20 USD 申请一张卡</button></form><p class="muted">产品按后台开卡偏好自动选择，仅在申请时核对产品库存和首充要求，不限制现有卡充值。会员充值所需的套餐支付金额请在“Orbitcard 配置”中填写。</p><p id="cardApplicationState" role="status" aria-live="polite"></p></div>
 <div class="panel"><div class="row between"><h2>开卡申请记录</h2><button id="refreshIssues" class="secondary">确认原开卡 / 补款</button></div><p class="muted">结果待确认时保留同一申请身份，不更换产品或幂等键重开。</p><div class="table-wrap"><table><thead><tr><th>时间 / 申请标识</th><th>产品 / 首充 USD</th><th>用途 / 状态</th><th>平台订单 / 卡 ID</th></tr></thead><tbody id="issueRows"><tr><td colspan="4">打开此页面后读取记录</td></tr></tbody></table></div></div>
 <div class="panel"><h2>卡片补款流水</h2><p class="muted">补款成功后还会核对卡片可用余额。未知结果保留原补款、卡片占用及 CDK；已知订单号只匹配原充值流水，不按金额或时间猜测。</p><div class="table-wrap"><table><thead><tr><th>时间 / 任务</th><th>卡 ID / 本次补款 USD</th><th>状态 / 平台订单</th><th>资金快照</th></tr></thead><tbody id="fundingRows"><tr><td colspan="4">打开此页面后读取记录</td></tr></tbody></table></div></div>
 </section>
@@ -156,10 +156,15 @@
 <dialog id="orderManualDialog" class="cdk-status-dialog" aria-labelledby="orderManualTitle">
 <div><h2 id="orderManualTitle">人工处理订单</h2><code id="orderManualCode"></code></div>
 <p id="orderManualState" role="status">正在读取订单状态…</p>
-<small>所有订单均可记录处理备注。人工确认不代表平台付款成功；未决资金保留占用，不能重复充值。保存需要二级验证。</small>
+<p id="orderManualResult" role="status">正在读取已登记的人工结果…</p>
+<p id="orderManualSettlement" role="status"></p>
+<small>已用其他卡完成人工交付时，可登记人工交付完成。人工确认不代表平台付款成功，默认保留未决占用并核对原单。保存需要二级验证。</small>
 <ul id="orderManualAvailability"></ul>
 <form id="orderManualForm"><fieldset id="orderManualFields" class="stack" disabled>
 <label>处理操作<select id="orderManualAction" required><option value="">读取后选择操作</option></select></label>
+<label class="check"><input id="orderManualRelease" type="checkbox" disabled>同时释放原订单本地占用</label>
+<p id="orderManualReleaseState" role="status"></p>
+<small>释放仅解除本地占用，不会退款或撤销卡台请求；原扣款仍可能完成，原资金记录继续保留核对。人工成功的 CDK 仍保持已核销；人工失败并选择释放时，才释放未核销的 CDK。</small>
 <label>处理原因<textarea id="orderManualReason" maxlength="255" required placeholder="填写核对依据、处理结果或后续跟进说明"></textarea></label>
 <button id="orderManualSave" type="submit">保存处理</button>
 </fieldset></form>

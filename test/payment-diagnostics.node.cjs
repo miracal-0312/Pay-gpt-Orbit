@@ -30,7 +30,11 @@ function fixture() {
             return {success:true,data:{plan_type:body.plan_type,payment_regions:[{code:'PH',default:true},{code:'US'}]}};
         } };
     const cards = { ...cardApi,
-        products: async config => { calls.push(['getProductCode',config.auditJobKey]); return [product]; },
+        products: async config => {
+            calls.push(['getProductCode',config.auditJobKey]);
+            if (state.productError) throw state.productError;
+            return state.products || [product];
+        },
         listCards: async config => { calls.push(['getCardList',config.auditJobKey]); return state.live; },
         cardDetail: async (config,id) => {
             calls.push(['cardDetail',config.auditJobKey,{card_id:id}]);
@@ -53,6 +57,57 @@ function managedPool(count=5,balance='20.00') {
     f.state.rows=f.state.live.map(card=>({card_id:card.card_id,successful_order_count:0}));
     return f;
 }
+
+test('preflight and concurrency use existing cards independently of opening catalogs and filters', async () => {
+    for (const stage of ['cards', 'concurrency', 'full']) for (const catalog of ['unavailable', 'empty', 'restricted']) {
+        const f = fixture();
+        Object.assign(f.cfg, { orbitcard_product_codes: ['new-only'], orbitcard_bins: ['999999'], orbitcard_max_initial_amount: '1.00' });
+        if (catalog === 'unavailable') f.state.productError = new Error('Opening catalog unavailable');
+        if (catalog === 'empty') f.state.products = [];
+        if (catalog === 'restricted') f.state.products = [{ product_code: 'new-only', bin: '000000', remaining: 0,
+            min_initial_amount: '1000.00', min_retained_balance: '1000.00' }];
+        // Legacy issued cards may have no product or BIN in their current detail.
+        Object.assign(f.state.live[0], { product_code: '', bin: '', balance_amount: '16.00' });
+        f.state.available = '0.00';
+        const before = structuredClone(f.state.rows);
+        const result = await f.service.preflight({ stage, plan_type: 'plus', concurrent_tasks: 2, session });
+        assert.equal(result.passed, true, `${stage}: ${catalog}`);
+        if (stage === 'concurrency') {
+            assert.equal(result.result.concurrency.summary.pay, 1);
+            assert.equal(result.result.concurrency.budget.reserved, '0.00000000');
+        } else {
+            assert.equal(result.result.selection.action, 'pay');
+            assert.equal(result.result.selection.card_id, 42);
+            assert.equal(result.result.selection.funding_amount, '0.00');
+        }
+        assert.equal(f.calls.some(([operation]) => operation === 'getProductCode'), false);
+        assert.deepEqual(f.state.rows, before); assert.deepEqual(f.writes, []);
+    }
+});
+
+test('preflight and simulation target only each plan price and budget a full rounded plan topup', async () => {
+    for (const [index, plan] of Object.keys(PROVIDER_PLANS).entries()) {
+        const price = `${16 + index}.00000001`, topup = `${16 + index}.01`;
+        const f = managedPool(2, price);
+        f.cfg.orbitcard_plan_prices[plan] = price;
+        f.state.live[1].balance_amount = '5.00';
+        f.state.product.min_retained_balance = '1000.00';
+        f.state.available = topup;
+        const cards = await f.service.preflight({ stage: 'cards', plan_type: plan });
+        assert.equal(cards.passed, true); assert.equal(cards.result.selection.action, 'pay');
+        const sim = (await f.service.preflight({ stage: 'concurrency', plan_type: plan, concurrent_tasks: 2 })).result.concurrency;
+        assert.equal(sim.summary.pay, 1); assert.equal(sim.summary.fund, 1);
+        assert.equal(sim.tasks[1].funding_amount, topup);
+        assert.equal(sim.budget.remaining, '0.00000000');
+        f.state.live[0].balance_amount = '5.00';
+        const funding = await f.service.preflight({ stage: 'cards', plan_type: plan });
+        assert.equal(funding.passed, true); assert.equal(funding.result.selection.funding_amount, topup);
+        f.state.available = `${16 + index}.00`;
+        const insufficient = await f.service.preflight({ stage: 'cards', plan_type: plan });
+        assert.equal(insufficient.passed, false); assert.equal(insufficient.result.selection.account_check, 'failed');
+        assert.deepEqual(f.writes, []);
+    }
+});
 
 test('concurrent preflight assigns distinct cards and admits just one waiting task', async () => {
     const f = managedPool(3);

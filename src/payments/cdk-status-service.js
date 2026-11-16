@@ -25,8 +25,12 @@ module.exports = function createCdkStatusService({ runQuery, runExecute, withTra
                 const options = { connection };
                 const [code] = await runQuery('SELECT * FROM cdk_codes WHERE cdk_code = ? FOR UPDATE', [cdk], options);
                 if (!code || !code.is_active) fail(404, '卡密不存在或已停用');
-                const [task] = await runQuery('SELECT * FROM task_logs WHERE cdk_code = ? ORDER BY id DESC LIMIT 1 FOR UPDATE', [code.cdk_code], options);
-                const [order] = await runQuery('SELECT * FROM orbitcard_admin_orders WHERE cdk_code = ? ORDER BY created_at DESC LIMIT 1 FOR UPDATE', [code.cdk_code], options);
+                const [taskRecord] = await runQuery('SELECT * FROM task_logs WHERE cdk_code = ? ORDER BY id DESC LIMIT 1 FOR UPDATE', [code.cdk_code], options);
+                const [orderRecord] = await runQuery('SELECT * FROM orbitcard_admin_orders WHERE cdk_code = ? ORDER BY created_at DESC LIMIT 1 FOR UPDATE', [code.cdk_code], options);
+                // Match the public CDK projection: a released historical result
+                // cannot reclaim a code or conflict with its current status.
+                const task = taskRecord?.manual_local_released_at ? null : taskRecord;
+                const order = orderRecord?.manual_local_released_at ? null : orderRecord;
                 const redeemed = Boolean(code.manual_redeemed_at) || order?.state === 'success'
                     || (task?.status === 'success' && (!task.orbitcard_state || task.orbitcard_state === 'success'));
                 const occupied = Boolean(code.used_at) || ['running', 'manual'].includes(task?.status)

@@ -5,7 +5,7 @@ const { cdkLockKey, manualLockKeys } = require('./payment-execution-lock');
 class PaymentStoppedError extends CardPreparationError {}
 
 function requiresManualHandling(task) {
-    return Boolean(task?.manual_redeemed_at) || task?.status === 'manual'
+    return Boolean(task?.manual_redeemed_at || task?.manual_result || task?.manual_local_released_at) || task?.status === 'manual'
         || ['manual', 'support_locked', 'card_pending', 'funding_pending'].includes(task?.orbitcard_state);
 }
 
@@ -13,25 +13,33 @@ module.exports = function createPaymentAutomation({ runQuery }) {
     async function paymentOwner(jobKey) {
         if (!jobKey) return { allowed: true, keys: [] }; // Standalone administrator card application.
         const manual = jobKey.startsWith('manual-');
-        const [owner] = await runQuery(manual
+        let [owner] = await runQuery(manual
             ? 'SELECT * FROM orbitcard_admin_orders WHERE client_order_no = ? LIMIT 1'
             : 'SELECT * FROM task_logs WHERE job_key = ? LIMIT 1', [jobKey]);
+        if (!owner && manual) {
+            // Administrator retries retain one request row but change its
+            // client identity. Old replacement intents still share that lock.
+            const request = /^manual-([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(?:-attempt-\d+)?$/i.exec(jobKey);
+            if (request) [owner] = await runQuery('SELECT * FROM orbitcard_admin_orders WHERE request_id = ? LIMIT 1', [request[1]]);
+        }
         if (!owner) return { allowed: false, keys: [] };
         const [code] = owner.cdk_code
             ? await runQuery('SELECT * FROM cdk_codes WHERE cdk_code = ? LIMIT 1', [owner.cdk_code]) : [];
         const activeOwner = !owner.cdk_code || Boolean(code?.is_active && !code.manual_redeemed_at);
         const state = manual ? owner.state : owner.orbitcard_state;
-        const allowed = activeOwner
+        const localReleased = Boolean(owner.manual_local_released_at);
+        const allowed = !localReleased && !owner.manual_result && (!manual || owner.client_order_no === jobKey) && activeOwner
             && (manual ? ['preparing', 'prepared', 'funding_waiting', 'submitting', 'pending'].includes(owner.state)
                 : !requiresManualHandling(owner) && ['preparing', 'prepared', 'funding_waiting', 'submitting', 'pending'].includes(owner.orbitcard_state));
         // Stopping new payments must not strand an already submitted debit.
         // Reconciliation only reads the original funding; settlement separately
         // preserves a manually redeemed CDK while releasing its payment card.
-        const canReconcileFunding = (!owner.cdk_code || Boolean(code))
+        const canReconcileFunding = localReleased || (!owner.cdk_code || Boolean(code))
             && ['funding_waiting', 'funding_review', 'funding_pending'].includes(state);
-        const canReconcileIssue = (!owner.cdk_code || Boolean(code)) && state === 'card_pending';
-        return { allowed, canReconcileFunding, canReconcileIssue, state, keys: manual ? manualLockKeys(owner.request_id, owner.cdk_code)
-            : owner.cdk_code ? [cdkLockKey(owner.cdk_code)] : [] };
+        const canReconcileIssue = localReleased || (!owner.cdk_code || Boolean(code)) && state === 'card_pending';
+        return { allowed, canReconcileFunding, canReconcileIssue, localReleased, state,
+            keys: localReleased ? [`reconcile:${jobKey.toLowerCase()}`] : manual ? manualLockKeys(owner.request_id, owner.cdk_code)
+            : owner.cdk_code ? [cdkLockKey(owner.cdk_code)] : [`task:${jobKey.toLowerCase()}`] };
     }
     async function assertPaymentAllowed(jobKey) {
         if (!(await paymentOwner(jobKey)).allowed) {

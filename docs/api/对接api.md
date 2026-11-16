@@ -1,6 +1,6 @@
 # Orbitcard 接入说明
 
-本项目仅支持 Orbitcard HMAC V1。平台协议保留在 [Orbitcard-Open-API-V1.md](Orbitcard-Open-API-V1.md) 及其引用的 [订阅 API](orbitcard-subscription-api-v1.md)，充值状态、异常恢复和审计规则见 [RECHARGE-AUDIT.md](RECHARGE-AUDIT.md)。本项目现有的 14 个出站操作均仍受文档支持；重构移除旧兼容分支和冗余字段，保留现有业务功能。
+本项目仅支持 Orbitcard HMAC V1。平台协议保留在 [Orbitcard-Open-API-V1.md](Orbitcard-Open-API-V1.md) 及其引用的 [订阅 API](orbitcard-subscription-api-v1.md)，充值状态、异常恢复和审计规则见 [RECHARGE-AUDIT.md](../architecture/RECHARGE-AUDIT.md)。本项目现有的 14 个出站操作均仍受文档支持；重构移除旧兼容分支和冗余字段，保留现有业务功能。
 
 ## 服务端配置
 
@@ -8,11 +8,11 @@
 
 后台可为四档套餐分别指定默认充值地区，选项由 `getSubscriptionPaymentRegions` 返回。选择「平台默认」则不传 `payment_region`；指定地区在资金操作前校验可用性，再传入 `createSubscription`。该设置同时适用于用户兑换和管理员开通，已提交订单仍只查询原单。地区接口没有保证返回地区价格，后台金额需要与实际支付地区相符。
 
-选卡读取实时 ACTIVE 状态和余额，并使用卡台已确认的成功会员订单计数，目标余额为后台 USD 支付金额加产品最低留存余额。余额足够的卡直接使用；余额不足则按真实差额补款，并向上取整到美分，账户余额只按此次所需补款金额检查。新卡按 20.00 USD 首充检查账户资金，平台另行校验实际费用；不会因为账户余额低于整档套餐金额而拒绝一张余额已足够的卡。卡 ID 从 `getCardList` 自动读取，不填写固定卡 ID。
+选卡读取实时 ACTIVE 状态、USD 币种和余额，成功会员订单次数仅作统计。现有卡目标余额为后台配置的套餐 USD 金额，不叠加开卡产品最低留存。余额足够的卡直接使用；不足时按本次套餐完整金额补款并向上取整到美分，不计算差额，账户可用余额不足则停止并提示联系客服。历史资金意图继续按已保存的目标余额、金额、正文和幂等键核对，不按新规则重充。新卡按 20.00 USD 首充检查账户资金，平台另行校验实际费用；不会因为账户余额低于整档套餐金额而拒绝一张余额已足够的卡。卡 ID 从 `getCardList` 自动读取，不填写固定卡 ID。
 
-卡片可用性按实时平台状态、持久化停用标记、订单占用及资金条件判断。后台通过 `getProductCode` 读取开卡渠道（`product_code`）与 BIN，多选项保存在 `orbitcard_product_codes` 和 `orbitcard_bins`，同时选择取交集。旧单一产品配置迁移为单项选择。订阅明确出现卡片错误时停用原卡并自动补开，每张首充 20 USD。管理员可在「卡片与开卡」填写原因后人工停用或恢复使用，操作需要二级验证并记录日志。详细规则见 [卡片可用状态与错误补开](ORBITCARD-CARDS.md#卡片可用状态与错误补开)。
+卡片可用性按实时平台状态、持久化停用标记、订单占用及资金条件判断。后台通过 `getProductCode` 读取开卡渠道（`product_code`）与 BIN，多选项保存在 `orbitcard_product_codes` 和 `orbitcard_bins`，同时选择取交集；这些偏好和产品规则仅用于手动开卡与错误补开，不筛选现有卡池，现有卡支付准备和预检不查询开卡产品目录。旧单一产品配置迁移为单项选择。订阅明确出现卡片错误时停用原卡并自动补开，每张首充 20 USD；重试优先使用现有健康卡，不因开卡渠道或库存失败而阻断。管理员可在「卡片与开卡」填写原因后人工停用或恢复使用，操作需要二级验证并记录日志。详细规则见 [卡片可用状态与错误补开](../operations/ORBITCARD-CARDS.md#卡片可用状态与错误补开)。
 
-成功会员订单计数继续通过 `getSubscriptionList` 与 `getSubscription` 核验，并按平台范围及唯一订单号去重保存为统计。选卡及预占读取独立的 `disabled_*` 停用记录。卡片错误会停用原卡并登记持久化补开申请；平台同步保留停用记录。消费授权流水继续用于独立对账，详情见 [卡片规则](ORBITCARD-CARDS.md)。
+成功会员订单计数继续通过 `getSubscriptionList` 与 `getSubscription` 核验，并按平台范围及唯一订单号去重保存为统计。选卡及预占读取独立的 `disabled_*` 停用记录。卡片错误会停用原卡并登记持久化补开申请；平台同步保留停用记录。消费授权流水继续用于独立对账，详情见 [卡片规则](../operations/ORBITCARD-CARDS.md)。
 
 订阅调用需要 `subscriptions:read`、`subscriptions:create` 权限，余额查询另需 `account:read`。卡池还需 `cards:create`、`cards:read`、`cards:manage`、`products:read`、`cards:fund`；交易对账另需 `transactions:read`，不需要敏感卡资料。接口一键测试仅向平台发送读取请求，财务写操作只做本地参数与幂等键模拟，不创建订阅或开卡。卡片协议见 [Open API](Orbitcard-Open-API-V1.md)。
 

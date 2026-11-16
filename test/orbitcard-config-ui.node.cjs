@@ -96,7 +96,8 @@ test('Orbitcard credentials come only from environment, never admin input or old
             assert.match(html, new RegExp(`id="paymentRegion_${plan}"`));
             assert.match(html, new RegExp(`id="planPrice_${plan}"`));
         }
-        assert.match(html, /USD 金额加产品最低留存余额/);
+        assert.match(html, /套餐 USD 金额，不叠加开卡产品最低留存/);
+        assert.match(html, /渠道、BIN 和开卡产品规则仅用于手动开卡与错误补开/);
         assert.match(html, /与平台收取的 USDT 服务费不同/);
         assert.doesNotMatch(script, /api_key:\s*\$|api_secret:\s*\$/);
     } finally {

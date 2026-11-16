@@ -167,7 +167,10 @@ test('historical tasks retain reservations and migrations do not drop legacy dat
     const core = {
         runQuery: async sql => {
             if (sql.startsWith('SELECT config_key')) return [{ config_key: 'admin_password_hash', config_value: 'existing' }, { config_key: 'admin_secondary_password_hash', config_value: 'existing' }];
-            if (sql.startsWith('SELECT cdk_code FROM task_logs')) return [{ cdk_code: 'HISTORICAL-CDK' }];
+            if (sql.startsWith('SELECT cdk_code FROM task_logs')) {
+                assert.match(sql, /AND manual_local_released_at IS NULL/, 'startup must not reserve explicitly released historical tasks');
+                return [{ cdk_code: 'HISTORICAL-CDK' }];
+            }
             return [];
         },
         runExecute: async (sql,args) => { executed.push([sql,args]); return { affectedRows: 1 }; },
@@ -177,8 +180,11 @@ test('historical tasks retain reservations and migrations do not drop legacy dat
     await store.ensureReady();
     assert.ok(executed.some(([sql]) => sql.includes('used_at = COALESCE(used_at')));
     assert.ok(executed.some(([sql]) => sql.includes("status = 'manual'")));
+    assert.ok(executed.filter(([sql]) => sql.startsWith('UPDATE task_logs')).every(([sql]) => sql.includes('AND manual_local_released_at IS NULL')));
     assert.ok(executed.every(([sql]) => !/DROP|TRUNCATE|used_at = NULL/.test(sql)));
-    assert.ok(columns.every(([table]) => ['app_config','cdk_codes','task_logs','orbitcard_admin_orders','orbitcard_managed_cards','orbitcard_card_uses','orbitcard_card_issues'].includes(table)));
+    assert.ok(columns.every(([table]) => ['app_config','cdk_codes','task_logs','orbitcard_admin_orders','orbitcard_managed_cards','orbitcard_card_uses','orbitcard_card_issues','orbitcard_card_fundings','order_manual_actions'].includes(table)));
+    assert.ok(columns.some(([table, column]) => table === 'orbitcard_card_fundings' && column === 'local_released_at'));
+    assert.ok(columns.some(([table, column]) => table === 'order_manual_actions' && column === 'release_local_hold'));
 });
 test('new tasks store only the account preview and never a submitted Session', async () => {
     let insert;

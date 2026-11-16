@@ -39,19 +39,27 @@ async function initializeBaseData() {
 
 async function ensureLegacyColumns() {
     // Add only fields needed by this service. Existing historical tables are never dropped.
+    const manualColumns = { manual_result: 'VARCHAR(16) NULL', manual_result_reason: 'VARCHAR(255) NULL',
+        manual_result_by: 'VARCHAR(128) NULL', manual_result_at: 'DATETIME(3) NULL',
+        manual_local_released_at: 'DATETIME(3) NULL', manual_local_released_by: 'VARCHAR(128) NULL',
+        manual_local_release_reason: 'VARCHAR(255) NULL' };
+    const localReleaseColumns = { local_released_at: 'DATETIME(3) NULL', local_released_by: 'VARCHAR(128) NULL',
+        local_release_reason: 'VARCHAR(255) NULL' };
     const columns = {
         orbitcard_managed_cards: { successful_order_count: 'INT UNSIGNED NOT NULL DEFAULT 0', authorization_count: 'INT UNSIGNED NULL', authorizations_checked_at: 'DATETIME(3) NULL',
             retirement_key: 'VARCHAR(80) NULL', retirement_state: 'VARCHAR(16) NULL',
             disabled_at: 'DATETIME(3) NULL', disabled_code: 'VARCHAR(128) NULL',
             disabled_reason: 'VARCHAR(255) NULL', disabled_job_key: 'VARCHAR(128) NULL' },
-        orbitcard_card_issues: { replacement_for_card_id: 'BIGINT UNSIGNED NULL', replacement_for_job_key: "VARCHAR(128) NOT NULL DEFAULT ''" },
+        orbitcard_card_issues: { ...localReleaseColumns, replacement_for_card_id: 'BIGINT UNSIGNED NULL', replacement_for_job_key: "VARCHAR(128) NOT NULL DEFAULT ''" },
+        orbitcard_card_fundings: localReleaseColumns,
+        order_manual_actions: { release_local_hold: 'TINYINT(1) NOT NULL DEFAULT 0' },
         app_config: { created_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP', updated_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP' },
         cdk_codes: { is_active: 'TINYINT(1) NOT NULL DEFAULT 1', shipped_at: 'TIMESTAMP NULL', used_at: 'TIMESTAMP NULL',
             manual_redeemed_at: 'TIMESTAMP NULL', manual_redeemed_by: 'VARCHAR(255) NULL', manual_redemption_reason: 'VARCHAR(255) NULL',
             type: "VARCHAR(16) NOT NULL DEFAULT '自助'", plan_type: "VARCHAR(16) NOT NULL DEFAULT 'plus'", created_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP',
             updated_at: 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP' },
-        orbitcard_admin_orders: { issue_key: 'VARCHAR(80) NULL', retry_history: 'MEDIUMTEXT NULL' },
-        task_logs: { token_preview: "VARCHAR(64) NOT NULL DEFAULT ''", session_payload: 'MEDIUMTEXT NULL', cdk_code: 'VARCHAR(32) NULL',
+        orbitcard_admin_orders: { ...manualColumns, issue_key: 'VARCHAR(80) NULL', retry_history: 'MEDIUMTEXT NULL' },
+        task_logs: { ...manualColumns, token_preview: "VARCHAR(64) NOT NULL DEFAULT ''", session_payload: 'MEDIUMTEXT NULL', cdk_code: 'VARCHAR(32) NULL',
             status: "VARCHAR(32) NOT NULL DEFAULT 'running'", message: 'VARCHAR(255) NULL', progress: 'INT NOT NULL DEFAULT 0',
             display_time: "VARCHAR(64) NOT NULL DEFAULT ''",
             orbitcard_client_order_no: 'VARCHAR(128) NULL', orbitcard_state: 'VARCHAR(32) NULL', orbitcard_plan_type: 'VARCHAR(64) NULL',
@@ -81,12 +89,12 @@ async function recoverHistoricalTasks() {
     // Retired tasks have no safe provider identity. Preserve reservations for manual reconciliation.
     return withTransaction(async connection => {
         const options = { connection };
-        const rows = await runQuery("SELECT cdk_code FROM task_logs WHERE status = 'running' AND orbitcard_client_order_no IS NULL", [], options);
+        const rows = await runQuery("SELECT cdk_code FROM task_logs WHERE status = 'running' AND orbitcard_client_order_no IS NULL AND manual_local_released_at IS NULL", [], options);
         for (const code of new Set(rows.map(row => row.cdk_code).filter(Boolean))) {
             await runQuery('SELECT cdk_code FROM cdk_codes WHERE cdk_code = ? FOR UPDATE', [code], options);
             await runExecute('UPDATE cdk_codes SET used_at = COALESCE(used_at, CURRENT_TIMESTAMP) WHERE cdk_code = ?', [code], options);
         }
-        await runExecute("UPDATE task_logs SET status = 'manual', message = '历史非 Orbitcard 任务已停止，请人工核对原支付；CDK 保持占用' WHERE status = 'running' AND orbitcard_client_order_no IS NULL", [], options);
+        await runExecute("UPDATE task_logs SET status = 'manual', message = '历史非 Orbitcard 任务已停止，请人工核对原支付；CDK 保持占用' WHERE status = 'running' AND orbitcard_client_order_no IS NULL AND manual_local_released_at IS NULL", [], options);
         return rows.length;
     });
 }
@@ -110,6 +118,8 @@ async function createTaskLog({ tokenPreview, cdkCode, status = 'running', progre
 
 async function getTaskStatus(jobKey) {
     const rows = await runQuery(`SELECT job_key, cdk_code, status, message, progress, display_time, updated_at,
+        manual_result, manual_result_reason, manual_result_by, manual_result_at,
+        manual_local_released_at, manual_local_released_by, manual_local_release_reason,
         orbitcard_client_order_no, orbitcard_state, orbitcard_plan_type, orbitcard_email, orbitcard_base_url, orbitcard_card_id, orbitcard_issue_key, orbitcard_required_balance,
         orbitcard_retry_root_job_key, orbitcard_retry_attempt_no, orbitcard_retry_first_card_id, orbitcard_retry_second_card_id, orbitcard_api_key_hash,
         gpt_api_order_id, gpt_api_raw,
@@ -122,7 +132,7 @@ async function getRunningTaskByCdk(cdk) {
     const rows = await runQuery(`SELECT job_key, status, message, progress, orbitcard_client_order_no, orbitcard_state,
         orbitcard_retry_root_job_key, orbitcard_retry_attempt_no, orbitcard_retry_first_card_id, orbitcard_retry_second_card_id, orbitcard_api_key_hash, orbitcard_email, orbitcard_base_url,
         gpt_api_order_id, gpt_api_raw, orbitcard_card_id, orbitcard_plan_type
-        FROM task_logs WHERE cdk_code = ? AND (status IN ('running','manual')
+        FROM task_logs WHERE cdk_code = ? AND manual_local_released_at IS NULL AND (status IN ('running','manual')
         OR orbitcard_state IN ('preparing','prepared','funding_waiting','funding_review','retry_waiting','support_locked','balance_blocked','funding_pending','submitting','pending','manual','success')) ORDER BY id DESC LIMIT 1`, [String(cdk)]);
     return rows[0] || null;
 }
@@ -133,20 +143,23 @@ async function verifyCdkDetails(cdk) {
 }
 
 function mapCdkRow(row) {
-    const redeemed = Boolean(row.manual_redeemed_at) || row.manual_state === 'success' || (row.task_status === 'success' && (row.orbitcard_state === 'success' || !row.orbitcard_state));
-    const occupied = Boolean(row.used_at) || ['running', 'manual'].includes(row.task_status)
-        || ['preparing', 'prepared', 'funding_waiting', 'funding_review', 'balance_blocked', 'support_locked'].includes(row.orbitcard_state);
+    const redeemed = Boolean(row.manual_redeemed_at) || row.manual_state === 'success'
+        || (!row.task_local_released_at && row.task_status === 'success' && (row.orbitcard_state === 'success' || !row.orbitcard_state));
+    const occupied = Boolean(row.used_at) || (!row.task_local_released_at && (['running', 'manual'].includes(row.task_status)
+        || ['preparing', 'prepared', 'funding_waiting', 'funding_review', 'balance_blocked', 'support_locked'].includes(row.orbitcard_state)));
     return { code: row.cdk_code, plan_type: row.plan_type, plan_label: PLAN_LABELS[row.plan_type] || row.plan_type,
         type: row.type, shipped: Boolean(row.shipped_at), created_at: row.created_at, jobKey: row.job_key,
         manual_redeemed_at: row.manual_redeemed_at || null, manual_redeemed_by: row.manual_redeemed_by || '',
         manual_redemption_reason: row.manual_redemption_reason || '',
-        orbitcard_pending_confirmation: !redeemed && row.task_status === 'manual', orbitcard_balance_blocked: !redeemed && row.orbitcard_state==='balance_blocked',
-        orbitcard_support_locked: !redeemed && row.orbitcard_state==='support_locked',
+        orbitcard_pending_confirmation: !redeemed && !row.task_local_released_at && row.task_status === 'manual',
+        orbitcard_balance_blocked: !redeemed && !row.task_local_released_at && row.orbitcard_state==='balance_blocked',
+        orbitcard_support_locked: !redeemed && !row.task_local_released_at && row.orbitcard_state==='support_locked',
         status: redeemed ? 'redeemed' : occupied ? 'processing' : 'unused' };
 }
 
 const CDK_LIST_SELECT = `SELECT c.*, t.job_key, t.status AS task_status, t.orbitcard_state, t.orbitcard_client_order_no,
-        (SELECT m.state FROM orbitcard_admin_orders m WHERE m.cdk_code = c.cdk_code ORDER BY m.created_at DESC LIMIT 1) AS manual_state
+        t.manual_local_released_at AS task_local_released_at,
+        (SELECT m.state FROM orbitcard_admin_orders m WHERE m.cdk_code = c.cdk_code AND m.manual_local_released_at IS NULL ORDER BY m.created_at DESC LIMIT 1) AS manual_state
     FROM cdk_codes c LEFT JOIN task_logs t ON t.id = (SELECT MAX(id) FROM task_logs WHERE cdk_code = c.cdk_code)
     WHERE c.is_active = 1`;
 
@@ -216,12 +229,18 @@ async function deleteCdk(cdk) {
 
 async function listAdminTaskLogs(limit = 200) {
     const rows = await runQuery(`SELECT job_key, display_time, cdk_code, token_preview, status, message, progress, updated_at,
+        manual_result, manual_result_reason, manual_result_by, manual_result_at,
+        manual_local_released_at, manual_local_released_by, manual_local_release_reason,
         orbitcard_client_order_no, orbitcard_state, orbitcard_plan_type, orbitcard_card_id, gpt_api_order_id, gpt_api_raw
         FROM task_logs ORDER BY id DESC LIMIT ?`, [Math.min(500, Math.max(1, Number(limit) || 200))]);
     return rows.map(row => ({ id: row.job_key, jobKey: row.job_key, time: row.display_time, cdk: row.cdk_code,
         token: row.token_preview, status: row.status, message: row.message, progress: Number(row.progress),
         provider: row.orbitcard_client_order_no ? 'orbitcard' : 'history', order_id: row.gpt_api_order_id,
         client_order_no: row.orbitcard_client_order_no, orbitcard_state: row.orbitcard_state, card_id: row.orbitcard_card_id,
+        manual_result: row.manual_result || null, manual_result_reason: row.manual_result_reason || '',
+        manual_result_by: row.manual_result_by || '', manual_result_at: row.manual_result_at || null,
+        manual_local_released_at: row.manual_local_released_at || null,
+        manual_local_released_by: row.manual_local_released_by || '', manual_local_release_reason: row.manual_local_release_reason || '',
         order: safeOrder(row.gpt_api_raw) }));
 }
 
@@ -232,10 +251,10 @@ function safeOrder(raw) {
 async function listRecoverableOrbitcardTasks(limit = 50) {
     return runQuery(`SELECT t.* FROM task_logs t JOIN cdk_codes c ON c.cdk_code = t.cdk_code
         WHERE t.orbitcard_client_order_no IS NOT NULL
-          AND (c.is_active = 1 OR t.orbitcard_state IN ('funding_waiting','funding_review','funding_pending','card_pending'))
+          AND (c.is_active = 1 OR t.manual_local_released_at IS NOT NULL OR t.orbitcard_state IN ('funding_waiting','funding_review','funding_pending','card_pending'))
           AND t.orbitcard_state IN ('preparing','prepared','funding_waiting','funding_review','funding_pending','card_pending','balance_blocked','submitting','pending','manual','success','retry_waiting')
           AND (t.status <> 'manual' OR t.orbitcard_state IN ('funding_waiting','funding_review','funding_pending','card_pending','submitting','pending','manual','success'))
-          AND t.id = (SELECT MAX(id) FROM task_logs WHERE cdk_code = t.cdk_code)
+          AND (t.manual_local_released_at IS NOT NULL OR t.id = (SELECT MAX(id) FROM task_logs WHERE cdk_code = t.cdk_code))
           AND (t.orbitcard_state <> 'success' OR JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(t.gpt_api_raw), t.gpt_api_raw, '{}'), '$.fee_status')) = 'charge_pending')
         ORDER BY t.updated_at ASC LIMIT ?`, [Math.min(200, Math.max(1, Number(limit) || 50))]);
 }

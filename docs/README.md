@@ -6,7 +6,7 @@
 | --- | --- |
 | 首次安装、服务器更新、重启及迁移 | [部署与升级](operations/DEPLOY.md) |
 | 用户兑换、后台管理、CDK 导出与人工核销 | [使用与后台管理](operations/USER-GUIDE.md) |
-| 所有订单的人工备注、暂停、结案及资金保护 | [订单人工处理](operations/ORDER-MANUAL-CONTROL.md) |
+| 所有订单的人工备注、暂停、结果登记、本地释放及资金保护 | [订单人工处理](operations/ORDER-MANUAL-CONTROL.md) |
 | 选卡、渠道/BIN 多选、停用恢复、错误码措施 | [卡池与故障处置](operations/ORBITCARD-CARDS.md) |
 | 接口查询、支付预检、并发模拟及日志 | [调试与日志](operations/DIAGNOSTICS.md) |
 | 请求上限、连接、缓存和日志保留 | [运行与资源](operations/RUNTIME.md) |

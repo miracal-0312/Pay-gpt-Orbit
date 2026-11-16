@@ -110,7 +110,7 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
                 const opts = { connection: tx };
                 const tasks = await runQuery('SELECT * FROM task_logs WHERE job_key=? FOR UPDATE', [jobKey], opts);
                 const task = tasks[0];
-                if (!task || !['preparing','prepared'].includes(task.orbitcard_state) || cardScope(task.orbitcard_base_url) !== scope || planFor(task.orbitcard_plan_type) !== plan) {
+                if (!task || task.manual_result || task.manual_local_released_at || !['preparing','prepared'].includes(task.orbitcard_state) || cardScope(task.orbitcard_base_url) !== scope || planFor(task.orbitcard_plan_type) !== plan) {
                     throw new CardPreparationError('充值任务已变更，不能预占卡片');
                 }
                 if ([task.orbitcard_retry_first_card_id, task.orbitcard_retry_second_card_id].filter(Boolean).map(Number).includes(Number(cardId))) return null;
@@ -130,9 +130,9 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
                 return { ...card, active_job: jobKey };
             });
         }
-        async function pendingIssue(planType) {
+        async function pendingIssue(planType, includeReleased = false) {
             const rows = await query(`SELECT * FROM orbitcard_card_issues WHERE scope=? AND plan_type=?
-                AND state IN ('prepared','submitting','pending','unknown') ORDER BY created_at LIMIT 1`, [scope,planFor(planType)]);
+                AND state IN ('prepared','submitting','pending','unknown')${includeReleased ? " AND (local_released_at IS NULL OR order_no IS NOT NULL AND order_no <> '')" : ' AND local_released_at IS NULL'} ORDER BY updated_at, created_at LIMIT 1`, [scope,planFor(planType)]);
             return rows[0] || null;
         }
         async function createManualIssue({ issue_key, plan_type, product_code, amount, credential_hash, request_body, replacement_for_card_id = null, replacement_for_job_key = '' }) {
@@ -174,7 +174,7 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
                 const [owner] = await runQuery(manual
                     ? 'SELECT * FROM orbitcard_admin_orders WHERE client_order_no = ? FOR UPDATE'
                     : 'SELECT * FROM task_logs WHERE job_key=? FOR UPDATE', [funding.job_key], opts);
-                if (!owner || (manual ? owner.state !== 'preparing' || owner.scope !== scope
+                if (!owner || owner.manual_result || owner.manual_local_released_at || (manual ? owner.state !== 'preparing' || owner.scope !== scope
                     || Number(owner.card_id) !== Number(funding.card_id) || planFor(owner.plan_type) !== funding.plan_type
                     : !['preparing','prepared'].includes(owner.orbitcard_state) || cardScope(owner.orbitcard_base_url) !== scope
                     || Number(owner.orbitcard_card_id) !== Number(funding.card_id) || planFor(owner.orbitcard_plan_type) !== funding.plan_type)) {
@@ -224,6 +224,8 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
 
     // Called inside the same transaction that settles the CDK. Lock order is task -> card -> use.
     async function settleCardUse(jobKey, orbitcardState, options) {
+        const [owner] = await runQuery('SELECT manual_local_released_at FROM task_logs WHERE job_key=?', [jobKey], options);
+        if (owner?.manual_local_released_at) return;
         const found = await runQuery('SELECT * FROM orbitcard_card_uses WHERE job_key=?', [jobKey], options);
         const initial = found[0];
         if (!initial) return; // Historical orders predate automatic card allocation.

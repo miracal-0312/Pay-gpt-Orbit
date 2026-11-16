@@ -67,7 +67,6 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
         }
         async function selectionSnapshot() {
             if (!planPrice(cfg, plan)) throw new CardPreparationError('请先在后台配置当前套餐的 USD 支付金额，已停止代充');
-            const products = await cards.products(cfg);
             const listed = await cards.listCards(cfg);
             const methods = store.cardMethods(cfg.base_url);
             const existing = await methods.listCards();
@@ -111,12 +110,12 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
                 const summary = summaries.find(item => item.card_id === card.card_id);
                 if (summary) Object.assign(summary, { status: card.provider_status, balance: card.balance_amount, currency: card.currency });
             }
-            return { saved, listed: readable, detailed, products, now: snapshotNow };
+            return { saved, listed: readable, detailed, now: snapshotNow };
         }
         async function concurrency() {
             const snapshot = await selectionSnapshot();
             result.concurrency = await simulateSelection({ snapshot, count: concurrentTasks, available,
-                planType: plan, jobPrefix: traceId, priceFor: (_product, type) => planPrice(cfg, type) });
+                planType: plan, jobPrefix: traceId, priceFor: type => planPrice(cfg, type) });
             delete result.selection;
             return result.concurrency;
         }
@@ -124,14 +123,14 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
             const snapshot = await selectionSnapshot();
             const { saved, listed: readable } = snapshot;
             const decision = decideCards({ ...snapshot, jobKey: traceId, planType: plan,
-                priceFor: (_product, type) => planPrice(cfg, type) });
+                priceFor: type => planPrice(cfg, type) });
             const selected = decision.candidates[0];
             Object.assign(result.selection, { action: decision.action, card_id: selected?.card.card_id || null,
                 candidate_count: decision.candidates.length, skipped: decision.skipped, waiting: decision.waiting });
             const funding = selected?.fundingAmount || 0n;
             if (selected) {
                 result.selection.funding_amount = money.cents(funding);
-                if (!selected.fundingSufficient) throw new CardPreparationError('支付卡余额不足，按套餐全额补款后仍不满足最低留存要求，请联系客服');
+                if (!selected.fundingSufficient) throw new CardPreparationError('支付卡余额不足，按套餐全额补款后仍不满足套餐金额，请联系客服');
             } else if (decision.action === 'unavailable') {
                 throw new CardPreparationError('没有可用支付卡，请核对停用卡的补开申请或手动补充卡片');
             } else throw new CardPreparationError('卡片被占用或平台状态尚未确认，实际支付需要等待处理；共享等待位最多 1 个');

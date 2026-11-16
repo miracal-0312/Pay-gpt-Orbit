@@ -66,6 +66,7 @@ module.exports = function createFundingService({ api, cardsApi, audit, now, asse
         if (!body || Object.keys(body).length!==2 || JSON.stringify(body)!==funding.request_body || body.card_id!==Number(funding.card_id)
             || body.amount!==Number(funding.amount).toFixed(2)) throw new FundingPendingError('原补款参数不一致，禁止更换金额或幂等键重充');
         if (funding.state==='failed') throw new CardPreparationError('平台已确认原补款失败');
+        if (options.localReleased && !funding.order_no) throw new FundingPendingError('本地占用已解除且原补款缺少平台订单号，仅保留原申请，不再发送资金请求');
         if (options.readOnly && options.releaseOnly && funding.state==='prepared' && !funding.order_no) {
             // The remote-write marker was never committed. Stop this original
             // intent without sending money; the owner will release it atomically.
@@ -147,6 +148,14 @@ module.exports = function createFundingService({ api, cardsApi, audit, now, asse
         const complete=data?.completed==null || data.completed===true;
         if (data?.completed!=null && typeof data.completed!=='boolean') throw new FundingPendingError('原补款完成标记格式无效，请人工核对');
         if (valid && status==='success' && complete) {
+            if (options.localReleased) {
+                // Another order may already have spent this card's balance.
+                // Confirm this exact funding flow without touching card ownership
+                // or interpreting a later balance as this order's payment proof.
+                await assertAllowed(cfg, funding.job_key);
+                await locked.updateFunding(funding.funding_key,{state:'ready',message:'原补款已确认成功；本地占用此前已人工解除'});
+                return { card_id: Number(funding.card_id) };
+            }
             // A completed funding order can precede the card balance snapshot.
             await assertAllowed(cfg, funding.job_key);
             const card=await readFundedCard(cfg,funding);
@@ -192,12 +201,12 @@ module.exports = function createFundingService({ api, cardsApi, audit, now, asse
     async function recover(cfg, locked) {
         for (const funding of await locked.listFundings(true)) {
             if(Number(funding.retry_at || 0)>now()) continue;
-            const handled = await withRecoveryOwner(cfg, funding, async ownedCfg => {
-                if (funding.state==='prepared') {
+            const handled = await withRecoveryOwner(cfg, funding, async (ownedCfg, recovery = {}) => {
+                if (funding.state==='prepared' && !recovery.localReleased) {
                     await locked.updateFunding(funding.funding_key,{state:'failed',message:'服务在补款提交前中断，原补款未发送'});
                     return;
                 }
-                try { await confirm(ownedCfg,locked,funding,{readOnly:true}); }
+                try { await confirm(ownedCfg,locked,funding,{readOnly:true,localReleased:recovery.localReleased}); }
                 catch (error) {
                     if (error instanceof PaymentStoppedError) throw error;
                     await locked.updateFunding(funding.funding_key,{state:'unknown',

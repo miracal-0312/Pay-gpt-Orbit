@@ -156,16 +156,16 @@ function productAmount(value) {
 }
 function normalizeProducts(data) {
     if (!data || typeof data !== 'object' || Array.isArray(data) || !Array.isArray(data.list)) {
-        throw new CardPreparationError('产品目录响应缺少 data.list，已停止开卡和支付准备');
+        throw new CardPreparationError('产品目录响应缺少 data.list，已停止开卡');
     }
     const seen = new Set();
     return data.list.map(row => {
         if (!row || typeof row !== 'object' || Array.isArray(row) || typeof row.product_code !== 'string') {
-            throw new CardPreparationError('产品目录条目缺少有效 product_code，已停止开卡和支付准备');
+            throw new CardPreparationError('产品目录条目缺少有效 product_code，已停止开卡');
         }
         const code = row.product_code.trim();
         if (!code || code.length > 128 || /[\x00-\x1f\x7f]/.test(code)) {
-            throw new CardPreparationError('产品目录包含无效产品码，已停止开卡和支付准备');
+            throw new CardPreparationError('产品目录包含无效产品码，已停止开卡');
         }
         if (seen.has(code)) throw new CardPreparationError('产品目录包含重复产品码，无法确认库存和最低金额');
         seen.add(code);

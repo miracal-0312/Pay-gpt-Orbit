@@ -264,7 +264,7 @@ test('unknown platform status still waits while order counts do not gate availab
     assert.equal(decideCards(input).waiting[0].reason,'status_unconfirmed');
 });
 
-test('selection matches each product reserve and excludes prior, busy and disabled cards',()=>{
+test('selection uses only the configured plan amount and excludes prior, busy and disabled cards',()=>{
     const {decideCards}=require('../src/orbitcard/orbitcard-payment-decision'),money=require('../src/orbitcard/orbitcard-money');
     const listed=[41,42,43,44,45].map(card_id=>({card_id,provider_status:'ACTIVE',currency:'USD',
         product_code:card_id===41?'higher-reserve':'no-reserve',balance_amount:'20.00'}));
@@ -275,12 +275,37 @@ test('selection matches each product reserve and excludes prior, busy and disabl
             {product_code:'higher-reserve',min_retained_balance:'8.00'}],
         excludedCardIds:['42'],priceFor:()=>'16.00'});
     assert.equal(decision.action,'pay');
-    assert.deepEqual(decision.candidates.map(candidate=>candidate.card.card_id),[43,41]);
-    assert.equal(decision.candidates[1].target,money.units('24.00'));
-    assert.equal(decision.candidates[1].fundingAmount,money.units('16.00'));
+    assert.deepEqual(decision.candidates.map(candidate=>candidate.card.card_id),[41,43]);
+    assert.ok(decision.candidates.every(candidate=>candidate.target===money.units('16.00')));
+    assert.ok(decision.candidates.every(candidate=>candidate.fundingAmount===0n));
     assert.ok(decision.skipped.some(card=>card.card_id===42 && card.reason==='previous_payment_attempt'));
     assert.ok(decision.skipped.some(card=>card.card_id===45 && card.reason==='card_error_disabled'));
     assert.deepEqual(decision.waiting,[{card_id:44,reason:'busy'}]);
+});
+
+test('pure existing-card decisions do not read opening products and request prices by plan only',()=>{
+    const {decideCards}=require('../src/orbitcard/orbitcard-payment-decision'),money=require('../src/orbitcard/orbitcard-money');
+    const detailed=[{card_id:42,provider_status:'ACTIVE',currency:'USD',product_code:'retired-opening-product',balance_amount:'20.00'},
+        {card_id:43,provider_status:'ACTIVE',currency:'USD',product_code:'',balance_amount:'19.99999999'}];
+    const input={saved:detailed.map(card=>({card_id:card.card_id})),listed:detailed,detailed,jobKey:'current',planType:'plus',
+        priceFor:(...args)=>{assert.deepEqual(args,['plus']);return '20.00';}};
+    Object.defineProperty(input,'products',{get(){assert.fail('Existing cards must not depend on the opening catalog');}});
+    const decision=decideCards(input);
+    assert.equal(decision.action,'pay');
+    assert.deepEqual(decision.candidates.map(candidate=>[candidate.card.card_id,candidate.target,candidate.fundingAmount]),
+        [[42,money.units('20.00'),0n],[43,money.units('20.00'),money.units('20.00')]]);
+    assert.ok(decision.candidates.every(candidate=>candidate.fundingSufficient));
+});
+
+test('an existing card equal to the plan price needs neither a retained reserve nor an account query',async()=>{
+    const f=await setup([0],{getProductCode:async()=>assert.fail('Opening catalog is unrelated to an existing card'),
+        getAccountBalance:async()=>assert.fail('No funding is required')});
+    f.remote[0].balance='20.00';f.remote[0].product_code='no-longer-sold';
+    const task=await f.claim();
+    assert.equal(await f.service.allocate({...cfg,orbitcard_product_codes:['different-channel'],orbitcard_bins:['99999999'],
+        orbitcard_max_initial_amount:'1.00'},task.jobKey,'plus'),42);
+    assert.equal(f.db.issues.length,0);assert.equal(f.db.fundings.length,0);
+    assert.equal(f.calls.some(call=>['getProductCode','getAccountBalance','createCard','rechargeCard'].includes(call.operation)),false);
 });
 
 test('allocation uses an existing funded card without requiring money to fill the pool',async()=>{
@@ -293,7 +318,7 @@ test('allocation uses an existing funded card without requiring money to fill th
 
 test('insufficient account money rejects a full-plan topup before creating a funding intent',async()=>{
     const f=await setup([0],{getAccountBalance:async()=>({success:true,data:{available_balance:'0.50'}})});
-    f.remote[0].balance='20.00';
+    f.remote[0].balance='19.99999999';
     const task=await f.claim();
     await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),error=>{
         assert.ok(error instanceof AccountBalanceError);

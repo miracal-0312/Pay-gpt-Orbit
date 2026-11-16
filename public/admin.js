@@ -93,11 +93,14 @@ function renderTasks(tasks) {
     $('tasks').innerHTML = tasks.map(task => {
         const order = task.order || {}, fee = order.fee_status ? `${order.service_fee ?? '—'} ${order.currency || 'USDT'} / ${order.fee_status}` : '—';
         const payment = order.payment ? `${order.payment.amount} ${order.payment.currency}` : '—';
+        const manualResult = task.manual_result === 'success' ? '人工交付完成' : task.manual_result === 'failed' ? '人工确认失败' : '';
+        const originalState = task.queued ? '<span class="pill">排队等待</span>' : status(task.orbitcard_state || task.status);
+        const outcome = `${manualResult ? `<div><strong>人工结果：${manualResult}</strong></div>` : ''}<div>原平台／资金状态：${originalState}</div>${task.manual_local_released_at ? '<div>本地占用：已释放</div>' : ''}`;
         const refresh = (task.provider === 'orbitcard' ? `<button class="secondary" data-refresh-order="${escapeHtml(task.jobKey)}">${['funding_waiting','funding_review','funding_pending'].includes(task.orbitcard_state) ? '核对原补款' : '查原单'}</button>` : '<small>历史记录</small>')
             + ` <button type="button" class="secondary" data-order-manual="${escapeHtml(task.jobKey)}" data-order-kind="task">人工修改</button>`;
         const cardLabel = task.card_id || (task.provider !== 'orbitcard' ? '历史未绑定'
             : ['preparing','prepared','rejected','balance_blocked','card_pending'].includes(task.orbitcard_state) ? '尚未分配支付卡' : '未记录支付卡');
-        return `<tr><td>${escapeHtml(task.time)}<br><code>${escapeHtml(task.cdk)}</code></td><td>${escapeHtml(task.provider === 'orbitcard' ? task.token : '历史账号')}<br><code>${escapeHtml(task.order_id || task.client_order_no || task.jobKey)}</code><br>卡 ID：${escapeHtml(cardLabel)}</td><td>${task.queued ? '<span class="pill">排队等待</span>' : status(['funding_review','funding_pending','card_pending'].includes(task.orbitcard_state) ? task.orbitcard_state : task.status)}<br>${escapeHtml(task.message)}</td><td>${escapeHtml(fee)}</td><td>${escapeHtml(payment)}</td><td>${refresh} <button class="secondary" data-download-audit="${escapeHtml(task.jobKey)}">下载日志</button> <button class="secondary" data-debug-trace="${escapeHtml(task.jobKey)}">链路日志</button></td></tr>`;
+        return `<tr><td>${escapeHtml(task.time)}<br><code>${escapeHtml(task.cdk)}</code></td><td>${escapeHtml(task.provider === 'orbitcard' ? task.token : '历史账号')}<br><code>${escapeHtml(task.order_id || task.client_order_no || task.jobKey)}</code><br>卡 ID：${escapeHtml(cardLabel)}</td><td>${outcome}${escapeHtml(task.message)}</td><td>${escapeHtml(fee)}</td><td>${escapeHtml(payment)}</td><td>${refresh} <button class="secondary" data-download-audit="${escapeHtml(task.jobKey)}">下载日志</button> <button class="secondary" data-debug-trace="${escapeHtml(task.jobKey)}">链路日志</button></td></tr>`;
     }).join('') || '<tr><td colspan="6">暂无任务</td></tr>';
 }
 async function loadOverview() {
@@ -662,12 +665,14 @@ async function loadManualCatalog() {
 }
 function renderManualOrders(orders) {
     $('manualOrderRows').innerHTML = orders.map(order => {
-        const outcome = order.queued ? '<span class="pill">排队等待</span>' : status(order.state);
+        const manualResult = order.manual_result === 'success' ? '人工交付完成' : order.manual_result === 'failed' ? '人工确认失败' : '';
+        const originalState = order.queued ? '<span class="pill">排队等待</span>' : status(order.state);
+        const outcome = `${manualResult ? `<div><strong>人工结果：${manualResult}</strong></div>` : ''}<div>原平台／资金状态：${originalState}</div>${order.manual_local_released_at ? '<div>本地占用：已释放</div>' : ''}`;
         const previousAttempts = (order.attempts || []).map((attempt, index) => `<button type="button" class="secondary" data-debug-trace="${escapeHtml(attempt.client_order_no)}">第 ${index + 1} 次 · 卡 ${escapeHtml(attempt.card_id)} 日志</button>`).join('');
         const captcha = order.captcha?.url ? `<br><a href="${escapeHtml(order.captcha.url)}" target="_blank" rel="noopener noreferrer">打开平台验证链接</a>` : '';
-        const action = `${!order.queued && ['preparing','retry_waiting'].includes(order.state)
-            ? `<button type="button" class="secondary" data-retry-manual="${escapeHtml(order.request_id)}">${order.state === 'retry_waiting' ? '提交 Session 换卡重试' : '继续准备'}</button>` : ''}${order.queued || ['submitting','pending','manual'].includes(order.state)
-            ? `<button type="button" class="secondary" data-refresh-manual="${escapeHtml(order.request_id)}">查询原订单</button>` : ''}
+        const action = `${!order.manual_result && !order.queued && ['preparing','retry_waiting'].includes(order.state)
+            ? `<button type="button" class="secondary" data-retry-manual="${escapeHtml(order.request_id)}">${order.state === 'retry_waiting' ? '提交 Session 换卡重试' : '继续准备'}</button>` : ''}${order.queued || ['submitting','pending','manual','funding_waiting','funding_review','funding_pending','card_pending'].includes(order.state)
+            ? `<button type="button" class="secondary" data-refresh-manual="${escapeHtml(order.request_id)}">${['funding_waiting','funding_review','funding_pending','card_pending'].includes(order.state) ? '核对原资金' : '查询原订单'}</button>` : ''}
             <button type="button" class="secondary" data-order-manual="${escapeHtml(order.request_id)}" data-order-kind="admin">人工修改</button>
             <button type="button" class="secondary" data-download-manual="${escapeHtml(order.client_order_no)}">下载日志</button> <button type="button" class="secondary" data-debug-trace="${escapeHtml(order.client_order_no)}">链路日志</button>`;
         return `<tr><td>${escapeHtml(new Date(order.created_at).toLocaleString('zh-CN'))}<br>${escapeHtml(order.target_email)}</td>
@@ -890,24 +895,45 @@ $('cdkFilters').addEventListener('click', event => {
 });
 $('clearLogs').onclick = () => perform(async () => { await request('/api/admin/runtime-logs/clear', {}); await loadLogs(); notice('显示缓存已清空，磁盘日志保留最近 15 天', 'success'); });
 let orderManualEditing = null, orderManualSaving = false, orderManualLoadSequence = 0;
-const orderManualActionLabels = { note: '记录处理备注', pause: '暂停自动处理', success: '人工确认成功', failed: '人工确认失败' };
+const orderManualActionLabels = { note: '记录处理备注', pause: '暂停自动处理', success: '人工交付完成', failed: '人工确认失败' };
+const orderManualHistoryLabels = { ...orderManualActionLabels, release: '解除本地占用' };
 function orderManualUrl(order) {
     return order.kind === 'admin' ? `/api/admin/manual/orders/${encodeURIComponent(order.id)}/manual`
         : `/api/admin/orders/${encodeURIComponent(order.id)}/manual`;
 }
+function updateOrderManualRelease(data = orderManualEditing?.data) {
+    const release = data?.release, resultAction = ['success', 'failed'].includes($('orderManualAction').value);
+    const allowed = resultAction && release?.allowed === true && release?.released !== true;
+    $('orderManualRelease').disabled = !allowed;
+    if (!allowed) $('orderManualRelease').checked = false;
+    $('orderManualReleaseState').textContent = release?.released === true
+        ? `本地占用：已释放；${data.manual_local_released_by || '管理员'} · ${data.manual_local_released_at || '时间未记录'}；${data.manual_local_release_reason || '未记录原因'}`
+        : release?.allowed !== true ? `当前不能释放本地占用：${release?.reason || '请先核对原订单占用归属。'}`
+            : !resultAction ? '只有登记人工交付完成或人工确认失败时，才能选择释放本地占用。'
+                : '未勾选时，未决占用继续保留；已完成核对的占用按正常结案规则处理。';
+}
 function renderOrderManualControl(data) {
     const previous = $('orderManualAction').value;
     const actions = data.actions.filter(action => action && Object.hasOwn(orderManualActionLabels, action.value));
-    $('orderManualState').textContent = `当前状态：${data.status || '未记录'} / ${data.state || '未记录'}`;
+    $('orderManualState').textContent = `原平台／资金状态：${data.status || '未记录'} / ${data.state || '未记录'}`;
+    const manualResult = data.manual_result === 'success' ? '人工交付完成' : data.manual_result === 'failed' ? '人工确认失败' : '';
+    $('orderManualResult').textContent = manualResult
+        ? `人工结果：${manualResult}；${data.manual_result_by || '管理员'} · ${data.manual_result_at || '时间未记录'}；${data.manual_result_reason || '未记录原因'}`
+        : '人工结果：尚未登记';
+    $('orderManualSettlement').textContent = data.settlement?.allowed === false
+        ? `${data.release?.released === true ? '原资金／订阅仍需核对；本地占用已人工释放，原平台扣款仍可能完成。' : '原资金／订阅仍需核对，默认保留原记录与占用。'}${data.settlement.reason || '人工结果与资金处理分别记录。'}`
+        : data.settlement?.allowed === true ? '资金结算：当前校验允许安全结算，保存时会再次核对。'
+            : '资金结算：尚未确认，请以当前措施说明为准。';
     $('orderManualAction').innerHTML = '<option value="">请选择处理操作</option>' + actions.map(action =>
         `<option value="${escapeHtml(action.value)}"${action.enabled === true ? '' : ' disabled'}>${escapeHtml(action.label || orderManualActionLabels[action.value])}${action.enabled === true ? '' : '（暂不可执行）'}</option>`).join('');
     const selected = actions.find(action => action.value === previous && action.enabled === true)
         || actions.find(action => action.value === 'note' && action.enabled === true) || actions.find(action => action.enabled === true);
     $('orderManualAction').value = selected?.value || '';
+    updateOrderManualRelease(data);
     $('orderManualAvailability').innerHTML = actions.map(action => `<li><strong>${escapeHtml(action.label || orderManualActionLabels[action.value])}</strong>：${escapeHtml(action.reason || (action.enabled === true ? '可以执行' : '当前状态暂不可执行'))}</li>`).join('');
     const history = Array.isArray(data.history) ? data.history.filter(entry => entry && typeof entry === 'object').slice(0, 20) : [];
     $('orderManualHistory').innerHTML = history.length ? history.map(entry =>
-        `<p><strong>${escapeHtml(orderManualActionLabels[entry.action] || entry.action)}</strong> · ${escapeHtml(entry.created_at)}<br>${escapeHtml(entry.admin_email || '管理员')} · ${escapeHtml(entry.previous_status || '—')} → ${escapeHtml(entry.next_status || '—')}<br>${escapeHtml(entry.reason)}</p>`).join('') : '<p>暂无人工处理记录</p>';
+        `<p><strong>${escapeHtml(orderManualHistoryLabels[entry.action] || entry.action)}</strong>${entry.release_local_hold === true || entry.release_local_hold === 1 ? ' · 同时释放本地占用' : ''} · ${escapeHtml(entry.created_at)}<br>${escapeHtml(entry.admin_email || '管理员')} · ${escapeHtml(entry.previous_status || '—')} → ${escapeHtml(entry.next_status || '—')}<br>${escapeHtml(entry.reason)}</p>`).join('') : '<p>暂无人工处理记录</p>';
     $('orderManualSave').disabled = !selected;
 }
 async function loadOrderManualControl() {
@@ -918,6 +944,9 @@ async function loadOrderManualControl() {
     $('orderManualReload').disabled = true;
     $('orderManualError').textContent = '';
     $('orderManualState').textContent = '正在读取订单状态与可执行操作…';
+    $('orderManualResult').textContent = '正在读取已登记的人工结果…';
+    $('orderManualSettlement').textContent = '';
+    $('orderManualReleaseState').textContent = '正在读取本地占用信息…';
     try {
         const result = await request(orderManualUrl(target));
         if (target !== orderManualEditing || sequence !== orderManualLoadSequence) return;
@@ -929,6 +958,8 @@ async function loadOrderManualControl() {
     } catch (error) {
         if (target !== orderManualEditing || sequence !== orderManualLoadSequence) return;
         $('orderManualState').textContent = '尚未读取到可用的订单处理信息';
+        $('orderManualResult').textContent = '尚未读取到人工结果，请重新读取';
+        $('orderManualReleaseState').textContent = '尚未读取到本地占用信息，请重新读取';
         $('orderManualError').textContent = error.message;
     } finally {
         if (target === orderManualEditing && sequence === orderManualLoadSequence) {
@@ -945,6 +976,9 @@ async function openOrderManualControl(button) {
     $('orderManualCode').textContent = `${kind === 'admin' ? '管理员订单' : '订单'}：${id}`;
     $('orderManualReason').value = '';
     $('orderManualAction').value = '';
+    $('orderManualRelease').checked = false;
+    $('orderManualRelease').disabled = true;
+    $('orderManualReleaseState').textContent = '';
     $('orderManualAvailability').innerHTML = '';
     $('orderManualHistory').innerHTML = '<p>读取后显示处理记录</p>';
     if (!$('orderManualDialog').open) $('orderManualDialog').showModal();
@@ -963,6 +997,10 @@ async function saveOrderManualControl() {
     const available = Object.hasOwn(orderManualActionLabels, action)
         && target.data.actions.find(item => item?.value === action && item.enabled === true);
     if (!available) { $('orderManualError').textContent = '请选择当前可执行的操作'; return; }
+    const releaseLocalHold = $('orderManualRelease').checked === true;
+    if (releaseLocalHold && (!['success', 'failed'].includes(action) || target.data.release?.allowed !== true || target.data.release?.released === true)) {
+        $('orderManualError').textContent = '当前操作不能释放本地占用，请重新核对订单'; return;
+    }
     if (!reason || reason.length > 255) { $('orderManualError').textContent = '请填写 1–255 字的处理原因'; return; }
     orderManualSaving = true;
     $('orderManualFields').disabled = true;
@@ -970,7 +1008,7 @@ async function saveOrderManualControl() {
     $('cancelOrderManual').disabled = true;
     $('orderManualError').textContent = '';
     try {
-        const result = await request(orderManualUrl(target), { action, expected_revision: target.data.revision, reason });
+        const result = await request(orderManualUrl(target), { action, expected_revision: target.data.revision, reason, release_local_hold: releaseLocalHold });
         $('orderManualDialog').close();
         orderManualEditing = null;
         $('orderManualReason').value = '';
@@ -989,6 +1027,7 @@ async function saveOrderManualControl() {
     }
 }
 $('orderManualForm').addEventListener('submit', event => { event.preventDefault(); saveOrderManualControl(); });
+$('orderManualAction').addEventListener('change', () => updateOrderManualRelease());
 $('orderManualReload').onclick = loadOrderManualControl;
 $('cancelOrderManual').onclick = closeOrderManualControl;
 $('orderManualDialog').addEventListener('cancel', event => { event.preventDefault(); closeOrderManualControl(); });
@@ -999,7 +1038,7 @@ document.addEventListener('click', event => {
     const retryManual = event.target.closest('[data-retry-manual]');
     if (retryManual) {
         const order = manualOrders.find(item => item.request_id === retryManual.dataset.retryManual);
-        if (order && !order.queued && ['preparing','retry_waiting'].includes(order.state)) {
+        if (order && !order.manual_result && !order.queued && ['preparing','retry_waiting'].includes(order.state)) {
             perform(async () => {
                 if (order.mode === 'test') { await diagResumeOrder(order); return; }
                 await selectView('manual');

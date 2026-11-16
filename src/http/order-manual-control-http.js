@@ -26,6 +26,7 @@ module.exports = function registerOrderManualControl(app, { store, requireSecond
             }
             const data = await store.applyOrderManualControl({ kind, id: req.params[parameter],
                 action: req.body.action, expectedRevision: req.body.expected_revision,
+                releaseLocalHold: req.body.release_local_hold,
                 reason: req.body.reason, adminEmail: req.admin?.email || '' });
             res.json({ success: true, data, message: '人工处理已保存，订单与处理记录已更新' });
         }));

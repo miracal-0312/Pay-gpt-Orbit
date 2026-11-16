@@ -61,7 +61,7 @@ docker compose logs -f app
 
 后台保存 HTTPS API 根域名、各档套餐的 USD 卡支付金额、默认充值地区、最高 USDT 服务费及单卡首充上限。API Key / Secret 只从服务端环境变量读取；更换平台或凭据前先核对未完成原订单。USD 金额保存在 `orbitcard_plan_prices`，最多 8 位小数，留空时暂停对应套餐。产品接口不提供套餐报价，USDT 服务费也不能代替 USD 卡支付金额。地区保存在 `orbitcard_payment_regions`；平台默认省略 `payment_region`，指定地区在资金操作前校验，失败不回退。修改地区后须重新核对金额。
 
-渠道与 BIN 在后台通过 `getProductCode` 实时读取并多选，分别保存为 `orbitcard_product_codes`、`orbitcard_bins`；各自留空表示全部，同时选择取交集。旧单一产品配置迁移为单项选择。手动开卡和错误补开均为首充 20 USD、数量 1，需同时满足产品库存、最低首充、账户余额和配置上限。
+渠道与 BIN 在后台通过 `getProductCode` 实时读取并多选，分别保存为 `orbitcard_product_codes`、`orbitcard_bins`；各自留空表示全部，同时选择取交集。旧单一产品配置迁移为单项选择；这些偏好与开卡产品规则不筛选现有支付卡。手动开卡和错误补开均为首充 20 USD、数量 1，需同时满足产品库存、最低首充、账户余额和配置上限。
 
 卡片成功会员订单次数仅用于统计，不再作为停用或删卡条件。实际选卡检查 ACTIVE、USD、资料与余额、本地 `disabled_*` 停用记录、占用及未决资金。已验证的卡片相关失败会在结算事务中持久化停用，并按原卡和失败任务登记唯一补开；可信的创建 `59005` 拒绝同样处理。后台提供需二级验证和原因的人工停用/恢复。同步不会覆盖停用标记，人工停用不自动补开，旧删卡意图按原身份确认；成功次数和卡池数量不触发新删卡。
 
@@ -71,7 +71,7 @@ docker compose logs -f app
 
 API Key 需具备 `subscriptions:read/create`、`cards:create/read/fund`、`products:read`、`account:read`；原删卡意图需 `cards:manage`，消费与资金流水对账需 `transactions:read`。后台「调试与日志」提供接口查询与只读预检，真实扣款测试需单独二级验证和扣款确认。确认迁移、日志、权限、USD 金额、卡片及账户资金后开放接单。完整操作见[使用说明](USER-GUIDE.md)、[调试说明](DIAGNOSTICS.md)。
 
-本次套餐补款规则更新后，卡内不足时按套餐完整 USD 金额（向上取到分）充值，足额不充值；账户不足提示联系客服。旧资金意图的原金额、正文、幂等键保持不变，升级不批量修改或重发补款。金额示例与最低留存边界见[套餐整额补款](ORBITCARD-CARDS.md#套餐整额补款)。
+本次套餐补款规则更新后，卡内不足时按套餐完整 USD 金额（向上取到分）充值，足额不充值；账户不足提示联系客服。现有卡支付目标为套餐 USD 金额，不叠加开卡产品最低留存；旧资金意图的原金额、已保存 `target_balance`、正文、幂等键保持不变，升级不批量修改或重发补款。金额示例见[套餐整额补款](ORBITCARD-CARDS.md#套餐整额补款)。
 
 ## 日常更新与重启
 
@@ -111,7 +111,7 @@ docker compose logs --tail=100 app
 
 旧浏览器、验证码、卡池、代理、本地支付链接调试和本地账单接口已移除。当前 Orbitcard 调试与日志统一在新入口；刷新后台缓存，前端资源与镜像一并发布。
 
-手动开卡统一为共享卡池申请，`POST /api/admin/orbitcard/cards/apply` 只接收 `{}`，旧 `plan_type` 被拒绝；未确认历史申请按原 key 和 Body 核对。独立产品预览按钮已移除；`GET /api/admin/orbitcard/products` 现供配置页读取真实渠道与 BIN 多选目录。手动申请时自动读取产品并校验库存、固定首充及配置上限；支付准备仍读取产品最低留存余额。产品只读排查统一使用“调试与日志 → 接口查询”。只读预检维护摘要删除自动补满和开卡的固定占位字段 `capacity_limit`、`auto_refill`、`open_count`、`opening_amount`；并发模拟统计不再返回始终为零的 `summary.opening`。管理客户端使用 `Authorization: Bearer`，不把令牌放 URL；`gpt-api/status` 不附带 `recent_orders`，订单查询仍保留。无需删除历史订单、卡片或迁移记录。
+手动开卡统一为共享卡池申请，`POST /api/admin/orbitcard/cards/apply` 只接收 `{}`，旧 `plan_type` 被拒绝；未确认历史申请按原 key 和 Body 核对。独立产品预览按钮已移除；`GET /api/admin/orbitcard/products` 现供配置页读取真实渠道与 BIN 多选目录。手动申请时自动读取产品并校验库存、固定首充及配置上限；现有卡支付准备和只读预检不查询开卡产品，不受渠道、BIN、库存或产品最低金额限制。产品只读排查统一使用“调试与日志 → 接口查询”。只读预检维护摘要删除自动补满和开卡的固定占位字段 `capacity_limit`、`auto_refill`、`open_count`、`opening_amount`；并发模拟统计不再返回始终为零的 `summary.opening`。管理客户端使用 `Authorization: Bearer`，不把令牌放 URL；`gpt-api/status` 不附带 `recent_orders`，订单查询仍保留。无需删除历史订单、卡片或迁移记录。
 
 ## 环境更新与存储
 
