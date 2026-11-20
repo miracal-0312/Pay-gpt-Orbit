@@ -313,9 +313,9 @@ function renderCardRow(card, sync = null) {
     const exhausted = card.quota_exhausted ?? (Number(card.successful_order_count) >= limit);
     const usage = `${escapeHtml(card.successful_order_count ?? '待同步')} 笔成功会员订单 / 上限 ${escapeHtml(limit)} 笔`;
     const previousReason = card.disabled_reason && card.disabled_code !== 'success_limit_reached' ? `<br>${escapeHtml(card.disabled_reason)}` : '';
-    const history = exhausted ? `不可用 · 已达成功订单上限，补开结果见开卡记录${previousReason}`
+    const history = exhausted ? `不可用 · 已达成功订单上限，选卡无合格现有卡时按需补开${previousReason}`
         : card.disabled_at ? `已停用 · ${escapeHtml(card.disabled_code || '')}<br>${escapeHtml(card.disabled_reason || '订阅卡片错误')}`
-            : card.retiring ? '待核对旧删卡记录' : '满额后自动停用并补开一张';
+            : card.retiring ? '待核对旧删卡记录' : '满额后自动停用';
     const countedAt = '授权流水仅供对账，不影响订单计数';
     const last4 = card.last4 ? `****${escapeHtml(card.last4)}` : '尾号未提供';
     const confirmed = sync?.synced_ids?.includes(Number(card.card_id));
@@ -340,7 +340,7 @@ async function loadCards(sync = null) {
     if (present.some(card => String(card.card_id) === currentCardId)) $('transactionCardId').value = currentCardId;
     $('cardRows').innerHTML = visible.map(card => renderCardRow(card, sync)).join('') || '<tr><td colspan="5">尚无卡片，请同步或申请。</td></tr>';
     $('cardSyncState').textContent = sync?.failed ? `平台同步失败${sync.message ? `：${sync.message}` : ''}。下面显示旧的本地快照，不能用于确认当前状态和余额。`
-        : sync?.checked_at ? `查询完成：${sync.checked_at}，同步 ${sync.count} 张，详情读取失败 ${sync.failed_ids.length} 张，已注销或未返回 ${(sync.removed_ids || []).length} 张。数值为本次查询时的快照。${sync.replacement_warning ? ` 补开待处理：${sync.replacement_warning}` : ''}`
+        : sync?.checked_at ? `查询完成：${sync.checked_at}，同步 ${sync.count} 张，详情读取失败 ${sync.failed_ids.length} 张，已注销或未返回 ${(sync.removed_ids || []).length} 张。数值为本次查询时的快照。`
             : '状态、余额和成功会员订单次数为本地快照，点击“同步卡片与订单”更新。“刷新本地记录”不会调用平台；API 不可见的网页订单不计入，授权流水仅供对账。';
     $('issueRows').innerHTML = data.issues.map(issue => `<tr><td>${escapeHtml(issue.created_at)}<br><code>${escapeHtml(issue.issue_key)}</code></td><td>${escapeHtml(issue.product_code)}<br>${escapeHtml(issue.amount)}</td><td>${issue.job_key ? escapeHtml(cardPlans[issue.plan_type] || issue.plan_type) : '共享卡池'} / ${escapeHtml(issue.state)}${issue.replacement_for_card_id ? `<br>替换原卡 ${escapeHtml(issue.replacement_for_card_id)}` : ''}<br>${escapeHtml(issue.provider_status || '')}<br>${escapeHtml(issue.message)}</td><td>${escapeHtml(issue.order_no || '待返回')}<br>${escapeHtml(issue.card_id || '待返回')}</td></tr>`).join('') || '<tr><td colspan="4">暂无开卡申请</td></tr>';
     $('fundingRows').innerHTML=(data.fundings || []).map(funding => `<tr><td>${escapeHtml(funding.created_at)}<br><code>${escapeHtml(funding.job_key)}</code></td><td>${escapeHtml(funding.card_id)}<br>${escapeHtml(funding.amount)} USD</td><td>${escapeHtml(funding.state)} / ${escapeHtml(funding.provider_status)}<br>${escapeHtml(funding.order_no || funding.funding_key)}<br>${escapeHtml(funding.message)}</td><td>${escapeHtml(funding.fee_snapshot || '待确认')}<br>支付前要求余额：${escapeHtml(funding.target_balance)}</td></tr>`).join('') || '<tr><td colspan="4">暂无卡片补款</td></tr>';
@@ -368,8 +368,7 @@ async function synchronizeCards() {
     try {
         result = await request('/api/admin/orbitcard/cards/sync', {});
         await loadCards(result);
-        notice(result.replacement_warning ? `${result.message}。补开待处理：${result.replacement_warning}` : result.message,
-            result.failed_ids.length || result.replacement_warning ? 'error' : 'success');
+        notice(result.message, result.failed_ids.length ? 'error' : 'success');
     } catch (error) {
         if (result) {
             const message = `${result.message}；本地列表刷新失败：${error.message}。请点击“刷新本地记录”，当前列表未更新。`;

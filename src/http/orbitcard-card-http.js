@@ -111,7 +111,7 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
         res.json({ success: true, card, message: '开卡成功，首充 20 USD；卡片按平台状态和订阅卡片错误判定可用性' });
     }));
     app.post('/api/admin/orbitcard/issues/refresh', handler(async (req, res) => {
-        await cardService.recover(await config());
+        await cardService.recover(await config(), { confirmIssues: true });
         res.json({ success: true, message: '已安排原开卡和补款确认，请查看对应记录；未确认请求继续保留原幂等键' });
     }));
 };

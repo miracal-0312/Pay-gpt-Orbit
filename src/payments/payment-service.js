@@ -114,8 +114,6 @@ module.exports = function createPaymentService({ store, cardService, worker, act
             const settled = await store.getTaskStatus(jobKey);
             if (settled) await notify(settled).catch(() => log(jobKey, '任务已结算，通知发送失败', 'notification_failed'));
             if (settled?.status === 'success' && settled.orbitcard_card_id) {
-                await cardService.rotateExhausted?.(task.apiConfig)
-                    .catch(() => log(jobKey, '满额卡片的补开待后台处理，原订阅已成功', 'card_quota_maintenance_pending'));
                 await cardService.reconcile(task.apiConfig,settled.orbitcard_card_id,jobKey)
                     .catch(() => log(jobKey,'订阅已成功，卡片资金只读核对暂不可用，请稍后在后台查询','payment_reconciliation_pending'));
             }

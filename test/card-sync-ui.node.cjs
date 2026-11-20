@@ -41,7 +41,7 @@ test('an idle card below its configured successful order limit remains available
     await f.api.loadCards();
     assert.match(f.$('cardRows').innerHTML,/空闲/);
     assert.doesNotMatch(f.$('cardRows').innerHTML,/暂不分配|停止分配/);
-    assert.match(f.$('cardRows').innerHTML,/满额后自动停用并补开一张/);
+    assert.match(f.$('cardRows').innerHTML,/满额后自动停用/);
 });
 
 test('deleted and unavailable cards are omitted from rows after local refresh',async()=>{
@@ -122,13 +122,6 @@ test('an exhausted card remains visibly unavailable even when the provider is ac
     assert.match(f.$('cardRows').innerHTML,/待核对旧删卡记录/);
 });
 
-test('a pending replacement shows a warning while synchronized card details stay fresh',async()=>{
-    const f=setup(()=>({count:1,synced_ids:[42],failed_ids:[],listed_ids:[42],checked_at:'2026-11-20T12:00:00Z',
-        message:'已同步',replacement_warning:'账户余额不足'}));
-    await f.api.synchronizeCards();
-    assert.match(f.$('cardSyncState').textContent,/查询完成.*补开待处理.*账户余额不足/);
-    assert.match(f.$('cardRows').innerHTML,/本次同步/);
-});
 
 test('manual usage editor is removed',()=>{
     const source=fs.readFileSync(path.join(__dirname,'../public/admin.js'),'utf8');

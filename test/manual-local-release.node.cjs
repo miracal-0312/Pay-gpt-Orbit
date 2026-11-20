@@ -246,7 +246,10 @@ test('released original issue uses only its saved key and no released failure cr
     const cardsApi = { issueResult: data => ({ ...data, fees: {}, retryAfterMs: 0 }),
         cardDetail: async () => ({ card_id: 7, product_code: 'product-1', provider_status: 'ACTIVE' }) };
     const create = load('src/orbitcard/orbitcard-card-service.js', { './orbitcard-client': api, './orbitcard-cards-client': cardsApi });
-    await create({ store, audit() {}, now: () => 100000 }).recover(cfg);
+    const service = create({ store, audit() {}, now: () => 100000 });
+    await service.recover(cfg);
+    assert.deepEqual(calls, []); assert.equal(issue.state, initialState);
+    await service.recover(cfg, { confirmIssues: true });
     assert.equal(issue.state, 'ready'); assert.equal(card.active_job, 'new-job');
     assert.deepEqual(calls, [{ operation: 'createCard', body, key: 'ORIGINAL-KEY' }]);
     }
@@ -288,45 +291,58 @@ test('CDK editing ignores released old results but respects current occupancy an
     }
 });
 
+const replacementCard = { card_id: 9, product_code: 'product-1', provider_status: 'ACTIVE', currency: 'USD', balance_amount: '20.00' };
+const selectionStoreMethods = {
+    fundingForJob: async () => null, issueForJob: async () => null,
+    listSuccessfulOrders: async () => [], subscriptionBindings: async () => [], reserveCard: async () => replacementCard
+};
+const selectionCardReads = {
+    listCards: async () => [{ card_id: 8, provider_status: 'ACTIVE' }],
+    cardDetailsInBatches: async (_cfg, ids) => ids.includes(9) ? [replacementCard] : []
+};
+const selectionConfig = { ...cfg, orbitcard_plan_prices: { plus: '20.00' } };
+
 function replacementRace({ existing = false, releaseBeforeLock = false } = {}) {
     let held = false, isReleased = false, generated = 0, issue = existing ? {
         issue_key: 'SAVED-KEY', scope, job_key: null, replacement_for_job_key: 'old-job', replacement_for_card_id: 8,
         plan_type: 'plus', state: 'prepared', product_code: 'product-1', amount: '20.00', credential_hash: credential,
         request_body: JSON.stringify({ product_code: 'product-1', amount: '20.00', quantity: 1 }) } : null;
     const calls = [], deniedReleases = [];
-    const locked = { listFundings: async () => [], pendingIssue: async plan => issue && plan === 'plus' && !['ready','failed'].includes(issue.state) ? issue : null,
-        listCards: async () => [{ card_id: 8, disabled_at: released, disabled_code: 'card_declined', disabled_job_key: 'old-job', active_job: null }],
+    const locked = { ...selectionStoreMethods, listFundings: async () => [], pendingIssue: async plan => issue && plan === 'plus' && !['ready','failed'].includes(issue.state) ? issue : null,
+        listCards: async () => [{ card_id: 8, disabled_at: released, disabled_code: 'card_declined', disabled_job_key: 'old-job', active_job: null },
+            ...(issue?.state === 'ready' ? [{ ...replacementCard, successful_order_count: 0 }] : [])],
         replacementForCard: async () => issue, listIssues: async () => issue ? [issue] : [],
         createManualIssue: async input => { assert.equal(held, true); generated++; issue = { ...input, scope, state: 'prepared' }; return issue; },
         updateIssue: async (_key, patch) => Object.assign(issue, patch), syncCards: async () => {},
         completeIssue: async () => { issue.state = 'ready'; } };
-    const store = { withCardAllocationLock: async (_url, fn) => fn(locked),
-        paymentOwner: async job => job ? { allowed: false, keys: ['cdk:code-1'], localReleased: isReleased, canReconcileIssue: isReleased }
+    const store = { cardMethods: () => locked, withCardAllocationLock: async (_url, fn) => fn(locked),
+        paymentOwner: async job => job === 'old-job' ? { allowed: false, keys: ['cdk:code-1'], localReleased: isReleased, canReconcileIssue: isReleased }
             : { allowed: true, keys: [] },
         acquirePaymentLock: async () => {
             if (held) return null;
             if (releaseBeforeLock) isReleased = true;
             held = true;
             return { assertOwned: async () => assert.equal(held, true), release: async () => { held = false; } };
-        }, assertPaymentAllowed: async job => assert.ok(job == null), assertIssueReconciliationAllowed: async () => {} };
+        }, assertPaymentAllowed: async job => assert.ok(job == null || job === 'new-job'), assertIssueReconciliationAllowed: async () => {} };
     const attemptRelease = async () => {
         const guard = await store.acquirePaymentLock(['cdk:code-1']);
         if (!guard) { deniedReleases.push(true); return false; }
         isReleased = true; await guard.release(); return true;
     };
     const api = { request: async (_config, operation, body, key) => {
+        if (operation === 'getSubscriptionList') return { success: true, data: { items: [], total: 0 } };
         assert.equal(held, true); assert.equal(await attemptRelease(), false);
         calls.push({ operation, body, key });
         if (operation === 'getAccountBalance') return { success: true, data: { available_balance: '100.00' } };
         assert.equal(operation, 'createCard');
         return { success: true, status: 200, data: { order_no: 'ORIGINAL-OPEN', card_id: 9, status: 'success', completed: true } };
     } };
-    const cardsApi = { products: async () => {
+    const cardsApi = { ...selectionCardReads, products: async () => {
         assert.equal(held, true); assert.equal(await attemptRelease(), false);
         return [{ product_code: 'product-1' }];
     }, chooseOpeningProduct: () => ({ product_code: 'product-1', amount: '20.00' }),
     createCardBody: selected => ({ ...selected, quantity: 1 }),
-    cardDetail: async () => ({ card_id: 9, product_code: 'product-1', provider_status: 'ACTIVE' }),
+    cardDetail: async () => replacementCard,
     issueResult: data => ({ ...data, fees: {}, retryAfterMs: 0 }) };
     const create = load('src/orbitcard/orbitcard-card-service.js', { './orbitcard-client': api, './orbitcard-cards-client': cardsApi });
     return { service: create({ store, audit() {}, now: () => 100000 }), calls, deniedReleases,
@@ -335,7 +351,7 @@ function replacementRace({ existing = false, releaseBeforeLock = false } = {}) {
 test('replacement creation and saved-intent submission hold the failed order lock across all awaits', async () => {
     for (const existing of [false, true]) {
         const f = replacementRace({ existing });
-        await f.service.recover(cfg);
+        assert.equal(await f.service.allocate(selectionConfig, 'new-job', 'plus'), 9);
         assert.ok(f.deniedReleases.length > 0); assert.equal(f.held(), false);
         assert.equal(f.generated(), existing ? 0 : 1);
         assert.equal(f.calls.filter(call => call.operation === 'createCard').length, 1);
@@ -348,7 +364,7 @@ test('replacement creation and saved-intent submission hold the failed order loc
 test('a release committed between replacement discovery and execution-lock acquisition prevents every POST', async () => {
     for (const existing of [false, true]) {
         const f = replacementRace({ existing, releaseBeforeLock: true });
-        await f.service.recover(cfg);
+        await assert.rejects(f.service.allocate(selectionConfig, 'new-job', 'plus'), /没有可用|原补开/);
         assert.deepEqual(f.calls, []); assert.equal(f.generated(), 0); assert.equal(f.held(), false);
     }
 });
@@ -395,9 +411,11 @@ function closedIssueFixture({ manualResult = 'failed', existing = false, orderNo
         request_body: JSON.stringify({ product_code: 'product-1', amount: '20.00', quantity: 1 }) } : null;
     const calls = [], patches = [];
     const locked = {
+        ...selectionStoreMethods,
         listFundings: async () => [],
         pendingIssue: async plan => plan === 'plus' && issue && !['ready', 'failed'].includes(issue.state) ? issue : null,
-        listCards: async () => [{ card_id: 8, disabled_at: released, disabled_code: 'card_declined', disabled_job_key: owner.job_key }],
+        listCards: async () => [{ card_id: 8, disabled_at: released, disabled_code: 'card_declined', disabled_job_key: owner.job_key },
+            ...(issue?.state === 'ready' ? [{ ...replacementCard, successful_order_count: 0 }] : [])],
         listIssues: async () => issue ? [issue] : [], replacementForCard: async () => issue,
         createManualIssue: async input => {
             if (input.replacement_for_job_key) assert.equal(held, true);
@@ -407,7 +425,9 @@ function closedIssueFixture({ manualResult = 'failed', existing = false, orderNo
         syncCards: async () => {}, completeIssue: async () => { issue.state = 'ready'; }
     };
     const automation = createAutomation({ runQuery: async sql => sql.includes('FROM cdk_codes') ? [{ is_active: 1 }] : [owner] });
-    const store = { ...automation, withCardAllocationLock: async (_base, fn) => fn(locked),
+    const store = { ...automation, cardMethods: () => locked, withCardAllocationLock: async (_base, fn) => fn(locked),
+        assertPaymentAllowed: async job => { if (job !== 'new-job') await automation.assertPaymentAllowed(job); },
+        paymentOwner: async job => job === 'new-job' ? { allowed: true, keys: [] } : automation.paymentOwner(job),
         acquirePaymentLock: async keys => {
             assert.deepEqual(keys, ['cdk:code-1']);
             if (held) return null;
@@ -424,6 +444,7 @@ function closedIssueFixture({ manualResult = 'failed', existing = false, orderNo
         assert.equal(held, true); assert.equal(await attemptClose(), false);
     }
     const api = { request: async (_cfg, operation, body, key) => {
+        if (operation === 'getSubscriptionList') return { success: true, data: { items: [], total: 0 } };
         if (issue?.replacement_for_job_key || issue?.job_key || !issue && !owner.manual_result) await assertOriginalLocked();
         calls.push({ operation, body, key });
         if (operation === 'getAccountBalance') return { success: true, data: { available_balance: '100.00' } };
@@ -431,6 +452,7 @@ function closedIssueFixture({ manualResult = 'failed', existing = false, orderNo
         return { success: true, status: 200, data: { order_no: orderNo || 'ORIGINAL-OPEN', card_id: 9, status: 'success', completed: true } };
     } };
     const cardsApi = {
+        ...selectionCardReads,
         products: async () => {
             calls.push({ operation: 'getProductCode' });
             if (!owner.manual_result) await assertOriginalLocked();
@@ -440,7 +462,7 @@ function closedIssueFixture({ manualResult = 'failed', existing = false, orderNo
         chooseOpeningProduct: () => ({ product_code: 'product-1', amount: '20.00' }),
         createCardBody: selected => ({ ...selected, quantity: 1 }),
         issueResult: data => ({ ...data, fees: {}, retryAfterMs: 0 }),
-        cardDetail: async () => ({ card_id: 9, product_code: 'product-1', provider_status: 'ACTIVE' })
+        cardDetail: async () => replacementCard
     };
     const create = load('src/orbitcard/orbitcard-card-service.js', { './orbitcard-client': api, './orbitcard-cards-client': cardsApi });
     return { service: create({ store, audit() {}, now: () => 100000 }), owner, store, calls, patches, attemptClose,
@@ -452,7 +474,7 @@ test('manual closure without local release prevents new replacements and submiss
         const f = closedIssueFixture({ manualResult, existing, bound });
         const owner = await f.store.paymentOwner('old-job');
         assert.equal(owner.manualClosed, true); assert.equal(owner.localReleased, false); assert.equal(owner.allowed, false);
-        await f.service.recover(cfg);
+        await assert.rejects(f.service.allocate(selectionConfig, 'new-job', 'plus'), /没有可用|原补开|待确认开卡申请/);
         assert.deepEqual(f.calls, []); assert.deepEqual(f.patches, []); assert.equal(f.generated(), 0);
         if (existing) {
             await assert.rejects(f.service.apply(cfg), bound ? /存在其他待确认开卡申请/ : /原补开申请不可继续提交/);
@@ -466,6 +488,8 @@ test('closed orders reconcile only their saved issued order number and key, incl
         const f = closedIssueFixture({ manualResult, bound, existing: true, orderNo: 'SAVED-ORDER' });
         const original = { key: f.issue().issue_key, body: f.issue().request_body };
         await f.service.recover(cfg);
+        assert.deepEqual(f.calls, []);
+        await f.service.recover(cfg, { confirmIssues: true });
         assert.equal(f.generated(), 0); assert.equal(f.issue().state, 'ready'); assert.equal(f.held(), false);
         assert.deepEqual(f.calls, [{ operation: 'createCard', key: original.key, body: JSON.parse(original.body) }]);
         assert.equal(f.patches.some(patch => patch.state === 'failed'), false);
@@ -483,17 +507,17 @@ test('administrator apply reconciles a closed existing replacement under the ori
 test('replacement locks reject an intervening manual closure and retain the same guard through remote awaits', async () => {
     for (const existing of [false, true]) {
         const stopped = closedIssueFixture({ manualResult: null, existing, closeBeforeLock: true });
-        await stopped.service.recover(cfg);
+        await assert.rejects(stopped.service.allocate(selectionConfig, 'new-job', 'plus'), /没有可用|原补开/);
         assert.deepEqual(stopped.calls, []); assert.equal(stopped.generated(), 0); assert.equal(stopped.held(), false);
         const normal = closedIssueFixture({ manualResult: null, existing });
         normal.owner.orbitcard_state = 'manual'; // A pause alone keeps the existing replacement policy.
-        await normal.service.recover(cfg);
+        assert.equal(await normal.service.allocate(selectionConfig, 'new-job', 'plus'), 9);
         assert.equal(normal.calls.filter(call => call.operation === 'createCard').length, 1);
         assert.ok(normal.deniedClosures() > 0); assert.equal(normal.held(), false);
         assert.equal(await normal.attemptClose(), true);
     }
     const changed = closedIssueFixture({ manualResult: null, closeDuringProducts: true });
-    await changed.service.recover(cfg);
+    await assert.rejects(changed.service.allocate(selectionConfig, 'new-job', 'plus'), /人工闭单/);
     assert.equal(changed.generated(), 0); assert.equal(changed.calls.some(call => call.operation === 'createCard'), false);
     assert.equal(changed.held(), false);
 });

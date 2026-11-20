@@ -110,16 +110,16 @@ test('opening recovery never accepts success or terminal failure with top-level 
             if (location === 'top') response.requestError = { code: 'relay_query_failed' };
             else response.data.request_error = { code: 'relay_query_failed' };
             const f = await issueFixture(response);
-            await f.service.recover(cfg);
+            await f.service.recover(cfg, { confirmIssues: true });
             assert.equal(f.db.issues[0].state, 'unknown');
             assert.equal(f.db.issues[0].order_no, 'OPEN-ORIGINAL');
             assert.equal(f.db.cards.length, 0);
             assert.ok(f.db.cdks[0].used_at);
             assert.equal(f.db.tasks[0].orbitcard_state, 'card_pending');
-            await f.service.recover(cfg);
+            await f.service.recover(cfg, { confirmIssues: true });
             assert.equal(f.calls.length, 1);
             f.advance(600000);
-            await f.service.recover(cfg);
+            await f.service.recover(cfg, { confirmIssues: true });
             assert.equal(f.calls.length, 2);
             for (const call of f.calls) assert.deepEqual(call, { operation: 'createCard', body: f.body, key: 'open-original-safe' });
             assert.equal(f.db.issues.length, 1);
@@ -131,7 +131,7 @@ test('permission, rate and server errors keep the opening identity/body and pers
     for (const response of [{ success: false, status: 403 }, { success: false, status: 429, retryAfterMs: 120000 },
         { success: false, status: 500 }]) {
         const f = await issueFixture(response);
-        await f.service.recover(cfg);
+        await f.service.recover(cfg, { confirmIssues: true });
         assert.equal(f.db.issues[0].state, 'unknown');
         assert.equal(f.db.issues[0].order_no, 'OPEN-ORIGINAL');
         assert.equal(f.db.issues[0].issue_key, 'open-original-safe');

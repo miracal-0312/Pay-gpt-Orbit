@@ -63,7 +63,6 @@ const cardService = require('./orbitcard/orbitcard-card-service')({ store, audit
 const manualService = require('./payments/orbitcard-manual-service')({ store, activeJobs, cardService, waitingQueue, audit: entry => runtimeLog.push(entry) });
 const recovery = require('./payments/order-recovery')({ store, query: require('./orbitcard/orbitcard-query'), activeJobs,
     audit: entry => runtimeLog.push(entry), notify,
-    onSuccess: () => store.getGptApiConfig().then(cfg => cardService.rotateExhausted(cfg)),
     checkBalance: task => store.getGptApiConfig().then(cfg => cardService.canResumeBalance(cfg,task)),
     confirmFunding: (task, guard) => store.getGptApiConfig().then(cfg => cardService.confirmFunding(
         { ...cfg, auditJobKey: task.job_key, executionGuard: guard }, task.job_key, task.orbitcard_plan_type)) });

@@ -50,6 +50,9 @@ test('card_pending confirms the acknowledged original issue without authorizing 
         if (ownerState === 'disabled') f.db.cdks[0].is_active = 0;
         await assert.rejects(f.store.assertPaymentAllowed(f.task.jobKey), PaymentStoppedError);
         await f.service.recover(cfg);
+        assert.deepEqual(f.calls, []);
+        assert.equal(f.db.issues[0].state, 'pending');
+        await f.service.recover(cfg, { confirmIssues: true });
         assert.equal(f.db.issues[0].state, 'ready');
         assert.equal(f.db.issues[0].order_no, 'OPEN-ORIGINAL');
         assert.equal(f.db.issues[0].card_id, 42);
@@ -57,7 +60,7 @@ test('card_pending confirms the acknowledged original issue without authorizing 
         assert.equal(f.db.cards[0].active_job, null);
         assert.deepEqual(f.calls.map(call => call.operation), ['createCard', 'cardDetail']);
         assert.deepEqual(f.calls[0], { operation: 'createCard', body: f.body, key: 'original-key' });
-        await f.service.recover(cfg);
+        await f.service.recover(cfg, { confirmIssues: true });
         assert.equal(f.calls.length, 2, 'terminal issues must never be replayed');
     }
 });
@@ -66,7 +69,7 @@ test('confirmed failed or refunded original issues become terminal without openi
     for (const status of ['failed', 'refunded']) {
         const f = await setup({ response: () => ({ success: true, status: 200,
             data: { order_no: 'OPEN-ORIGINAL', status, completed: true } }) });
-        await f.service.recover(cfg);
+        await f.service.recover(cfg, { confirmIssues: true });
         assert.equal(f.db.issues[0].state, 'failed');
         assert.equal(f.calls.length, 1);
         assert.equal(f.calls[0].key, 'original-key');
@@ -82,7 +85,7 @@ test('issue confirmation and order recovery release the unsubmitted task while p
             query: { refresh: async () => assert.fail('an unsubmitted issue must not query or submit membership') } });
         await recovery.refreshTask(f.db.tasks[0]);
         assert.equal(f.db.tasks[0].orbitcard_state, 'card_pending');
-        await f.service.recover(cfg);
+        await f.service.recover(cfg, { confirmIssues: true });
         const released = await recovery.refreshTask(f.db.tasks[0]);
         assert.equal(released.applied, true);
         assert.equal(f.db.tasks[0].orbitcard_state, redeemed ? 'support_locked' : 'rejected');
@@ -141,7 +144,7 @@ test('issue reconciliation never changes the original credential, request body o
             data: { order_no: 'OTHER-ORDER', card_id: 42, status: 'success' } }) });
         if (mismatch === 'credential') f.db.issues[0].credential_hash = 'wrong-account';
         if (mismatch === 'body') f.db.issues[0].request_body = JSON.stringify({ ...f.body, amount: '30.00' });
-        await f.service.recover(cfg);
+        await f.service.recover(cfg, { confirmIssues: true });
         assert.equal(f.db.issues[0].state, 'unknown');
         assert.equal(f.db.issues[0].order_no, 'OPEN-ORIGINAL');
         assert.equal(f.calls.length, mismatch === 'order' ? 1 : 0);
@@ -151,14 +154,14 @@ test('issue reconciliation never changes the original credential, request body o
 
 test('issue recovery respects retry intervals and retains the acknowledged identity across transient errors', async () => {
     const f = await setup({ response: () => ({ success: false, status: 503, retryAfterMs: 120000, data: null }) });
-    await f.service.recover(cfg);
+    await f.service.recover(cfg, { confirmIssues: true });
     assert.equal(f.db.issues[0].state, 'unknown');
     assert.equal(f.db.issues[0].order_no, 'OPEN-ORIGINAL');
     f.advance(119999);
-    await f.service.recover(cfg);
+    await f.service.recover(cfg, { confirmIssues: true });
     assert.equal(f.calls.length, 1);
     f.advance(1);
-    await f.service.recover(cfg);
+    await f.service.recover(cfg, { confirmIssues: true });
     assert.equal(f.calls.length, 2);
     assert.deepEqual(f.calls[1], f.calls[0]);
 });
@@ -168,7 +171,7 @@ test('an ended owner cannot fulfill a late issue response', async () => {
         current.db.tasks[0].orbitcard_state = 'rejected';
         return { success: true, status: 200, data: { order_no: 'OPEN-ORIGINAL', card_id: 42, status: 'success' } };
     } });
-    await f.service.recover(cfg);
+    await f.service.recover(cfg, { confirmIssues: true });
     assert.equal(f.calls.length, 1);
     assert.notEqual(f.db.issues[0].state, 'ready');
     assert.equal(f.db.cards.length, 0);

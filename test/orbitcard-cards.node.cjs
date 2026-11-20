@@ -415,14 +415,16 @@ test('eligible existing card is chosen without issuing; the subscription worker 
     assert.equal(f.db.tasks[0].orbitcard_card_id,42);
 });
 
-test('unknown issuance is durable and a new worker or restart uses the same body/key',async () => {
+test('unknown manual issuance is durable and explicit confirmation uses the same body and key',async () => {
     let ready=false;
     const f=serviceFixture({createCard:async () => ready?{success:true,data:{card_id:77,order_no:'OPEN-77',status:'success'}}:{success:false,status:502}});
     await assert.rejects(f.service.apply(cfg),/结果待确认.*保留原开卡申请.*禁止更换幂等键重开/);
     assert.equal(f.db.issues.length,1); assert.equal(f.db.issues[0].state,'unknown');
     f.advance(); await assert.rejects(f.service.apply(cfg)); assert.equal(f.db.issues.length,1);
     const before=f.calls.filter(c => c.operation==='createCard'); assert.equal(before[0].key,before[1].key); assert.deepEqual(before[0].body,before[1].body);
-    ready=true; f.advance(); f.setCards([{card_id:77,status:'ACTIVE',product_code:'p1',balance:85,currency:'USD'}]); await f.service.recover({...cfg,enabled:false});
+    ready=true; f.advance(); f.setCards([{card_id:77,status:'ACTIVE',product_code:'p1',balance:85,currency:'USD'}]);
+    await f.service.recover({...cfg,enabled:false});assert.equal(f.db.issues[0].state,'unknown');
+    await f.service.recover({...cfg,enabled:false},{confirmIssues:true});
     assert.equal(f.db.issues[0].state,'ready'); assert.equal(f.db.cards[0].successful_order_count,0); assert.equal(f.db.uses.length,0);
 });
 
@@ -1158,10 +1160,9 @@ test('payment core uses three different cards for confirmed card failures and st
     assert.deepEqual(f.db.fundings,[]); assert.deepEqual(f.db.issues,[]);
     assert.ok(writes.every(row=>f.db.cards.find(card=>card.card_id===row.body.card_id).disabled_at));
     assert.ok(!f.db.cards.find(card=>card.card_id===45).disabled_at);
-    // Pool maintenance may replace the last failed card, but it cannot restart
-    // the settled payment chain or reset its persisted attempt budget.
+    // Background recovery leaves the stopped payment chain and the shared pool alone.
     await f.service.recover(cfg);
-    assert.equal(f.calls.filter(row=>row.operation==='createCard').length,1);
+    assert.equal(f.calls.filter(row=>row.operation==='createCard').length,0);
     assert.equal(f.requests.filter(row=>row.operation==='createSubscription').length,3);
     assert.equal(f.db.tasks.length,3);assert.equal(f.db.tasks.at(-1).orbitcard_state,'support_locked');
 });
