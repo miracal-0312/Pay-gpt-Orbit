@@ -31,6 +31,13 @@ module.exports = function orderUsageDb(db) {
                 if (!card) return {affectedRows:0};
                 card.successful_order_count++; return {affectedRows:1};
             }
+            if (q.startsWith('UPDATE orbitcard_managed_cards SET disabled_at=UTC_TIMESTAMP(3),') && q.includes("disabled_code='success_limit_reached'")) {
+                const exhausted = cards().filter(card => card.scope === p[1] && !card.disabled_at && card.successful_order_count >= p[2]
+                    && (p.length === 3 || Number(card.card_id) === Number(p[3])));
+                for (const card of exhausted) Object.assign(card, {disabled_at:new Date().toISOString(), disabled_code:'success_limit_reached',
+                    disabled_reason:p[0], disabled_job_key:null});
+                return {affectedRows:exhausted.length};
+            }
         }
     };
 };

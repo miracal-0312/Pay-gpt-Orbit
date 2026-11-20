@@ -3,6 +3,7 @@
 const { CardPreparationError, cardScope } = require('../orbitcard/orbitcard-card-policy');
 const { outcome, terminalUpstreamSnapshot } = require('../orbitcard/orbitcard-client');
 const { validOrder } = require('../payments/orbitcard-cdk');
+const { MAX_SUCCESSFUL_ORDERS, validCount } = require('../orbitcard/orbitcard-pool');
 
 function verifiedSuccess(snapshot, expected) {
     return Boolean(snapshot && !snapshot.request_error && validOrder(snapshot, expected)
@@ -12,6 +13,13 @@ function verifiedSuccess(snapshot, expected) {
 
 // Called after confirmation, inside the order settlement/release transaction.
 module.exports = function createOrderUsage({ runQuery, runExecute, withTransaction }) {
+    async function disableExhaustedCards(scope, { cardId, connection } = {}) {
+        const result = await runExecute(`UPDATE orbitcard_managed_cards SET disabled_at=UTC_TIMESTAMP(3),
+            disabled_code='success_limit_reached', disabled_reason=?, disabled_job_key=NULL
+            WHERE scope=? AND disabled_at IS NULL AND successful_order_count>=?${cardId == null ? '' : ' AND card_id=?'}`,
+        [`已达到 ${MAX_SUCCESSFUL_ORDERS} 笔成功会员订单上限`, scope, MAX_SUCCESSFUL_ORDERS, ...(cardId == null ? [] : [cardId])], { connection });
+        return result.affectedRows;
+    }
     function identity(value) {
         return typeof value === 'string' && value.length > 0 && value.length <= 128
             && value.trim() === value && !/[\u0000-\u001f\u007f]/.test(value);
@@ -26,7 +34,7 @@ module.exports = function createOrderUsage({ runQuery, runExecute, withTransacti
             throw new CardPreparationError('成功订单缺少有效的原订单或卡片身份，不能计数');
         }
         const [card] = await runQuery('SELECT * FROM orbitcard_managed_cards WHERE scope=? AND card_id=? FOR UPDATE', [scope, cardId], options);
-        if (!card || card.successful_order_count == null || !Number.isSafeInteger(Number(card.successful_order_count)) || Number(card.successful_order_count) < 0) {
+        if (!validCount(card)) {
             throw new CardPreparationError('卡片成功订单计数未初始化，不能结算');
         }
         const existing = await runQuery(`SELECT * FROM orbitcard_successful_orders WHERE scope=?
@@ -50,6 +58,10 @@ module.exports = function createOrderUsage({ runQuery, runExecute, withTransacti
         const updated = await runExecute(`UPDATE orbitcard_managed_cards SET successful_order_count=successful_order_count+1
             WHERE scope=? AND card_id=?`, [scope, cardId], options);
         if (updated.affectedRows !== 1) throw new CardPreparationError('成功订单计数未保存，结算已回滚');
+        if (!card.disabled_at && Number(card.successful_order_count) + 1 >= MAX_SUCCESSFUL_ORDERS) {
+            const disabled = await disableExhaustedCards(scope, { cardId, connection: options.connection });
+            if (disabled !== 1) throw new CardPreparationError('满额卡片停用标记未保存，结算已回滚');
+        }
         return true;
     }
     async function backfill() {
@@ -83,6 +95,6 @@ module.exports = function createOrderUsage({ runQuery, runExecute, withTransacti
             }
         }
     }
-    return { recordSuccess, backfill };
+    return { recordSuccess, disableExhaustedCards, backfill };
 };
 module.exports.verifiedSuccess = verifiedSuccess;

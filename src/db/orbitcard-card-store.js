@@ -44,21 +44,6 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
                     WHERE scope=? AND card_id=?`, [count,scope,cardId], opts);
             });
         }
-        async function retireCard(cardId, key) {
-            return transaction(async tx => {
-                const opts = { connection: tx };
-                const [card] = await runQuery('SELECT * FROM orbitcard_managed_cards WHERE scope=? AND card_id=? FOR UPDATE', [scope,cardId], opts);
-                if (!card || card.active_job) throw new CardPreparationError('卡片不存在或仍被任务占用，稍后再删卡');
-                if (card.retirement_key) return card;
-                await runExecute("UPDATE orbitcard_managed_cards SET retirement_key=?,retirement_state='prepared' WHERE scope=? AND card_id=? AND retirement_key IS NULL AND active_job IS NULL", [key,scope,cardId], opts);
-                return { ...card, retirement_key: key, retirement_state: 'prepared' };
-            });
-        }
-        async function markRetirementSubmitted(cardId, key) {
-            // Save uncertainty before sending: a process crash must never cause a second delete POST.
-            const result = await execute("UPDATE orbitcard_managed_cards SET retirement_state='unknown' WHERE scope=? AND card_id=? AND retirement_key=? AND retirement_state='prepared' AND active_job IS NULL AND provider_status<>'DELETED'", [scope,cardId,key]);
-            return result.affectedRows === 1;
-        }
         async function confirmRetirement(cardId, key, card) {
             if (Number(card?.card_id) !== Number(cardId) || card?.provider_status !== 'DELETED') {
                 throw new CardPreparationError('删卡确认缺少相符的卡 ID 或 DELETED 状态');
@@ -75,12 +60,16 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
         async function listCards() {
             return query('SELECT * FROM orbitcard_managed_cards WHERE scope = ? ORDER BY successful_order_count DESC, card_id', [scope]);
         }
+        function disableExhaustedCards() {
+            return usage.disableExhaustedCards(scope, options);
+        }
         async function setCardAvailability(cardId, disabled, reason) {
             return transaction(async connection => {
                 const opts = { connection };
                 const [card] = await runQuery('SELECT * FROM orbitcard_managed_cards WHERE scope=? AND card_id=? FOR UPDATE', [scope, cardId], opts);
                 if (!card) throw new CardPreparationError('卡片不存在，请先同步卡片');
                 if (card.active_job) throw new CardPreparationError('卡片仍被订单占用，请先核对原订单后修改');
+                if (poolPolicy.exhausted(card)) throw new CardPreparationError('卡片已达到成功会员订单上限，不能修改使用状态');
                 if (!disabled && card.retirement_key) throw new CardPreparationError('卡片已有退役申请，请先核对原删卡结果');
                 if (disabled) await runExecute(`UPDATE orbitcard_managed_cards SET disabled_at = UTC_TIMESTAMP(3),
                     disabled_code = 'manual', disabled_reason = ?, disabled_job_key = NULL WHERE scope=? AND card_id=?`, [reason, scope, cardId], opts);
@@ -204,7 +193,7 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
             return query(`SELECT * FROM orbitcard_card_fundings WHERE scope=?${pending ? " AND state IN ('prepared','submitting','pending','unknown')" : ''}
                 ORDER BY updated_at ${pending ? 'ASC' : 'DESC'} LIMIT 100`, [scope]);
         }
-        return { retireCard, markRetirementSubmitted, confirmRetirement, syncCards, listCards, setCardAvailability, listSuccessfulOrders, subscriptionBindings, recordSuccessfulOrder, saveAuthorizations, reserveCard, pendingIssue, createManualIssue, replacementForCard, updateIssue, completeIssue, listIssues, issueForJob,
+        return { confirmRetirement, syncCards, listCards, disableExhaustedCards, setCardAvailability, listSuccessfulOrders, subscriptionBindings, recordSuccessfulOrder, saveAuthorizations, reserveCard, pendingIssue, createManualIssue, replacementForCard, updateIssue, completeIssue, listIssues, issueForJob,
             fundingForJob, createFunding, updateFunding, deferFunding, listFundings };
     }
 

@@ -16,8 +16,8 @@ function decideCards({ saved, listed, detailed, jobKey, planType, priceFor, excl
         if (!live.has(id)) { skipped.push({ card_id: id, reason: 'missing_from_platform_list' }); continue; }
         if (!poolPolicy.eligible(row)) {
             if (owned) throw new CardPreparationError('原订单卡片已停用或正在退役，请核对原订单');
-            skipped.push({ card_id: id, reason: row.disabled_at ? 'card_error_disabled' : row.retirement_key ? 'retiring'
-                : poolPolicy.exhausted(row) ? 'success_limit_reached' : 'order_count_unconfirmed', code: row.disabled_code || '' }); continue;
+            skipped.push({ card_id: id, reason: row.disabled_at && row.disabled_code !== 'success_limit_reached' ? 'card_error_disabled'
+                : poolPolicy.exhausted(row) ? 'success_limit_reached' : row.retirement_key ? 'retiring' : 'order_count_unconfirmed', code: row.disabled_code || '' }); continue;
         }
         // An unresolved owner still blocks a replacement, including when the
         // platform has frozen its card or its quota is already exhausted.

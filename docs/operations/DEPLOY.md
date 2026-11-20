@@ -63,13 +63,13 @@ docker compose logs -f app
 
 渠道与 BIN 在后台通过 `getProductCode` 实时读取并多选，分别保存为 `orbitcard_product_codes`、`orbitcard_bins`；各自留空表示全部，同时选择取交集。旧单一产品配置迁移为单项选择；这些偏好与开卡产品规则不筛选现有支付卡。手动开卡和错误补开均为首充 20 USD、数量 1，需同时满足产品库存、最低首充、账户余额和配置上限。
 
-每张卡累计最多成功支付 3 次，选卡前核对 API 可见的历史成功订单，事务预占再次校验次数。第三次成功释放占用后自动删除原卡，确认删除后补开一张；新卡首充固定 20 USD。升级后已有 3 次及以上成功记录的卡同样停止分配，并在启用接单配置时自动处理。实际选卡还检查 ACTIVE、USD、资料与余额、本地 `disabled_*` 停用记录、占用及未决资金。已验证的卡片相关失败仍会持久化停用并按原失败任务唯一补开。同步保留停用标记和历史计数；删卡结果未知时只读核对，补开沿用持久化身份。需要历史订阅读取、删卡、开卡权限及足够余额；无需新增数据库列，复用已有成功订单账本、退役记录与补开唯一约束。
+每张卡累计最多成功支付 3 次，选卡前核对 API 可见的历史成功订单，事务预占再次校验次数。第三次成功时持久化停用原卡，释放占用后补开一张；新卡首充固定 20 USD。升级后已有 3 次及以上成功记录的卡同样停止分配，并在启用接单配置时自动处理。实际选卡还检查 ACTIVE、USD、资料与余额、本地 `disabled_*` 停用记录、占用及未决资金。已验证的卡片相关失败仍会持久化停用并按原失败任务唯一补开。同步保留停用标记和历史计数；删卡结果未知时只读核对，补开沿用持久化身份。需要历史订阅读取、开卡权限及足够余额。此改动复用成功订单账本、停用字段和补开唯一约束。
 
 每条支付链最多 3 次尝试；Session、账号、配置或未知原因的已确认终态失败转 `support_locked`。受理未知只查原订阅；补款有原资金号时只读核对，无号的已发送补款保留人工核对，不重复 POST。卡片错误补开不重置支付次数。共享等待最多 1 个任务、30 分钟；补款原 Session 续跑等待最多 120 秒，之后仅核对资金并安全收尾。详细流程和全部错误措施见[卡池规则](ORBITCARD-CARDS.md)与[充值审计](../architecture/RECHARGE-AUDIT.md)。
 
 启动由 `database/mysql-schema.sql` 与 `src/db/mysql-store.js` 创建缺少的表、字段及索引，包括成功订单账本、独立授权账本、`disabled_*`、补开来源/唯一索引和管理员 `retry_history`。数据库账号需要 CREATE、ALTER、索引及读写权限；迁移不删除历史表列或业务记录。旧 `orbitcard_max_authorizations`、`reuse_after_ms`、`authorization_pending_count`、`authorization_baseline` 不再参与业务判断；已存在的旧列不主动 DROP。Session 只留内存，重启后需要同账号新 Session 才能继续符合规则的剩余尝试。
 
-API Key 需具备 `subscriptions:read/create`、`cards:create/read/fund`、`products:read`、`account:read`；原删卡意图需 `cards:manage`，消费与资金流水对账需 `transactions:read`。后台「调试与日志」提供接口查询与只读预检，真实扣款测试需单独二级验证和扣款确认。确认迁移、日志、权限、USD 金额、卡片及账户资金后开放接单。完整操作见[使用说明](USER-GUIDE.md)、[调试说明](DIAGNOSTICS.md)。
+API Key 需具备 `subscriptions:read/create`、`cards:create/read/fund`、`products:read`、`account:read`，消费与资金流水对账需 `transactions:read`。后台「调试与日志」提供接口查询与只读预检，真实扣款测试需单独二级验证和扣款确认。确认迁移、日志、权限、USD 金额、卡片及账户资金后开放接单。完整操作见[使用说明](USER-GUIDE.md)、[调试说明](DIAGNOSTICS.md)。
 
 本次套餐补款规则更新后，卡内不足时按套餐完整 USD 金额（向上取到分）充值，足额不充值；账户不足提示联系客服。现有卡支付目标为套餐 USD 金额，不叠加开卡产品最低留存；旧资金意图的原金额、已保存 `target_balance`、正文、幂等键保持不变，升级不批量修改或重发补款。金额示例见[套餐整额补款](ORBITCARD-CARDS.md#套餐整额补款)。
 

@@ -88,16 +88,6 @@ module.exports = function fixture({ enqueueRedemption, now: externalNow } = {}) 
             Object.assign(card, {authorization_count:p[0], authorizations_checked_at:new Date().toISOString()});
             return {affectedRows:1};
         }
-        if (q.startsWith('UPDATE orbitcard_managed_cards SET retirement_key=')) {
-            const card = db.cards.find(c => c.scope === p[1] && c.card_id === p[2]);
-            if (!card || card.active_job || card.retirement_key) return {affectedRows:0};
-            Object.assign(card, {retirement_key:p[0],retirement_state:'prepared'}); return {affectedRows:1};
-        }
-        if (q.startsWith("UPDATE orbitcard_managed_cards SET retirement_state='unknown'")) {
-            const card = db.cards.find(c => c.scope === p[0] && c.card_id === p[1] && c.retirement_key === p[2]);
-            if (!card || card.retirement_state !== 'prepared' || card.active_job || card.provider_status === 'DELETED') return {affectedRows:0};
-            card.retirement_state = 'unknown'; return {affectedRows:1};
-        }
         if (q.startsWith("UPDATE orbitcard_managed_cards SET retirement_state='confirmed'")) {
             const card = db.cards.find(c => c.scope === p[0] && c.card_id === p[1] && c.retirement_key === p[2]);
             if (!card) return {affectedRows:0};

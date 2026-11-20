@@ -137,7 +137,7 @@ test('concurrent preflight assigns distinct cards and admits just one waiting ta
 test('preflight and simulation use durable disable markers while counts enforce the success limit', async () => {
     const f=managedPool(2);f.state.rows[0].successful_order_count=999;f.state.rows[1].successful_order_count=1;
     const run=()=>f.service.preflight({stage:'cards',plan_type:'plus'});
-    const initial=(await run()).result.selection;assert.equal(initial.card_id,43);assert.deepEqual(initial.maintenance.retire_card_ids,[42]);
+    const initial=(await run()).result.selection;assert.equal(initial.card_id,43);assert.deepEqual(initial.maintenance.quota_exhausted_card_ids,[42]);
     assert.ok(initial.cards.every(card=>card.availability_basis==='card_errors'));
     f.state.rows[0].disabled_at='2026-11-16';
     const disabled=(await run()).result.selection;assert.equal(disabled.card_id,43);assert.equal(disabled.skipped[0].reason,'card_error_disabled');
@@ -255,7 +255,7 @@ test('enabled preflight budgets one full-plan topup regardless of pool size',asy
         const enough=await f.service.preflight({stage:'cards',plan_type:'plus'});
         assert.equal(enough.passed,true);
         const maintenance=enough.result.selection.maintenance;
-        assert.deepEqual(maintenance,{current_size:count,retire_card_ids:[],funding_amount:required,
+        assert.deepEqual(maintenance,{current_size:count,quota_exhausted_card_ids:[],funding_amount:required,
             required_balance:required,fees_included:false,snapshot_only:true});
         if(Number(required)>0) {
             f.state.available='15.99';
@@ -271,7 +271,7 @@ test('enabled preflight requires no replacement funds when another card can pay'
     const before=structuredClone(f.state.rows);
     const ready=await f.service.preflight({stage:'cards',plan_type:'plus'});
     assert.equal(ready.passed,true);assert.equal(ready.result.selection.action,'pay');
-    assert.deepEqual(ready.result.selection.maintenance.retire_card_ids,[42]);
+    assert.deepEqual(ready.result.selection.maintenance.quota_exhausted_card_ids,[42]);
     assert.equal(ready.result.selection.maintenance.required_balance,'0.00');
     assert.equal(ready.result.selection.card_id,43);assert.deepEqual(f.state.rows,before);assert.deepEqual(f.writes,[]);
 });
@@ -283,31 +283,16 @@ test('empty-pool preflight fails even with sufficient account funds because auto
     assert.deepEqual(f.state.rows,[]);assert.deepEqual(f.writes,[]);
 });
 
-test('preflight waits on an uncertain deletion before reading its consumption history',async()=>{
-    for(const state of ['ACTIVE','CANCELLED','error']) {
-        const f=managedPool();Object.assign(f.state.rows[0],{retirement_key:'private-retirement-key',retirement_state:'unknown'});
-        if(state==='error')f.state.singleDetailError=Error('private-provider-error');
-        else f.state.singleDetails.set(42,{...f.state.live[0],provider_status:state});
-        const before=structuredClone(f.state.rows);
-        const result=await f.service.preflight({stage:'cards',plan_type:'plus'});
-        assert.equal(result.passed,false);assert.deepEqual(result.result.selection.waiting,[{card_id:42,reason:'retirement_unconfirmed'}]);
-        assert.ok(!f.calls.some(([op,,body])=>op==='cardTransaction'&&body.card_id===42));
-        assert.ok(!JSON.stringify([result,f.events]).includes('private-'));
-        assert.deepEqual(f.state.rows,before);assert.deepEqual(f.writes,[]);
-    }
-});
-
-test('preflight confirms an unknown deletion readonly before skipping its unavailable transaction API',async()=>{
+test('preflight excludes an uncertain legacy deletion without blocking other cards or querying it',async()=>{
     const f=managedPool();Object.assign(f.state.rows[0],{retirement_key:'private-retirement-key',retirement_state:'unknown'});
-    f.state.singleDetails.set(42,{...f.state.live[0],provider_status:'DELETED'});
-    f.state.transactionError=42;f.state.available='20.00';
+    f.state.singleDetailError=Error('private-provider-error');
     const before=structuredClone(f.state.rows);
     const result=await f.service.preflight({stage:'cards',plan_type:'plus'});
     assert.equal(result.passed,true);assert.equal(result.result.selection.card_id,43);
-    assert.equal(result.result.selection.maintenance.current_size,4);
-    assert.equal(result.result.selection.maintenance.required_balance,'0.00');
-    assert.ok(f.calls.some(([op,,body])=>op==='cardDetail'&&body?.card_id===42));
+    assert.equal(result.result.selection.skipped[0].reason,'retiring');
+    assert.ok(!f.calls.some(([op,,body])=>op==='cardDetail'&&body?.card_id===42));
     assert.ok(!f.calls.some(([op,,body])=>op==='cardTransaction'&&body.card_id===42));
+    assert.ok(!JSON.stringify([result,f.events]).includes('private-'));
     assert.deepEqual(f.state.rows,before);assert.deepEqual(f.writes,[]);
 });
 test('preflight does not infer subscription counts from external authorization history without exposing transactions',async()=>{

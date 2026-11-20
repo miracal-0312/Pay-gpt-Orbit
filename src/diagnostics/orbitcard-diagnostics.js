@@ -82,25 +82,7 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
                 balance: null, currency: card.currency || null }));
             result.selection = { action: 'wait', card_id: null, candidate_count: 0, skipped: [], waiting: [],
                 cards: summaries, reserved: false, account_check: 'passed', snapshot_only: true };
-            const retired = new Set();
-            // Mirror lifecycle recovery without changing the saved card or its
-            // intent. A missing list item alone never confirms a deletion.
-            for (const row of saved.filter(row => row.retirement_key)) {
-                const id = Number(row.card_id);
-                const present = listed.some(card => Number(card.card_id) === id);
-                if (!present && row.provider_status === 'DELETED') continue;
-                result.selection.waiting = [{card_id:id,reason:'retirement_unconfirmed'}];
-                if (row.active_job) throw new CardPreparationError('待删除卡片仍有订单占用，实际支付需先确认原订单');
-                const detail = await cards.cardDetail(cfg, id);
-                if (Number(detail?.card_id) !== id || detail?.provider_status !== 'DELETED') {
-                    throw new CardPreparationError('原删卡结果仍未确认，实际支付需要先只读查询确认删除');
-                }
-                retired.add(id);
-                const summary = summaries.find(card => card.card_id === id);
-                if (summary) summary.status = 'DELETED';
-            }
-            result.selection.waiting = [];
-            const readable = listed.filter(card => card.provider_status !== 'DELETED' && !retired.has(Number(card.card_id)));
+            const readable = listed.filter(card => card.provider_status !== 'DELETED');
             const snapshotNow = Date.now();
             const relevant = saved.filter(row => readable.some(card => card.card_id === Number(row.card_id)
                 && !['DELETED','CANCELLED','FROZEN'].includes(card.provider_status))
@@ -137,10 +119,8 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
             } else throw new CardPreparationError('卡片被占用或平台状态尚未确认，实际支付需要等待处理；共享等待位最多 1 个');
             const required = funding;
             if (cfg.enabled) {
-                const retiring = saved.filter(row => !row.active_job && (row.retirement_key || poolPolicy.exhausted(row))
-                    && readable.some(card => card.card_id === Number(row.card_id)));
                 result.selection.maintenance = { current_size:readable.length,
-                    retire_card_ids:retiring.map(row => Number(row.card_id)), funding_amount:money.cents(funding),
+                    quota_exhausted_card_ids:saved.filter(poolPolicy.exhausted).map(row => Number(row.card_id)), funding_amount:money.cents(funding),
                     required_balance:money.cents(required), fees_included:false, snapshot_only:true };
             }
             if (available < required) {

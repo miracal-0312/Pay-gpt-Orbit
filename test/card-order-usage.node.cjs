@@ -52,11 +52,13 @@ test('self-service platform settlement counts atomically and stops reuse after t
     assert.equal(f.db.cards[0].authorization_count,0);
 });
 
-test('failed card release rolls back both platform order ledger and counter',async()=>{
-    const f=fixture();await f.addCard();const task=await f.claim();await f.store.cardMethods(f.base).reserveCard(42,task.jobKey,'plus');
+test('a failed release on the third success rolls back the ledger, counter and disable marker',async()=>{
+    const f=fixture();await f.addCard(42,true,2);const task=await f.claim();await f.store.cardMethods(f.base).reserveCard(42,task.jobKey,'plus');
     f.db.failRelease=true;await assert.rejects(f.settle(task,'success'));
-    assert.equal(f.db.cards[0].successful_order_count,0);assert.equal((await f.store.cardMethods(f.base).listSuccessfulOrders()).length,0);
-    f.db.failRelease=false;await f.settle(task,'success');assert.equal(f.db.cards[0].successful_order_count,1);
+    assert.equal(f.db.cards[0].successful_order_count,2);assert.equal((await f.store.cardMethods(f.base).listSuccessfulOrders()).length,0);
+    assert.ok(!f.db.cards[0].disabled_at);
+    f.db.failRelease=false;await f.settle(task,'success');assert.equal(f.db.cards[0].successful_order_count,3);
+    assert.equal(f.db.cards[0].disabled_code,'success_limit_reached');
 });
 
 async function syncFixture(rows, transform = x=>x) {

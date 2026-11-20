@@ -8,13 +8,13 @@
 
 后台可为四档套餐分别指定默认充值地区，选项由 `getSubscriptionPaymentRegions` 返回。选择「平台默认」则不传 `payment_region`；指定地区在资金操作前校验可用性，再传入 `createSubscription`。该设置同时适用于用户兑换和管理员开通，已提交订单仍只查询原单。地区接口没有保证返回地区价格，后台金额需要与实际支付地区相符。
 
-选卡读取实时 ACTIVE 状态、USD 币种和余额，每张卡最多成功支付 3 次，满额后自动删卡并补开一张。现有卡目标余额为后台配置的套餐 USD 金额，不叠加开卡产品最低留存。余额足够的卡直接使用；不足时按本次套餐完整金额补款并向上取整到美分，不计算差额，账户可用余额不足则停止并提示联系客服。历史资金意图继续按已保存的目标余额、金额、正文和幂等键核对，不按新规则重充。新卡按 20.00 USD 首充检查账户资金，平台另行校验实际费用；不会因为账户余额低于整档套餐金额而拒绝一张余额已足够的卡。卡 ID 从 `getCardList` 自动读取，不填写固定卡 ID。
+选卡读取实时 ACTIVE 状态、USD 币种和余额，每张卡最多成功支付 3 次，满额后自动停用并补开一张。现有卡目标余额为后台配置的套餐 USD 金额，不叠加开卡产品最低留存。余额足够的卡直接使用；不足时按本次套餐完整金额补款并向上取整到美分，不计算差额，账户可用余额不足则停止并提示联系客服。历史资金意图继续按已保存的目标余额、金额、正文和幂等键核对，不按新规则重充。新卡按 20.00 USD 首充检查账户资金，平台另行校验实际费用；不会因为账户余额低于整档套餐金额而拒绝一张余额已足够的卡。卡 ID 从 `getCardList` 自动读取，不填写固定卡 ID。
 
 卡片可用性按实时平台状态、持久化停用标记、订单占用及资金条件判断。后台通过 `getProductCode` 读取开卡渠道（`product_code`）与 BIN，多选项保存在 `orbitcard_product_codes` 和 `orbitcard_bins`，同时选择取交集；这些偏好和产品规则仅用于手动开卡、错误补开与满额补开，不筛选现有卡池，现有卡支付准备和预检不查询开卡产品目录。旧单一产品配置迁移为单项选择。订阅明确出现卡片错误时停用原卡并自动补开，每张首充 20 USD；重试优先使用现有健康卡，不因开卡渠道或库存失败而阻断。管理员可在「卡片与开卡」填写原因后人工停用或恢复使用，操作需要二级验证并记录日志。详细规则见 [卡片可用状态与错误补开](../operations/ORBITCARD-CARDS.md#卡片可用状态与错误补开)。
 
 成功会员订单计数继续通过 `getSubscriptionList` 与 `getSubscription` 核验，并按平台范围及唯一订单号去重保存，作为每卡三次成功上限的依据。选卡及预占读取独立的 `disabled_*` 停用记录。卡片错误会停用原卡并登记持久化补开申请；平台同步保留停用记录。消费授权流水继续用于独立对账，详情见 [卡片规则](../operations/ORBITCARD-CARDS.md)。
 
-订阅调用需要 `subscriptions:read`、`subscriptions:create` 权限，余额查询另需 `account:read`。卡池还需 `cards:create`、`cards:read`、`cards:manage`、`products:read`、`cards:fund`；交易对账另需 `transactions:read`，不需要敏感卡资料。接口一键测试仅向平台发送读取请求，财务写操作只做本地参数与幂等键模拟，不创建订阅或开卡。卡片协议见 [Open API](Orbitcard-Open-API-V1.md)。
+订阅调用需要 `subscriptions:read`、`subscriptions:create` 权限，余额查询另需 `account:read`。卡池还需 `cards:create`、`cards:read`、`products:read`、`cards:fund`；交易对账另需 `transactions:read`，不需要敏感卡资料。接口一键测试仅向平台发送读取请求，财务写操作只做本地参数与幂等键模拟，不创建订阅或开卡。卡片协议见 [Open API](Orbitcard-Open-API-V1.md)。
 
 手动开卡、错误补开和满额补开均由服务端组装 `{product_code,amount:"20.00",quantity:1}`。渠道与 BIN 目录由 `GET /api/admin/orbitcard/products` 实时读取，后台保存多选数组，实际请求使用筛选后的产品码。补开按原卡与失败任务唯一登记，未知结果使用原正文、平台、API Key 和幂等键确认。人工状态修改使用 `POST /api/admin/orbitcard/cards/:cardId/availability`，提交 `{disabled:boolean,reason:string}`，需要二级验证。
 
@@ -86,6 +86,6 @@
 
 `GET /api/admin/orbitcard/cards` 返回脱敏的 `cards`、`issues`、`fundings`；卡片条目包含 `max_successful_orders=3`、`quota_exhausted` 和 `remaining_successful_orders`，不再包含 `cooling_down` 和 `reuse_after_ms`。新建表与启动迁移不再补建 `reuse_after_ms`，历史已有列不主动 DROP，运行流程不再读写。只读预检维护摘要移除 `capacity_limit`、`auto_refill`、`open_count`、`opening_amount`，并发模拟移除 `summary.opening`，客户端应移除这些停用字段的依赖。
 
-`POST /api/admin/orbitcard/issues/refresh` 核对原开卡及补款，已有申请沿用原身份；启用接单时也处理满三次卡片的删除和唯一补开。平台卡片同步、管理员手动申请及原申请核对继续保留；历史次数绑定和手动修改接口已删除，见 [卡片管理 API](ORBITCARD-CARDS.md#本项目管理-api)。旧本地 Stripe 卡池、代理、账单地址、验证码求解、浏览器池、Session 导出、支付链接生成、本地账单及开卡 Webhook 接口已移除，不提供充值回退路径。
+`POST /api/admin/orbitcard/issues/refresh` 核对原开卡及补款，已有申请沿用原身份；启用接单时也处理满三次卡片的停用和补开。平台卡片同步、管理员手动申请及原申请核对继续保留；历史次数绑定和手动修改接口已删除，见 [卡片管理 API](ORBITCARD-CARDS.md#本项目管理-api)。旧本地 Stripe 卡池、代理、账单地址、验证码求解、浏览器池、Session 导出、支付链接生成、本地账单及开卡 Webhook 接口已移除，不提供充值回退路径。
 
 选卡和同步使用 `cardDetail({card_ids:[...],reveal_sensitive:false})`，每批最多 20 张；缺项跳过对应卡，不在选中后逐张复核。成功授权按交易 ID 去重供对账。选卡读取本地停用记录，明确卡片错误会停用并补开；候选卡占用可使用共享等待位，未知状态和未决资金继续按原规则对账。换卡在纯选卡与最终事务预占中均排除已用卡。原开卡、补款和未确认订阅始终沿用原身份与参数，只有订阅明确失败且满足额度、账号及资金条件才允许下一次尝试。补款提交前及确认后核对卡片资金。`getSubscriptionPlans` 只确认套餐开放，目录服务费不参与预检或后台展示；`max_service_fee` 交平台校验，实际服务费留作对账。同一 API Key 收到 HTTP 429 后所有 Open API 操作遵守 `Retry-After`。`GET /api/admin/orbitcard/cards/:cardId/transactions?page=1` 更新授权次数并查看脱敏交易，不据此自动核销或退款；需 `transactions:read`。

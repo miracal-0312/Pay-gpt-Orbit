@@ -14,7 +14,7 @@
 
 后台「卡片与开卡」为每张卡提供人工停用与恢复使用，需要二级验证和修改原因。操作在分配锁与卡片行锁内进行，仍有订单占用或原退役尚未确认时须先核对原记录。人工停用保存 `disabled_code=manual`；恢复使用清除本地停用标记，后续选卡仍实时核对平台状态与资金。管理员操作记入审计日志。恢复后若再次出现新的卡片错误，按新的失败任务创建一笔补开申请。
 
-平台同步仅更新平台摘要，持久化停用记录继续保留。历史删卡意图仍按原身份确认，成功订单数达到 3 次后触发删卡并补开一张，卡片总数不触发额外扩容。未知订阅及原资金操作保留占用并继续对账。
+平台同步保留本地停用记录。成功订单数达到 3 次后停用旧卡并补开一张，卡片总数不触发自动扩容。历史删卡记录按原身份只读核对。未知订阅及原资金操作保留占用并继续对账。
 
 ## 每卡三次成功后的自动轮换
 
@@ -22,9 +22,9 @@
 
 新选卡前读取 `getSubscriptionList` 并通过 `getSubscription` 核验未入账历史订单；历史查询失败、待核对订单或计数无效时不分配新卡。原补款和原开卡恢复仍只处理原申请。纯筛选和自助／管理员事务预占共用少于 3 次的校验，避免并发第四笔。
 
-第三次成功结算、计数和释放占用在同一事务完成；结算提交后立即尝试维护卡池，后台每约 60 秒兜底恢复。仍有订单占用的卡不会删除。先持久化删卡意图，再调用 `deleteCard`；结果未知时只读查询原卡，必须确认 `DELETED` 后才允许补开。补开复用现有开卡记录与唯一约束，以原卡 ID 和空补开任务标识登记一笔申请，沿用原产品、正文和幂等键恢复。新卡计数从 0 开始，首充固定 20 USD，遵守后台渠道、BIN、库存和余额条件。
+第三次成功的计数、停用标记和释放占用在同一结算事务内提交。已达上限的卡无法恢复使用，仍被订单占用时等原订单释放后再补开。结算提交后立即尝试补开，后台每约 60 秒恢复待处理申请。补开根据本地成功订单计数和原卡 ID 触发，旧卡是否仍显示在平台列表中不影响补开。原卡保留在本地供对账；本地停用不注销平台卡片，也不会退回旧卡余额。每张满额卡以原卡 ID 和空补开任务标识登记一笔申请，沿用原产品、正文和幂等键恢复。新卡计数从 0 开始，首充固定 20 USD，遵守后台渠道、BIN、库存和余额条件。
 
-余额或库存不足、删卡未确认、开卡异常会保留原记录，由后台继续处理；明确失败的补开保留失败记录供管理员核对，不自动创建新身份。卡池维护异常不撤销已成功的订阅或 CDK 核销。接单配置关闭时不新增满额删卡补开。统计只覆盖本地已核实记录和 API 可见历史，无法获知 API 不提供的其他渠道订单。
+余额或库存不足、开卡异常时保留旧卡的停用状态，后台继续处理补开。平台明确返回开卡失败时保留失败记录供管理员核对。补开待处理时，已同步的卡片详情仍可查看，原订阅的成功结果和 CDK 核销继续有效。接单配置启用时处理满额补开。统计覆盖本地已核实记录和 API 可见历史。
 
 ## 共享等待与卡片复用
 
@@ -40,7 +40,7 @@ getCardList 完整分页读取卡片；cardDetail 以 card_ids 分批读取，�
 
 实际支付刷新卡片状态和余额，读取已保存的停用记录；不在支付主链路等待消费授权接口。预占事务再次检查停用记录、任务占用及换卡排除列表。优先选择足额卡或按套餐整额补款后可满足支付目标的卡；足额直接支付，不足时核对账户可用余额并按所选套餐全额补款一次；未决资金只对账，不重复补款。
 
-每卡同一时间只允许一个本地订单占用。自动流程中，未知订阅保留预占；明确终态结算并释放本次占用。管理员可按[订单人工处理](ORDER-MANUAL-CONTROL.md)明确解除原单本地占用，原资金仍须核对，不代表退款或撤销平台请求。每卡成功次数上限为 3 次，满额后禁止分配并自动删卡补开；明确卡片错误触发持久化停用和补开，人工停用不触发补开。
+每卡同一时间只允许一个本地订单占用。自动流程中，未知订阅保留预占；明确终态结算并释放本次占用。管理员可按[订单人工处理](ORDER-MANUAL-CONTROL.md)明确解除原单本地占用，原资金仍须核对，不代表退款或撤销平台请求。每卡成功次数上限为 3 次，满额后禁止分配并自动补开；明确卡片错误触发持久化停用和补开，人工停用本身不触发补开。
 
 任务已有补款或历史任务绑定开卡申请时先核对原申请，资金异常或未知结果不能触发换卡。管理员手动开卡使用独立共享卡池申请。自助任务从 `preparing` 开始，资金就绪后转 `prepared`，原子认领 `submitting` 并提交一次；每次尝试均有固定订单身份。未知订阅或超时保持 `pending`，只查原单。只有原订阅归属一致且明确属于卡片失败（或可信的创建 59005 拒绝）时，才保存失败证据、停用并释放本次卡，保留 CDK，按配置补卡及选卡续试，总计最多 3 次。卡片失败后仍有额度但 Session 本地已过期时保持 `retry_waiting`，用原 CDK 或管理员原 `request_id` 及同账号新 Session 继续；次数与已用卡落库，重启不重置。平台确认的 Session/账号/配置/未知终态失败直接转 `support_locked`，需人工核对原因和原链路，不能靠再次提交 Session 自动解锁。无可等待的合格卡、等待失败、重试准备失败或耗尽同样转 `support_locked`。首笔可信的非卡片创建拒绝以 `rejected` 释放占用，修复后可重新提交；显式人工及历史 `manual` 不恢复会员付款。
 
@@ -84,7 +84,7 @@ docker compose exec -T app node scripts/inspect-card-transactions.cjs 19531519
 
 输出交易 ID、类型、原始状态、金额及币种，不输出完整卡号、CVV、密钥或个人信息。最后可加页码，例如 `19531519 2`。此命令不写计数、不删卡、不调用订阅或资金接口；未知状态应据输出核对后补充明确映射，不能当作成功或零次。
 
-沿用 HTTPS 和 HMAC V1 凭据。除原有 subscriptions:read/create、account:read、cards:create/read/fund、products:read 外，卡池删卡需要 cards:manage；会员订单同步计次需要 subscriptions:read，消费授权及资金流水对账需要 transactions:read。
+沿用 HTTPS 和 HMAC V1 凭据。会员订单同步计次需要 subscriptions:read，开卡需要 cards:create，消费授权及资金流水对账需要 transactions:read。
 
 | POST 接口 | 用途 |
 | --- | --- |
@@ -93,13 +93,13 @@ docker compose exec -T app node scripts/inspect-card-transactions.cjs 19531519
 | cardTransaction | 读取完整分页统计成功消费授权，指定页明细用于对账 |
 | getProductCode | 产品、库存、最低首充和最低留存余额；不提供套餐付款报价 |
 | getAccountBalance | 账户可用余额 |
-| createCard | 管理员手动申请、卡片错误补开或原身份确认申请；product_code、amount:20.00、quantity:1，固定幂等键 |
+| createCard | 管理员手动申请、卡片错误补开、满额补开和原申请确认。使用 product_code、amount:20.00、quantity:1 和固定幂等键 |
 | rechargeCard / getCardFlow | 按套餐全额补款及原资金订单确认 |
-| deleteCard | 累计 3 次成功后登记退役意图并删除；固定幂等键，未知结果只读核对；确认删除后唯一补开 |
+| deleteCard | 接口诊断中仅模拟请求。历史删卡结果通过 cardDetail 只读核对 |
 
 API 约定见 [平台协议](../api/Orbitcard-Open-API-V1.md) 和 [订阅协议](../api/orbitcard-subscription-api-v1.md)。HTTP 429 使用账户级限流等待和 Retry-After；权限不足、未知返回值和资金不足会停止相关动作，保留日志供核对。
 
-产品接口按当前 `data.list` 读取产品、库存和最低金额。产品信息仅在手动开卡、错误补开及满额补开时按需读取，现有卡支付准备和只读预检不请求 `getProductCode`，也不要求现有卡仍出现在可开卡产品目录中。后台配置通过 `/api/admin/orbitcard/products` 读取真实产品与 BIN 供多选，也可在“调试与日志 → 接口查询”核对 `getProductCode`。套餐 USD 配置只用于实际代充准备资金。只读预检维护摘要不再保留 `capacity_limit`、`auto_refill`、`open_count`、`opening_amount`，并发统计不再返回 `summary.opening`；现有卡选择、补款、等待和退役提示继续提供。
+产品接口按当前 `data.list` 读取产品、库存和最低金额。产品信息仅在手动开卡、错误补开及满额补开时按需读取，现有卡支付准备和只读预检不请求 `getProductCode`，也不要求现有卡仍出现在可开卡产品目录中。后台配置通过 `/api/admin/orbitcard/products` 读取真实产品与 BIN 供多选，也可在“调试与日志 → 接口查询”核对 `getProductCode`。套餐 USD 配置只用于实际代充准备资金。只读预检维护摘要不再保留 `capacity_limit`、`auto_refill`、`open_count`、`opening_amount`，并发统计不再返回 `summary.opening`；现有卡选择、补款、等待和满额卡片提示继续提供。
 
 ## 本项目管理 API
 
@@ -108,8 +108,8 @@ API 约定见 [平台协议](../api/Orbitcard-Open-API-V1.md) 和 [订阅协议]
 | GET /api/admin/orbitcard/cards | 本地卡片快照、successful_order_count 统计、availability_basis、usable 与 disabled_* 停用记录，以及独立的 authorization_count、开卡和补款记录 |
 | GET /api/admin/orbitcard/products | 卡台实时产品、渠道及 BIN 多选目录 |
 | POST /api/admin/orbitcard/cards/:cardId/availability | 二级验证后人工停用或恢复，参数 disabled、reason |
-| POST /api/admin/orbitcard/cards/sync | 刷新平台卡片资料和成功会员订单记录；满 3 次后删卡并补开一张 |
-| POST /api/admin/orbitcard/cards/apply，Body `{}` | 二级验证后为共享卡池申请一张卡，或确认唯一原手动申请；申请冲突或原删卡未确认时拒绝，不接收旧 `plan_type` |
+| POST /api/admin/orbitcard/cards/sync | 刷新平台卡片资料和成功会员订单记录，处理满额停用与补开 |
+| POST /api/admin/orbitcard/cards/apply，Body `{}` | 二级验证后为共享卡池申请一张卡，或确认唯一原手动申请。申请冲突时先处理原申请 |
 | GET /api/admin/orbitcard/cards/:cardId/transactions?page=1 | 完整读取授权流水独立对账，并展示指定页最多 50 条脱敏交易 |
 | POST /api/admin/orbitcard/issues/refresh | 核对可恢复的原开卡与补款记录；无可确认身份或仍有归属异常的记录继续保留，不恢复会员支付 |
 

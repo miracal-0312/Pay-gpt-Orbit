@@ -622,7 +622,7 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
             });
             record(order, 'manual_order_query', '管理员原订单查询完成', { state: next, task_no: updated.task_no });
             if (updated.state === 'success') await cardService.rotateExhausted?.(cfg)
-                .catch(() => record(order, 'card_quota_maintenance_pending', '三次成功卡片的删卡或补开待后台恢复，原订阅已成功'));
+                .catch(() => record(order, 'card_quota_maintenance_pending', '满额卡片的补开待后台处理，原订阅已成功'));
             if (updated.state === 'retry_waiting') return await retryPayment(updated, cfg, handoff);
             if (next !== 'pending') retrySessions.delete(requestId);
             return publicOrder(updated);

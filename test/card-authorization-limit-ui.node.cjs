@@ -37,11 +37,13 @@ test('backend validation failures preserve the edited opening selections',async(
     await handler();assert.equal(calls[0].url,'/api/admin/gpt-api');assert.deepEqual(calls[0].body.orbitcard_product_codes,['p1','p2']);
     reject=true;await assert.rejects(handler(),/invalid choices/);assert.equal(reloads,1);assert.deepEqual(f.input().orbitcard_product_codes,['p1','p2']);
 });
-test('card rows show counts as statistics and offer manual restore for disabled cards',()=>{
+test('card rows enforce the usage limit and offer manual restore below the limit',()=>{
     const block=source.slice(source.indexOf('function renderCardRow('),source.indexOf('async function loadCards('));
     const render=new Function('escapeHtml',block+'\nreturn renderCardRow;')(value=>String(value??'').replaceAll('<','&lt;'));
     const card={card_id:42,successful_order_count:999,provider_status:'ACTIVE'};
-    assert.match(render(card),/999 笔成功会员订单/);assert.match(render(card),/人工停用/);
+    assert.match(render(card),/999 笔成功会员订单/);assert.doesNotMatch(render(card),/data-card-availability/);
+    card.successful_order_count=2;
+    assert.match(render(card),/人工停用/);
     card.disabled_at='2026-11-16';card.disabled_reason='<invalid card>';
     assert.match(render(card),/恢复使用/);assert.match(render(card),/&lt;invalid card>/);
     assert.doesNotMatch(render(card),/card-provider-status active/);

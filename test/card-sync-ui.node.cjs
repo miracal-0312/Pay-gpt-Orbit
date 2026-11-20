@@ -41,7 +41,7 @@ test('an idle card below its configured successful order limit remains available
     await f.api.loadCards();
     assert.match(f.$('cardRows').innerHTML,/空闲/);
     assert.doesNotMatch(f.$('cardRows').innerHTML,/暂不分配|停止分配/);
-    assert.match(f.$('cardRows').innerHTML,/最多成功支付三次，满额后自动删卡补开/);
+    assert.match(f.$('cardRows').innerHTML,/满额后自动停用并补开一张/);
 });
 
 test('deleted and unavailable cards are omitted from rows after local refresh',async()=>{
@@ -102,21 +102,32 @@ test('successful and partial sync distinguish confirmed rows from stale ones',as
     assert.doesNotMatch(f.$('cardRows').innerHTML,/card-provider-status active/);
 });
 
-test('authorization usage shows synchronized counts, pending counts and retirement states',async()=>{
-    const f=setup(()=>{}); f.card.successful_order_limit=7;
+test('an exhausted card remains visibly unavailable even when the provider is active or missing',async()=>{
+    const f=setup(()=>{});
     await f.api.loadCards();
     assert.match(f.$('cardRows').innerHTML,/待同步/);
     assert.doesNotMatch(f.$('cardRows').innerHTML,/data-update-card-usage|data-bind-card/);
-    f.card.successful_order_count=6; await f.api.loadCards();
-    assert.match(f.$('cardRows').innerHTML,/6 笔成功会员订单/);
-    assert.doesNotMatch(f.$('cardRows').innerHTML,/达到上限，停止分配/);
-    f.card.successful_order_count=7; await f.api.loadCards();
-    assert.match(f.$('cardRows').innerHTML,/7 笔成功会员订单/);
-    assert.doesNotMatch(f.$('cardRows').innerHTML,/达到上限，停止分配/);
-    f.card.successful_order_count=6;f.card.authorization_pending=true;await f.api.loadCards();
-    assert.doesNotMatch(f.$('cardRows').innerHTML,/等待授权同步/);
-    f.card.retiring=true; await f.api.loadCards();
-    assert.match(f.$('cardRows').innerHTML,/待确认删卡/);
+    Object.assign(f.card,{successful_order_count:3,quota_exhausted:true,disabled_at:'2026-11-20',disabled_code:'manual'});
+    await f.api.loadCards({count:1,synced_ids:[42],failed_ids:[],listed_ids:[42],checked_at:'2026-11-20T12:00:00Z'});
+    assert.match(f.$('cardRows').innerHTML,/3 笔成功会员订单 \/ 上限 3 笔/);
+    assert.match(f.$('cardRows').innerHTML,/不可用 · 已达成功订单上限/);
+    assert.doesNotMatch(f.$('cardRows').innerHTML,/data-card-availability|card-provider-status active/);
+    for (const status of ['UNAVAILABLE','DELETED']) {
+        f.card.provider_status=status; await f.api.loadCards();
+        assert.match(f.$('cardRows').innerHTML,/不可用 · 已达成功订单上限/);
+        assert.doesNotMatch(f.$('cardRows').innerHTML,/data-card-transactions/);
+    }
+    Object.assign(f.card,{provider_status:'ACTIVE',successful_order_count:2,quota_exhausted:false,disabled_at:null,retiring:true});
+    await f.api.loadCards();
+    assert.match(f.$('cardRows').innerHTML,/待核对旧删卡记录/);
+});
+
+test('a pending replacement shows a warning while synchronized card details stay fresh',async()=>{
+    const f=setup(()=>({count:1,synced_ids:[42],failed_ids:[],listed_ids:[42],checked_at:'2026-11-20T12:00:00Z',
+        message:'已同步',replacement_warning:'账户余额不足'}));
+    await f.api.synchronizeCards();
+    assert.match(f.$('cardSyncState').textContent,/查询完成.*补开待处理.*账户余额不足/);
+    assert.match(f.$('cardRows').innerHTML,/本次同步/);
 });
 
 test('manual usage editor is removed',()=>{
