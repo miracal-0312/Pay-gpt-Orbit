@@ -1045,7 +1045,7 @@ test('waiting progress checks the original identity and a prepared waiting timeo
 
 test('administrator reservation uses the durable disable marker independently of historical counts',async()=>{
     const {db,store}=storeFixture(),input=manualInput(id);
-    db.card.successful_order_count=8;
+    db.card.successful_order_count=2;
     const order=await store.prepareManualOrder(input);
     db.card.disabled_at='2026-11-16T00:00:00Z';
     assert.equal(await store.reserveManualCard(id,12,order.client_order_no,input.planType),null);
@@ -1055,7 +1055,7 @@ test('administrator reservation uses the durable disable marker independently of
     assert.equal(db.card.active_job,order.client_order_no);
     await store.markManualPrepared(id,order.client_order_no,12);await store.claimManualSubmission(id);
     await settleConfirmed(store, id,{state:'success',message:'confirmed'});
-    assert.equal(db.orders[0].state,'success');assert.equal(db.card.successful_order_count,9);
+    assert.equal(db.orders[0].state,'success');assert.equal(db.card.successful_order_count,3);
 });
 
 test('durable administrator retry keeps exactly three different cards and rejects duplicate claims and stale results', async () => {
@@ -1317,13 +1317,13 @@ test('manual snapshots with missing provenance, mismatched ownership or query er
     }
 });
 
-test('administrator platform-confirmed orders count once and healthy cards remain reusable',async()=>{
-const {db,store}=storeFixture();for(let count=0;count<7;count++){
+test('administrator platform-confirmed orders count once and stop at three',async()=>{
+const {db,store}=storeFixture();for(let count=0;count<3;count++){
  const requestId='00000000-0000-4000-8000-'+String(count).padStart(12,'0');await prepareOrder(store,manualInput(requestId,{mode:'test',cdkCode:null}));await store.claimManualSubmission(requestId);
  const order=await store.getManualOrder(requestId),snapshot={task_no:'sub-'+requestId,client_order_no:order.client_order_no,card_id:12,plan_type:'gpt-plus',status:'succeeded',subscription_succeeded:true,query_source:'upstream'};
  await settleConfirmed(store, requestId,{state:'success',taskNo:snapshot.task_no,snapshot});await settleConfirmed(store, requestId,{state:'success',taskNo:snapshot.task_no,snapshot});
  assert.equal(db.card.successful_order_count,count+1);assert.equal(db.card.authorization_count,0);assert.equal(db.card.active_job,null);
- }const next=await store.prepareManualOrder(manualInput(id,{mode:'test',cdkCode:null}));assert.ok(await store.reserveManualCard(id,12,next.client_order_no,'gpt-plus',7));
+ }const next=await store.prepareManualOrder(manualInput(id,{mode:'test',cdkCode:null}));assert.equal(await store.reserveManualCard(id,12,next.client_order_no,'gpt-plus',7),null);
 });
 
 test('administrator cards can be reused immediately when the authorization is synchronized despite legacy cooldown metadata', async () => {

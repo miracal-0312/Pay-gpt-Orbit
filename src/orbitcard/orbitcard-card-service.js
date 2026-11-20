@@ -38,18 +38,20 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
     async function withReplacementOwner(cfg, jobKey, action) {
         if (!jobKey) return action(cfg);
         const owner = await store.paymentOwner(jobKey);
-        if (owner.localReleased) return null;
+        if (owner.localReleased || owner.manualClosed) return null;
         const current = cfg.executionGuard && cfg.auditJobKey ? await store.paymentOwner(cfg.auditJobKey) : null;
         const reused = Boolean(cfg.executionGuard && owner.keys.length && owner.keys.every(key => current?.keys?.includes(key)));
         const guard = reused ? cfg.executionGuard : owner.keys.length ? await store.acquirePaymentLock(owner.keys) : null;
         if (owner.keys.length && !guard) return null; // Nonblocking: allocation lock must never wait for an order lock.
         try {
             await guard?.assertOwned();
-            if ((await store.paymentOwner(jobKey)).localReleased) return null;
+            const latest = await store.paymentOwner(jobKey);
+            if (latest.localReleased || latest.manualClosed) return null;
             const executionGuard = { async assertOwned() {
                 await cfg.executionGuard?.assertOwned();
                 if (!reused) await guard?.assertOwned();
-                if ((await store.paymentOwner(jobKey)).localReleased) throw new PaymentStoppedError('原订单本地占用已解除，停止新增补开');
+                const currentOwner = await store.paymentOwner(jobKey);
+                if (currentOwner.localReleased || currentOwner.manualClosed) throw new PaymentStoppedError('原订单已人工闭单或解除本地占用，停止新增补开');
             } };
             return await action({ ...cfg, executionGuard });
         } finally { if (guard && !reused) await guard.release(); }
@@ -57,7 +59,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
     async function withRecoveryOwner(cfg, entry, action, { issueReconciliation = false } = {}) {
         const ownerJob = entry.job_key || entry.replacement_for_job_key || null;
         const owner = await store.paymentOwner(ownerJob);
-        if (!entry.job_key && entry.replacement_for_job_key && !owner.localReleased && !entry.local_released_at) {
+        if (!entry.job_key && entry.replacement_for_job_key && !owner.localReleased && !owner.manualClosed && !entry.local_released_at) {
             return Boolean(await withReplacementOwner(cfg, ownerJob, async ownedCfg => {
                 await action(ownedCfg, { originalIssueOnly: false, localReleased: false });
                 return true;
@@ -67,13 +69,13 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
             && (owner.allowed || owner.canReconcileIssue);
         const originalFundingOnly = Boolean(entry.funding_key && owner.localReleased && owner.canReconcileFunding);
         if (!owner.allowed && !originalIssueOnly && !originalFundingOnly) return false;
-        if ((owner.localReleased || entry.local_released_at) && !entry.order_no) return false;
+        if ((owner.localReleased || entry.local_released_at || issueReconciliation && owner.manualClosed) && !entry.order_no) return false;
         // Historical order-bound applications reconcile their original identity.
         // Shared replacement applications are owned by the card pool.
         if (originalIssueOnly && entry.state !== 'prepared' && !entry.order_no) return false;
         // Dedicated funding reconciliation owns these jobs. The legacy card
         // maintenance pass must not lengthen their delay or resend funding.
-        if (!owner.localReleased && ['funding_waiting','funding_review','funding_pending'].includes(owner.state)) return false;
+        if (!owner.localReleased && !owner.manualClosed && ['funding_waiting','funding_review','funding_pending'].includes(owner.state)) return false;
         const assertOwner = originalIssueOnly ? assertIssueReconciliationAllowed : originalFundingOnly ? assertReconciliationAllowed : assertPaymentAllowed;
         const recoveryEntry = { originalIssueOnly, reconciliationJob: originalIssueOnly ? ownerJob : null,
             localReleased: Boolean(owner.localReleased || entry.local_released_at) };
@@ -132,16 +134,65 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
                 card_id: card.card_id, successful_order_count: row.successful_order_count,
                 ...(deleted.refunded_amount == null ? {} : {refunded_amount: deleted.refunded_amount}) });
         }
-        // Recover durable delete intents before deciding current card eligibility.
+        // Confirm deletion before opening a replacement. Occupied cards are never deleted.
         for (const row of await locked.listCards()) {
-            if (!row.retirement_key) continue;
+            if (row.active_job || (!row.retirement_key && !poolPolicy.exhausted(row))) continue;
+            if (row.retirement_state === 'confirmed') { removed.add(Number(row.card_id)); continue; }
             const card = listed.find(card => Number(card.card_id) === Number(row.card_id));
             if (!card && row.provider_status === 'DELETED') continue;
             await retireAndRecord(card || row, row, Boolean(card));
         }
         const live = listed.filter(card => card.provider_status !== 'DELETED' && !removed.has(Number(card.card_id)));
-        // Replacement issuance runs in allocation and background recovery.
-        return live.filter(card => !removed.has(Number(card.card_id)));
+        const opened = await replaceExhaustedCards(cfg, locked);
+        return [...live, ...opened.filter(card => !live.some(existing => existing.card_id === card.card_id))];
+    }
+
+    async function replaceExhaustedCards(cfg, locked) {
+        const opened = [];
+        for (const row of await locked.listCards()) {
+            if (!poolPolicy.exhausted(row) || row.active_job || row.retirement_state !== 'confirmed') continue;
+            // Empty replacement owner identifies a pool quota replacement; failure
+            // replacements use their original job key. The existing unique index
+            // makes this one durable application per retired card across restarts.
+            let issue = await locked.replacementForCard(row.card_id, '');
+            if (issue && (issue.local_released_at || ['ready', 'failed'].includes(issue.state))) continue;
+            if (!issue) {
+                let pending = false;
+                for (const plan of PLAN_TYPES) if (await locked.pendingIssue(plan)) pending = true;
+                if (pending) break;
+                const openingCfg = await latestOpeningConfig(cfg);
+                const selected = cardsApi.chooseOpeningProduct(await cardsApi.products(openingCfg), openingCfg,
+                    (await locked.listIssues())[0]?.product_code);
+                const body = cardsApi.createCardBody(selected);
+                requireFunds('', await account(openingCfg), money.units(body.amount));
+                issue = await locked.createManualIssue({ issue_key: `card-${crypto.randomUUID()}`, plan_type: 'plus',
+                    ...selected, credential_hash: credentialHash(cfg), request_body: JSON.stringify(body),
+                    replacement_for_card_id: row.card_id, replacement_for_job_key: '' });
+                record('', 'card_quota_replacement_started', '支付卡已完成三次成功订阅并确认删除，登记唯一补开申请', { card_id: row.card_id, issue_key: issue.issue_key });
+            }
+            // This is pool maintenance, independent of the settled order's payment guard.
+            const poolCfg = { ...cfg, auditJobKey: '', paymentGuard: undefined };
+            opened.push(await confirmIssue(poolCfg, locked, issue, 1));
+        }
+        return opened;
+    }
+
+    async function synchronizeHistory(cfg) {
+        const listed = await cardsApi.listCards(cfg);
+        await store.withCardAllocationLock(cfg.base_url, locked => locked.syncCards(listed));
+        const result = await orderSync.synchronize(cfg, listed);
+        if (!result.complete) throw new CardPreparationError('历史成功订单尚未核对完整，暂停选卡，请同步卡片与订单后重试');
+        return result;
+    }
+
+    async function rotateExhausted(cfg) {
+        if (!cfg.enabled) return;
+        return store.withCardAllocationLock(cfg.base_url, async locked => {
+            if (!(await locked.listCards()).some(row => poolPolicy.exhausted(row) || row.retirement_key)) return;
+            const listed = await cardsApi.listCards(cfg);
+            await locked.syncCards(listed);
+            return maintainPool(cfg, locked, listed);
+        });
     }
 
     async function confirmIssue(cfg, locked, issue, polls = maxIssuePolls, { originalIssueOnly = false, reconciliationJob = null } = {}) {
@@ -226,6 +277,14 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
         if (issue?.job_key) {
             throw new CardPreparationError('同套餐另一笔开卡申请尚待确认，请先核对原申请，不能将其卡片分配给当前订单');
         }
+        if (issue?.replacement_for_job_key) {
+            let card;
+            const handled = await withRecoveryOwner(cfg, issue, async (ownedCfg, options) => {
+                card = await confirmIssue(ownedCfg, locked, issue, maxIssuePolls, options);
+            }, { issueReconciliation: true });
+            if (!handled) throw new CardPreparationError('原补开申请不可继续提交，请核对原订单及开卡记录');
+            return card;
+        }
         if (!issue) {
             // Refresh before a new issue; an unresolved issue retains its original body and key.
             const products = await cardsApi.products(cfg);
@@ -245,7 +304,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
     async function replaceDisabledCard(cfg, locked, planType) {
         if (!cfg.enabled && !cfg.auditJobKey) return null;
         for (const row of await locked.listCards()) {
-            if (!row.disabled_at || row.disabled_code === 'manual' || row.active_job) continue;
+            if (!row.disabled_at || row.disabled_code === 'manual' || row.active_job || poolPolicy.exhausted(row)) continue;
             const failureJobKey = row.disabled_job_key || '';
             const replaced = await withReplacementOwner(cfg, failureJobKey, async ownedCfg => {
                 const cfg = ownedCfg;
@@ -353,6 +412,11 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
     }
 
     async function allocate(cfg, jobKey, planType, selection = {}) {
+        await assertPaymentAllowed(cfg, jobKey);
+        // Import verified, deduplicated historical successes before selecting a new
+        // card. Original funding/issuance recovery must retain its original identity.
+        const methods = store.cardMethods(cfg.base_url);
+        if (!await methods.fundingForJob(jobKey) && !await methods.issueForJob(jobKey)) await synchronizeHistory(cfg);
         return store.withCardAllocationLock(cfg.base_url, async cardMethods => {
             await assertPaymentAllowed(cfg, jobKey);
             requirePlanPrice(cfg, planType);
@@ -430,6 +494,11 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
                 return selected.card_id;
             }
             let listed = await refreshCards();
+            // A failed retirement must not block unrelated healthy cards. Exhausted
+            // cards remain ineligible even if maintenance is waiting on the platform.
+            try { listed = await maintainPool(cfg, locked, listed); }
+            catch (error) { record(jobKey, 'card_quota_maintenance_pending', '满额卡片删除或补开待确认，保留原申请', {
+                reason: error instanceof CardPreparationError ? error.message : 'maintenance_unavailable' }); }
             const excludedIds = selection.excludedCardIds || [];
             const existing = await reusable(cfg, locked, jobKey, planType, listed, excludedIds);
             if (existing) return existing.card_id;
@@ -550,7 +619,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
                 for(const issue of candidates) {
                     const handled = await withRecoveryOwner(cfg, issue, async (ownedCfg, options) => {
                         // Prepared means the remote-write marker was never committed.
-                        if (issue.state === 'prepared' && !issue.replacement_for_card_id && !options.localReleased) {
+                        if (issue.state === 'prepared' && !issue.order_no && !issue.replacement_for_card_id && !options.localReleased) {
                             await locked.updateIssue(issue.issue_key, { state: 'failed', message: '服务在开卡提交前中断，未发送该申请' });
                             return;
                         }
@@ -565,7 +634,14 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
                     }, { issueReconciliation: true });
                     if (handled) break;
                 }
-                try { await replaceDisabledCard(cfg, locked, 'plus'); }
+                try {
+                    if (cfg.enabled && (await locked.listCards()).some(row => poolPolicy.exhausted(row) || row.retirement_key)) {
+                        const listed = await cardsApi.listCards(cfg);
+                        await locked.syncCards(listed);
+                        await maintainPool(cfg, locked, listed);
+                    }
+                    await replaceDisabledCard(cfg, locked, 'plus');
+                }
                 catch (error) {
                     record('', 'card_replacement_deferred', '停用卡补开尚未完成，请核对开卡记录、账户余额和产品设置', {
                         reason: error instanceof CardPreparationError ? error.message : 'replacement_unavailable' });
@@ -633,5 +709,5 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
         try { available=await balanceCache.pending; } catch(error) {balanceCache=null;throw error;}
         return available>=money.units(task.orbitcard_required_balance);
     }
-    return { allocate, confirmFunding, synchronize, apply, recover, canResumeBalance, transactions, reconcile };
+    return { allocate, confirmFunding, synchronize, apply, recover, rotateExhausted, canResumeBalance, transactions, reconcile };
 };

@@ -6,6 +6,7 @@ const { cardScope, planFor } = require('../orbitcard/orbitcard-card-policy');
 const { PROVIDER_PLANS } = require('../config/plan-registry');
 const { confirmedSuccess, confirmedFailure, confirmedRejection } = require('./payment-retry-policy');
 const { sanitize } = require('../logging/log-safety');
+const { projectBusinessOrder } = require('./order-business-status');
 
 const FINAL_STATES = new Set(['success', 'failed', 'rejected', 'support_locked', 'closed', 'cancelled']);
 const PAUSE_STATES = new Set(['preparing', 'prepared', 'funding_waiting', 'funding_review', 'funding_pending',
@@ -192,6 +193,7 @@ module.exports = function createOrderManualControl(store) {
         if (owner) return owner;
         if (action === 'failed' && alreadySuccessful(kind, ctx)) return MESSAGES.success;
         if (action === 'pause') {
+            if (['success', 'failed'].includes(ctx.row.manual_result)) return '订单已人工结案，不能重新暂停或恢复处理；可添加备注或更正人工结果';
             if (!knownState(kind, ctx)) return MESSAGES.unknown;
             if (alreadySuccessful(kind, ctx) || FINAL_STATES.has(ctx.state) || ['success', 'failed', 'closed', 'cancelled'].includes(ctx.status)) return '订单已结束，可添加处理备注或确认人工处理结果';
         }
@@ -202,6 +204,7 @@ module.exports = function createOrderManualControl(store) {
         ctx.audit = actions;
         const settlementReason = settlementProblem(kind, id, ctx), releaseReason = releaseProblem(kind, id, ctx);
         return { kind, id, status: f.status, state: f.state, revision: revision(row, actions, ctx),
+            ...projectBusinessOrder(row),
             manual_result: row.manual_result || null, manual_result_reason: safeText(row.manual_result_reason, 255),
             manual_result_by: safeText(row.manual_result_by, 128), manual_result_at: row.manual_result_at || null,
             manual_local_released_at: row.manual_local_released_at || null,
@@ -320,7 +323,7 @@ module.exports = function createOrderManualControl(store) {
                     nextState = action === 'pause' ? pauseState(ctx) : !canSettle ? reconciliationState(kind, ctx)
                         : action === 'success' ? 'success' : kind === 'admin' ? 'failed' : 'support_locked';
                     nextStatus = kind === 'admin' ? nextState : action === 'pause' || !canSettle ? 'manual' : action;
-                    const resultText = action === 'pause' ? '人工暂停自动处理' : action === 'success' ? '人工交付完成（非平台成功凭证）' : '人工确认失败';
+                    const resultText = action === 'pause' ? '人工暂停自动处理' : action === 'success' ? '人工交付完成，订单已关闭（非平台成功凭证）' : '人工确认失败，订单已关闭';
                     const retainedText = action !== 'pause' && !canSettle ? (releaseLocalHold || row.manual_local_released_at
                         ? '；本地占用已解除，原资金继续核对（不代表平台退款）' : '；原资金尚待核对，保留占用') : '';
                     const message = `${resultText}${retainedText}：${reason}`.slice(0, 255);

@@ -9,6 +9,7 @@ const { PROVIDER_TO_PLAN: CDK_PLAN } = require('../config/plan-registry');
 const { manualLockKeys } = require('./payment-execution-lock');
 const { manualHistory, retryableFailure } = require('./payment-retry-policy');
 const { classifyFailure } = require('../orbitcard/orbitcard-error-policy');
+const { projectBusinessOrder } = require('./order-business-status');
 
 const REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PLAN_ID = /^[a-z][a-z0-9_-]{0,63}$/;
@@ -74,9 +75,11 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
 
     function publicOrder(order) {
         if (!order) return null;
+        const business = projectBusinessOrder(order), closed = business.business_status === 'closed';
         let snapshot = null;
         try { snapshot = order.snapshot ? JSON.parse(order.snapshot) : null; } catch (_) { /* historical malformed snapshot */ }
         return { request_id: order.request_id, client_order_no: order.client_order_no,
+            ...business,
             task_no: order.task_no || null, plan_type: order.plan_type, plan_name: order.plan_name,
             target_email: order.target_email, card_id: Number(order.card_id) || null, state: order.state,
             manual_result: order.manual_result || null, manual_result_reason: order.manual_result_reason || null,
@@ -86,9 +89,9 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
             manual_local_release_reason: order.manual_local_release_reason || null,
             mode: order.mode, cdk_code: order.cdk_code || null, attempt: manualHistory(order).length + 1,
             attempts: manualHistory(order),
-            message: order.message || '', ...(waitingQueue ? require('./payment-waiting-queue').queueFeedback(order.message) : {}),
+            message: order.message || '', ...(waitingQueue && !closed ? require('./payment-waiting-queue').queueFeedback(order.message) : {}),
             order: snapshot, created_at: order.created_at, updated_at: order.updated_at,
-            captcha: challenges.get(order.request_id) || null };
+            captcha: closed ? null : challenges.get(order.request_id) || null };
     }
 
     async function catalog() {
@@ -618,6 +621,8 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
                         ? '需要完成人机验证，然后继续查询原订单' : 'Orbitcard 仍在处理；继续查询原订单'
             });
             record(order, 'manual_order_query', '管理员原订单查询完成', { state: next, task_no: updated.task_no });
+            if (updated.state === 'success') await cardService.rotateExhausted?.(cfg)
+                .catch(() => record(order, 'card_quota_maintenance_pending', '三次成功卡片的删卡或补开待后台恢复，原订阅已成功'));
             if (updated.state === 'retry_waiting') return await retryPayment(updated, cfg, handoff);
             if (next !== 'pending') retrySessions.delete(requestId);
             return publicOrder(updated);

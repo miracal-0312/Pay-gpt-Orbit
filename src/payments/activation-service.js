@@ -5,6 +5,7 @@ const { parseSession } = require('./session-input');
 const config = require('../config/orbitcard-config');
 const { cdkLockKey } = require('./payment-execution-lock');
 const { PaymentQueueFullError, queueFeedback } = require('./payment-waiting-queue');
+const { projectBusinessOrder } = require('./order-business-status');
 
 // The only redemption entry point. Reservation is acquired before any remote create.
 module.exports = function createActivationHandler({ store, ensureStoreReady, activeJobs, runWorker, log, waitingQueue, broadcast = () => {}, isDraining = () => false }) {
@@ -18,15 +19,32 @@ module.exports = function createActivationHandler({ store, ensureStoreReady, act
         try {
             await ensureStoreReady();
             const code = await store.verifyCdkDetails(cdk);
-            if (code?.manual_redeemed_at) return res.status(403).json({ success: false, message: '该卡密已由人工售后核销，不能再次充值' });
-            const existing = code && await store.getRunningTaskByCdk(cdk);
+            let existing;
+            if (code?.manual_redeemed_at) {
+                // A released historical order can still explain this CDK's
+                // manual completion. Read only the latest matching order;
+                // redemption never admits another payment or retry.
+                existing = await store.getOrbitcardTaskByCdk(cdk);
+                if (!existing || String(existing.cdk_code || '').toLowerCase() !== cdk.toLowerCase()
+                    || !['success', 'failed'].includes(existing.manual_result)) {
+                    return res.status(403).json({ success: false, message: '该卡密已由人工售后核销，不能再次充值' });
+                }
+            } else existing = code && await store.getRunningTaskByCdk(cdk);
 
             const resumingRetry = require('./payment-retry-policy').retryableTask(existing);
-            if (existing && !resumingRetry) return res.json({ success: true,
-                jobKey: existing.orbitcard_retry_root_job_key || existing.job_key,
-                provider: existing.orbitcard_client_order_no ? 'orbitcard' : 'history',
-                queued: Boolean(waitingQueue?.has(existing.job_key)),
-                status: existing.status, message: existing.message || '已恢复原订单，请查询充值结果' });
+            if (existing && !resumingRetry) {
+                const manualResult = ['success', 'failed'].includes(existing.manual_result) ? existing.manual_result : null;
+                const { business_status, business_result, business_closed_at } = projectBusinessOrder(existing);
+                return res.json({ success: true,
+                    jobKey: existing.orbitcard_retry_root_job_key || existing.job_key,
+                    provider: existing.orbitcard_client_order_no ? 'orbitcard' : 'history',
+                    queued: manualResult ? false : Boolean(waitingQueue?.has(existing.job_key)),
+                    status: manualResult || existing.status, business_status, business_result, business_closed_at,
+                    ...(manualResult ? { cdk_state: manualResult === 'success' || code.manual_redeemed_at ? 'redeemed'
+                        : existing.manual_local_released_at ? 'available' : 'reserved' } : {}),
+                    message: manualResult === 'success' ? '订单已由人工售后完成交付' : manualResult === 'failed' ? '订单已由人工确认失败，请联系客服处理'
+                        : existing.message || '已恢复原订单，请查询充值结果' });
+            }
             if (!code || (code.used_at && !resumingRetry) || code.type !== '自助') return res.status(403).json({ success: false, message: 'CDK 无效、已使用或不支持此类型' });
             const maintenance = await store.getMaintenanceModeState();
             if (isDraining() || maintenance.enabled) return res.status(503).json({ success: false, message: '系统暂停接单，请稍后再试' });

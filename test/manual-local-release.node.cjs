@@ -359,6 +359,9 @@ test('old administrator attempt aliases share the current request lock and relea
         : sql.includes('request_id') ? [row] : [] });
     let owner = await automation.paymentOwner(old);
     assert.equal(owner.allowed, false); assert.deepEqual(owner.keys, [`manual:${id}`, 'cdk:code-1']);
+    row.manual_result = 'failed';
+    owner = await automation.paymentOwner(old);
+    assert.equal(owner.manualClosed, true); assert.equal(owner.localReleased, false); assert.equal(owner.canReconcileIssue, true);
     row.manual_local_released_at = released;
     owner = await automation.paymentOwner(old);
     assert.equal(owner.localReleased, true); assert.equal(owner.canReconcileIssue, true); assert.equal(owner.allowed, false);
@@ -379,4 +382,126 @@ test('manual results still permit original successful subscription fee reconcili
         await recovery.refreshTask(row);
         assert.equal(queries, 1);
     }
+});
+
+function closedIssueFixture({ manualResult = 'failed', existing = false, orderNo = null, bound = false,
+    closeBeforeLock = false, closeDuringProducts = false } = {}) {
+    const owner = { ...taskRow(), orbitcard_state: 'support_locked', manual_result: manualResult, manual_local_released_at: null };
+    let held = false, generated = 0, deniedClosures = 0;
+    let issue = existing ? { issue_key: 'SAVED-OPEN-KEY', scope, plan_type: 'plus', state: 'prepared',
+        job_key: bound ? owner.job_key : null, replacement_for_job_key: bound ? null : owner.job_key,
+        replacement_for_card_id: bound ? null : 8, order_no: orderNo,
+        credential_hash: credential, product_code: 'product-1', amount: '20.00',
+        request_body: JSON.stringify({ product_code: 'product-1', amount: '20.00', quantity: 1 }) } : null;
+    const calls = [], patches = [];
+    const locked = {
+        listFundings: async () => [],
+        pendingIssue: async plan => plan === 'plus' && issue && !['ready', 'failed'].includes(issue.state) ? issue : null,
+        listCards: async () => [{ card_id: 8, disabled_at: released, disabled_code: 'card_declined', disabled_job_key: owner.job_key }],
+        listIssues: async () => issue ? [issue] : [], replacementForCard: async () => issue,
+        createManualIssue: async input => {
+            if (input.replacement_for_job_key) assert.equal(held, true);
+            generated++; issue = { ...input, scope, state: 'prepared' }; return issue;
+        },
+        updateIssue: async (_key, patch) => { patches.push(patch); Object.assign(issue, patch); },
+        syncCards: async () => {}, completeIssue: async () => { issue.state = 'ready'; }
+    };
+    const automation = createAutomation({ runQuery: async sql => sql.includes('FROM cdk_codes') ? [{ is_active: 1 }] : [owner] });
+    const store = { ...automation, withCardAllocationLock: async (_base, fn) => fn(locked),
+        acquirePaymentLock: async keys => {
+            assert.deepEqual(keys, ['cdk:code-1']);
+            if (held) return null;
+            if (closeBeforeLock) owner.manual_result = 'failed';
+            held = true;
+            return { assertOwned: async () => assert.equal(held, true), release: async () => { held = false; } };
+        } };
+    async function attemptClose() {
+        const guard = await store.acquirePaymentLock(['cdk:code-1']);
+        if (!guard) { deniedClosures++; return false; }
+        owner.manual_result = 'failed'; await guard.release(); return true;
+    }
+    async function assertOriginalLocked() {
+        assert.equal(held, true); assert.equal(await attemptClose(), false);
+    }
+    const api = { request: async (_cfg, operation, body, key) => {
+        if (issue?.replacement_for_job_key || issue?.job_key || !issue && !owner.manual_result) await assertOriginalLocked();
+        calls.push({ operation, body, key });
+        if (operation === 'getAccountBalance') return { success: true, data: { available_balance: '100.00' } };
+        assert.equal(operation, 'createCard');
+        return { success: true, status: 200, data: { order_no: orderNo || 'ORIGINAL-OPEN', card_id: 9, status: 'success', completed: true } };
+    } };
+    const cardsApi = {
+        products: async () => {
+            calls.push({ operation: 'getProductCode' });
+            if (!owner.manual_result) await assertOriginalLocked();
+            if (closeDuringProducts) owner.manual_result = 'failed';
+            return [{ product_code: 'product-1' }];
+        },
+        chooseOpeningProduct: () => ({ product_code: 'product-1', amount: '20.00' }),
+        createCardBody: selected => ({ ...selected, quantity: 1 }),
+        issueResult: data => ({ ...data, fees: {}, retryAfterMs: 0 }),
+        cardDetail: async () => ({ card_id: 9, product_code: 'product-1', provider_status: 'ACTIVE' })
+    };
+    const create = load('src/orbitcard/orbitcard-card-service.js', { './orbitcard-client': api, './orbitcard-cards-client': cardsApi });
+    return { service: create({ store, audit() {}, now: () => 100000 }), owner, store, calls, patches, attemptClose,
+        issue: () => issue, generated: () => generated, held: () => held, deniedClosures: () => deniedClosures };
+}
+
+test('manual closure without local release prevents new replacements and submission of an unsent saved replacement', async () => {
+    for (const manualResult of ['success', 'failed']) for (const [existing, bound] of [[false, false], [true, false], [true, true]]) {
+        const f = closedIssueFixture({ manualResult, existing, bound });
+        const owner = await f.store.paymentOwner('old-job');
+        assert.equal(owner.manualClosed, true); assert.equal(owner.localReleased, false); assert.equal(owner.allowed, false);
+        await f.service.recover(cfg);
+        assert.deepEqual(f.calls, []); assert.deepEqual(f.patches, []); assert.equal(f.generated(), 0);
+        if (existing) {
+            await assert.rejects(f.service.apply(cfg), bound ? /存在其他待确认开卡申请/ : /原补开申请不可继续提交/);
+            assert.deepEqual(f.calls, []); assert.equal(f.issue().state, 'prepared');
+        }
+    }
+});
+
+test('closed orders reconcile only their saved issued order number and key, including prepared snapshots', async () => {
+    for (const manualResult of ['success', 'failed']) for (const bound of [false, true]) {
+        const f = closedIssueFixture({ manualResult, bound, existing: true, orderNo: 'SAVED-ORDER' });
+        const original = { key: f.issue().issue_key, body: f.issue().request_body };
+        await f.service.recover(cfg);
+        assert.equal(f.generated(), 0); assert.equal(f.issue().state, 'ready'); assert.equal(f.held(), false);
+        assert.deepEqual(f.calls, [{ operation: 'createCard', key: original.key, body: JSON.parse(original.body) }]);
+        assert.equal(f.patches.some(patch => patch.state === 'failed'), false);
+        assert.equal(f.owner.manual_result, manualResult); assert.equal(f.owner.manual_local_released_at, null);
+    }
+});
+
+test('administrator apply reconciles a closed existing replacement under the original owner lock', async () => {
+    const f = closedIssueFixture({ existing: true, orderNo: 'SAVED-ORDER' });
+    assert.equal((await f.service.apply(cfg)).card_id, 9);
+    assert.deepEqual(f.calls, [{ operation: 'createCard', key: 'SAVED-OPEN-KEY', body: JSON.parse(f.issue().request_body) }]);
+    assert.equal(f.generated(), 0); assert.ok(f.deniedClosures() > 0); assert.equal(f.held(), false);
+});
+
+test('replacement locks reject an intervening manual closure and retain the same guard through remote awaits', async () => {
+    for (const existing of [false, true]) {
+        const stopped = closedIssueFixture({ manualResult: null, existing, closeBeforeLock: true });
+        await stopped.service.recover(cfg);
+        assert.deepEqual(stopped.calls, []); assert.equal(stopped.generated(), 0); assert.equal(stopped.held(), false);
+        const normal = closedIssueFixture({ manualResult: null, existing });
+        normal.owner.orbitcard_state = 'manual'; // A pause alone keeps the existing replacement policy.
+        await normal.service.recover(cfg);
+        assert.equal(normal.calls.filter(call => call.operation === 'createCard').length, 1);
+        assert.ok(normal.deniedClosures() > 0); assert.equal(normal.held(), false);
+        assert.equal(await normal.attemptClose(), true);
+    }
+    const changed = closedIssueFixture({ manualResult: null, closeDuringProducts: true });
+    await changed.service.recover(cfg);
+    assert.equal(changed.generated(), 0); assert.equal(changed.calls.some(call => call.operation === 'createCard'), false);
+    assert.equal(changed.held(), false);
+});
+
+test('explicit independent administrator card applications still work after an unrelated manual closure', async () => {
+    const f = closedIssueFixture();
+    assert.equal((await f.service.apply(cfg)).card_id, 9);
+    assert.equal(f.generated(), 1); assert.equal(f.issue().replacement_for_job_key, undefined);
+    assert.equal(f.issue().job_key, undefined); assert.equal(f.owner.manual_result, 'failed');
+    assert.equal(f.calls.filter(call => call.operation === 'createCard').length, 1);
 });

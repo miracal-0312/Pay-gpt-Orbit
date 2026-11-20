@@ -28,6 +28,13 @@ async function setup({status='ACTIVE',request,detail}={}) {
     return {...f,card,calls,locked,retire,run:(options)=>retire(cfg,locked,card,f.db.cards[0],options)};
 }
 
+test('a live DELETED snapshot confirms the retirement without another delete request',async()=>{
+    const f=await setup({status:'DELETED'});
+    await f.run();
+    assert.equal(f.db.cards[0].retirement_state,'confirmed');
+    assert.equal(f.calls.length,0);
+});
+
 test('ACTIVE and CANCELLED cards are deleted directly and confirmed without freeze or refund',async()=>{
     for (const status of ['ACTIVE','CANCELLED']) {
         const f=await setup({status});

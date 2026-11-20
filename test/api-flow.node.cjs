@@ -45,11 +45,55 @@ test('malformed/incomplete/expired Sessions are rejected before touching a CDK',
 });
 test('a manually redeemed CDK cannot resume a queued retry or start another payment', async () => {
     const f = fixture({ verifyCdkDetails: async () => ({ type: '自助', used_at: 'reserved', manual_redeemed_at: '2026-10-26' }),
+        getOrbitcardTaskByCdk: async () => ({ job_key: 'original', cdk_code: 'CDK-TEST', status: 'running', orbitcard_state: 'retry_waiting' }),
         getRunningTaskByCdk: async () => { throw Error('must reject before attempting to resume'); } });
     const response = await f.request();
     assert.equal(response.code, 403);
     assert.match(response.data.message, /人工售后核销/);
     assert.deepEqual(f.events, []);
+});
+
+test('duplicate activation returns the closed manual outcome and never starts a worker for an unreleased order', async () => {
+    for (const manual_result of ['success', 'failed']) for (const state of ['funding_pending', 'card_pending', 'manual', 'retry_waiting', 'unknown']) {
+        const original = { job_key: 'original', cdk_code: 'CDK-TEST', orbitcard_client_order_no: 'original-client', status: 'manual',
+            orbitcard_state: state, manual_result, manual_result_at: '2026-11-17 14:30:00.000',
+            manual_result_reason: 'PRIVATE-REASON', manual_result_by: 'private-admin@example.test', message: 'PRIVATE-MESSAGE' };
+        const before = structuredClone(original);
+        const f = fixture({ verifyCdkDetails: async () => ({ type: '自助', plan_type: 'plus', used_at: 'reserved' }),
+            getRunningTaskByCdk: async () => original,
+            getMaintenanceModeState: async () => assert.fail('A closed order must not reenter admission'),
+            claimOrbitcardRetry: async () => assert.fail('A manual result must not retry'),
+            createOrbitcardTask: async () => assert.fail('An unreleased CDK remains occupied') });
+        const response = await f.request();
+        assert.equal(response.code, 200); assert.equal(response.data.status, manual_result);
+        assert.equal(response.data.business_status, 'closed'); assert.equal(response.data.business_result, manual_result);
+        assert.equal(response.data.business_closed_at, original.manual_result_at); assert.equal(response.data.queued, false);
+        assert.equal(response.data.cdk_state, manual_result === 'success' ? 'redeemed' : 'reserved');
+        assert.doesNotMatch(JSON.stringify(response.data), /PRIVATE-|private-admin/);
+        assert.deepEqual(f.events, []); assert.deepEqual(original, before);
+    }
+});
+
+test('redeemed duplicate activation reads only the latest matching manual result including a locally released one', async () => {
+    for (const manual_result of ['success', 'failed']) {
+        const original = { job_key: 'latest', cdk_code: 'CDK-TEST', orbitcard_client_order_no: 'latest-client', status: 'manual',
+            orbitcard_state: 'pending', manual_result, manual_result_at: '2026-11-17 14:30:00.000', manual_local_released_at: 'released' };
+        const f = fixture({ verifyCdkDetails: async () => ({ type: '自助', plan_type: 'plus', used_at: 'reserved', manual_redeemed_at: 'redeemed' }),
+            getRunningTaskByCdk: async () => assert.fail('Released historical completion comes from the latest order query'),
+            getOrbitcardTaskByCdk: async cdk => { assert.equal(cdk, 'CDK-TEST'); return original; },
+            claimOrbitcardRetry: async () => assert.fail('Redemption forbids retry'),
+            createOrbitcardTask: async () => assert.fail('Redemption forbids a new payment') });
+        const response = await f.request();
+        assert.equal(response.code, 200); assert.equal(response.data.jobKey, 'latest'); assert.equal(response.data.status, manual_result);
+        assert.equal(response.data.business_status, 'closed'); assert.equal(response.data.business_result, manual_result);
+        assert.equal(response.data.cdk_state, 'redeemed'); assert.equal(response.data.queued, false); assert.deepEqual(f.events, []);
+    }
+    for (const row of [null, { job_key: 'newest', cdk_code: 'CDK-TEST', status: 'running', orbitcard_state: 'pending' },
+        { job_key: 'foreign', cdk_code: 'OTHER-CDK', manual_result: 'success' }]) {
+        const f = fixture({ verifyCdkDetails: async () => ({ type: '自助', used_at: 'reserved', manual_redeemed_at: 'redeemed' }),
+            getRunningTaskByCdk: async () => assert.fail('No stale order fallback'), getOrbitcardTaskByCdk: async () => row });
+        const response = await f.request(); assert.equal(response.code, 403); assert.deepEqual(f.events, []);
+    }
 });
 
 test('disabled/unconfigured Orbitcard refuses new work without claiming a CDK', async () => {

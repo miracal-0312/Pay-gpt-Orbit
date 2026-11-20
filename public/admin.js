@@ -93,14 +93,17 @@ function renderTasks(tasks) {
     $('tasks').innerHTML = tasks.map(task => {
         const order = task.order || {}, fee = order.fee_status ? `${order.service_fee ?? '—'} ${order.currency || 'USDT'} / ${order.fee_status}` : '—';
         const payment = order.payment ? `${order.payment.amount} ${order.payment.currency}` : '—';
-        const manualResult = task.manual_result === 'success' ? '人工交付完成' : task.manual_result === 'failed' ? '人工确认失败' : '';
-        const originalState = task.queued ? '<span class="pill">排队等待</span>' : status(task.orbitcard_state || task.status);
-        const outcome = `${manualResult ? `<div><strong>人工结果：${manualResult}</strong></div>` : ''}<div>原平台／资金状态：${originalState}</div>${task.manual_local_released_at ? '<div>本地占用：已释放</div>' : ''}`;
-        const refresh = (task.provider === 'orbitcard' ? `<button class="secondary" data-refresh-order="${escapeHtml(task.jobKey)}">${['funding_waiting','funding_review','funding_pending'].includes(task.orbitcard_state) ? '核对原补款' : '查原单'}</button>` : '<small>历史记录</small>')
+        const businessResult = ['success', 'failed'].includes(task.manual_result) ? task.manual_result
+            : task.business_status === 'closed' && ['success', 'failed'].includes(task.business_result) ? task.business_result : '';
+        const closed = Boolean(businessResult) || task.business_status === 'closed';
+        const originalState = !closed && task.queued ? '<span class="pill">排队等待</span>' : status(task.orbitcard_state || task.status);
+        const outcome = (closed ? `<div><strong class="pill">已关闭${businessResult ? `（人工${businessResult === 'success' ? '成功' : '失败'}）` : ''}</strong></div><details><summary>原资金核对记录</summary>${originalState}<div>${escapeHtml(task.message)}</div></details>`
+            : `<div>原平台／资金状态：${originalState}</div>${escapeHtml(task.message)}`) + (task.manual_local_released_at ? '<div>本地占用：已释放</div>' : '');
+        const refresh = (task.provider === 'orbitcard' ? `<button class="secondary" data-refresh-order="${escapeHtml(task.jobKey)}">${closed ? '核对原记录' : ['funding_waiting','funding_review','funding_pending'].includes(task.orbitcard_state) ? '核对原补款' : '查原单'}</button>` : '<small>历史记录</small>')
             + ` <button type="button" class="secondary" data-order-manual="${escapeHtml(task.jobKey)}" data-order-kind="task">人工修改</button>`;
         const cardLabel = task.card_id || (task.provider !== 'orbitcard' ? '历史未绑定'
             : ['preparing','prepared','rejected','balance_blocked','card_pending'].includes(task.orbitcard_state) ? '尚未分配支付卡' : '未记录支付卡');
-        return `<tr><td>${escapeHtml(task.time)}<br><code>${escapeHtml(task.cdk)}</code></td><td>${escapeHtml(task.provider === 'orbitcard' ? task.token : '历史账号')}<br><code>${escapeHtml(task.order_id || task.client_order_no || task.jobKey)}</code><br>卡 ID：${escapeHtml(cardLabel)}</td><td>${outcome}${escapeHtml(task.message)}</td><td>${escapeHtml(fee)}</td><td>${escapeHtml(payment)}</td><td>${refresh} <button class="secondary" data-download-audit="${escapeHtml(task.jobKey)}">下载日志</button> <button class="secondary" data-debug-trace="${escapeHtml(task.jobKey)}">链路日志</button></td></tr>`;
+        return `<tr><td>${escapeHtml(task.time)}<br><code>${escapeHtml(task.cdk)}</code></td><td>${escapeHtml(task.provider === 'orbitcard' ? task.token : '历史账号')}<br><code>${escapeHtml(task.order_id || task.client_order_no || task.jobKey)}</code><br>卡 ID：${escapeHtml(cardLabel)}</td><td>${outcome}</td><td>${escapeHtml(fee)}</td><td>${escapeHtml(payment)}</td><td>${refresh} <button class="secondary" data-download-audit="${escapeHtml(task.jobKey)}">下载日志</button> <button class="secondary" data-debug-trace="${escapeHtml(task.jobKey)}">链路日志</button></td></tr>`;
     }).join('') || '<tr><td colspan="6">暂无任务</td></tr>';
 }
 async function loadOverview() {
@@ -306,9 +309,10 @@ function apiInput() {
 }
 function renderCardRow(card, sync = null) {
     const id = escapeHtml(card.card_id);
-    const usage = `${escapeHtml(card.successful_order_count ?? '待同步')} 笔成功会员订单`;
+    const usage = `${escapeHtml(card.successful_order_count ?? '待同步')} 笔成功会员订单 / 上限 ${escapeHtml(card.max_successful_orders || 3)} 笔`;
     const history = card.disabled_at ? `已停用 · ${escapeHtml(card.disabled_code || '')}<br>${escapeHtml(card.disabled_reason || '订阅卡片错误')}`
-        : card.retiring ? '待确认删卡' : '按卡片状态与订阅错误判断可用性';
+        : card.retiring ? (card.provider_status === 'DELETED' ? '已删卡，补开结果见开卡记录' : '待确认删卡')
+            : Number(card.successful_order_count) >= 3 ? '已达三次上限，停止使用，等待删卡补开' : '最多成功支付三次，满额后自动删卡补开';
     const countedAt = '授权流水仅供对账，不影响订单计数';
     const last4 = card.last4 ? `****${escapeHtml(card.last4)}` : '尾号未提供';
     const confirmed = sync?.synced_ids?.includes(Number(card.card_id));
@@ -420,7 +424,7 @@ async function loadCdks() {
     $('cdkListSummary').textContent = '正在加载卡密…';
     const codes = await request(`/api/admin/cdks?${query}`);
     if (sequence !== cdkLoadSequence) return;
-    $('cdkRows').innerHTML = codes.map(code => `<tr><td><code>${escapeHtml(code.code)}</code></td><td>${escapeHtml(code.plan_label || code.plan_type)}</td><td>${status(code.status)}${code.manual_redeemed_at ? `<br>人工售后核销<br>${escapeHtml(code.manual_redeemed_by)} · ${escapeHtml(code.manual_redeemed_at)}<br>${escapeHtml(code.manual_redemption_reason)}` : code.orbitcard_support_locked ? '<br>支付失败，已锁定；请人工售后' : code.orbitcard_balance_blocked ? '<br>账户余额不足，CDK 已锁定' : code.orbitcard_pending_confirmation ? '<br>结果待确认' : ''}</td><td>${code.shipped ? '已出库' : '未出库'}</td><td><button type="button" class="secondary" data-cdk-status="${escapeHtml(code.code)}" data-cdk-state="${escapeHtml(code.status)}" data-cdk-shipped="${code.shipped}">修改状态</button>${!code.shipped && code.status === 'unused' ? `<button class="danger" data-delete-cdk="${escapeHtml(code.code)}">删除</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="5">暂无卡密</td></tr>';
+    $('cdkRows').innerHTML = codes.map(code => `<tr><td><code>${escapeHtml(code.code)}</code></td><td>${escapeHtml(code.plan_label || code.plan_type)}</td><td>${status(code.status)}${code.manual_redeemed_at ? `<br>人工售后核销<br>${escapeHtml(code.manual_redeemed_by)} · ${escapeHtml(code.manual_redeemed_at)}<br>${escapeHtml(code.manual_redemption_reason)}` : code.orbitcard_support_locked ? code.order_business_status === 'closed' ? '<br>订单已关闭；CDK保留售后占用' : '<br>支付失败，已锁定；请人工售后' : code.orbitcard_balance_blocked ? '<br>账户余额不足，CDK 已锁定' : code.orbitcard_pending_confirmation ? '<br>结果待确认' : ''}</td><td>${code.shipped ? '已出库' : '未出库'}</td><td><button type="button" class="secondary" data-cdk-status="${escapeHtml(code.code)}" data-cdk-state="${escapeHtml(code.status)}" data-cdk-shipped="${code.shipped}">修改状态</button>${!code.shipped && code.status === 'unused' ? `<button class="danger" data-delete-cdk="${escapeHtml(code.code)}">删除</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="5">暂无卡密</td></tr>';
     $('cdkListSummary').textContent = `${filter ? (cdkPlans[filter] || cardPlans[filter] || filter) : '全部套餐'}：显示最近 ${codes.length} 条${codes.length === 2000 ? '（已达页面上限）' : ''}`;
     cdkLoadedFilter = query;
     cdkLoadedCount = codes.length;
@@ -665,20 +669,23 @@ async function loadManualCatalog() {
 }
 function renderManualOrders(orders) {
     $('manualOrderRows').innerHTML = orders.map(order => {
-        const manualResult = order.manual_result === 'success' ? '人工交付完成' : order.manual_result === 'failed' ? '人工确认失败' : '';
-        const originalState = order.queued ? '<span class="pill">排队等待</span>' : status(order.state);
-        const outcome = `${manualResult ? `<div><strong>人工结果：${manualResult}</strong></div>` : ''}<div>原平台／资金状态：${originalState}</div>${order.manual_local_released_at ? '<div>本地占用：已释放</div>' : ''}`;
+        const businessResult = ['success', 'failed'].includes(order.manual_result) ? order.manual_result
+            : order.business_status === 'closed' && ['success', 'failed'].includes(order.business_result) ? order.business_result : '';
+        const closed = Boolean(businessResult) || order.business_status === 'closed';
+        const originalState = !closed && order.queued ? '<span class="pill">排队等待</span>' : status(order.state);
+        const outcome = (closed ? `<div><strong class="pill">已关闭${businessResult ? `（人工${businessResult === 'success' ? '成功' : '失败'}）` : ''}</strong></div><details><summary>原资金核对记录</summary>${originalState}<div>${escapeHtml(order.message || '')}</div></details>`
+            : `<div>原平台／资金状态：${originalState}</div>${escapeHtml(order.message || '')}`) + (order.manual_local_released_at ? '<div>本地占用：已释放</div>' : '');
         const previousAttempts = (order.attempts || []).map((attempt, index) => `<button type="button" class="secondary" data-debug-trace="${escapeHtml(attempt.client_order_no)}">第 ${index + 1} 次 · 卡 ${escapeHtml(attempt.card_id)} 日志</button>`).join('');
-        const captcha = order.captcha?.url ? `<br><a href="${escapeHtml(order.captcha.url)}" target="_blank" rel="noopener noreferrer">打开平台验证链接</a>` : '';
-        const action = `${!order.manual_result && !order.queued && ['preparing','retry_waiting'].includes(order.state)
-            ? `<button type="button" class="secondary" data-retry-manual="${escapeHtml(order.request_id)}">${order.state === 'retry_waiting' ? '提交 Session 换卡重试' : '继续准备'}</button>` : ''}${order.queued || ['submitting','pending','manual','funding_waiting','funding_review','funding_pending','card_pending'].includes(order.state)
-            ? `<button type="button" class="secondary" data-refresh-manual="${escapeHtml(order.request_id)}">${['funding_waiting','funding_review','funding_pending','card_pending'].includes(order.state) ? '核对原资金' : '查询原订单'}</button>` : ''}
+        const captcha = !closed && order.captcha?.url ? `<br><a href="${escapeHtml(order.captcha.url)}" target="_blank" rel="noopener noreferrer">打开平台验证链接</a>` : '';
+        const action = `${!closed && !order.manual_result && !order.queued && ['preparing','retry_waiting'].includes(order.state)
+            ? `<button type="button" class="secondary" data-retry-manual="${escapeHtml(order.request_id)}">${order.state === 'retry_waiting' ? '提交 Session 换卡重试' : '继续准备'}</button>` : ''}${closed || order.queued || ['submitting','pending','manual','funding_waiting','funding_review','funding_pending','card_pending'].includes(order.state)
+            ? `<button type="button" class="secondary" data-refresh-manual="${escapeHtml(order.request_id)}">${closed ? '核对原记录' : ['funding_waiting','funding_review','funding_pending','card_pending'].includes(order.state) ? '核对原资金' : '查询原订单'}</button>` : ''}
             <button type="button" class="secondary" data-order-manual="${escapeHtml(order.request_id)}" data-order-kind="admin">人工修改</button>
             <button type="button" class="secondary" data-download-manual="${escapeHtml(order.client_order_no)}">下载日志</button> <button type="button" class="secondary" data-debug-trace="${escapeHtml(order.client_order_no)}">链路日志</button>`;
         return `<tr><td>${escapeHtml(new Date(order.created_at).toLocaleString('zh-CN'))}<br>${escapeHtml(order.target_email)}</td>
             <td>${order.mode === 'fulfillment' ? '人工交付' : '测试开通'}<br>${escapeHtml(order.plan_name || order.plan_type)}<br>${order.card_id ? `卡 ${escapeHtml(order.card_id)}` : '待选卡'}${order.cdk_code ? `<br><code>${escapeHtml(order.cdk_code)}</code>` : ''}</td>
             <td><code>${escapeHtml(order.client_order_no)}</code><br><small>请求 ${escapeHtml(order.request_id)}</small>${order.task_no ? `<br><code>${escapeHtml(order.task_no)}</code>` : ''}</td>
-            <td>${outcome}<br>第 ${escapeHtml(order.attempt || 1)} / 3 次尝试<br>${escapeHtml(order.message || '')}${captcha}</td><td>${action}<div class="attempt-links">${previousAttempts}</div></td></tr>`;
+            <td>${outcome}<br>第 ${escapeHtml(order.attempt || 1)} / 3 次尝试${captcha}</td><td>${action}<div class="attempt-links">${previousAttempts}</div></td></tr>`;
     }).join('') || '<tr><td colspan="5">暂无管理员订单</td></tr>';
 }
 async function loadManualOrders() {
@@ -687,8 +694,9 @@ async function loadManualOrders() {
     renderManualOrders(manualOrders);
     if (manualQueuedRequest) {
         const order = manualOrders.find(item => item.request_id === manualQueuedRequest);
-        if (order && !order.queued) {
-            showPaymentQueueFull(order, order.request_id);
+        const closed = order && (['success', 'failed'].includes(order.manual_result) || order.business_status === 'closed');
+        if (order && (!order.queued || closed)) {
+            if (!closed) showPaymentQueueFull(order, order.request_id);
             manualQueuedRequest = '';
         }
         $('manualSubmit').disabled = Boolean(manualQueuedRequest);
@@ -915,10 +923,15 @@ function updateOrderManualRelease(data = orderManualEditing?.data) {
 function renderOrderManualControl(data) {
     const previous = $('orderManualAction').value;
     const actions = data.actions.filter(action => action && Object.hasOwn(orderManualActionLabels, action.value));
-    $('orderManualState').textContent = `原平台／资金状态：${data.status || '未记录'} / ${data.state || '未记录'}`;
-    const manualResult = data.manual_result === 'success' ? '人工交付完成' : data.manual_result === 'failed' ? '人工确认失败' : '';
+    const businessResult = ['success', 'failed'].includes(data.manual_result) ? data.manual_result
+        : data.business_status === 'closed' && ['success', 'failed'].includes(data.business_result) ? data.business_result : '';
+    const closed = Boolean(businessResult) || data.business_status === 'closed';
+    $('orderManualState').textContent = closed ? `业务订单：已关闭${businessResult ? `（人工${businessResult === 'success' ? '成功' : '失败'}）` : ''}`
+        : `业务订单：${data.business_status || data.status || '未记录'}`;
+    $('orderManualOriginalState').textContent = `原资金核对记录：${data.status || '未记录'} / ${data.state || '未记录'}`;
+    const manualResult = businessResult === 'success' ? '人工交付完成' : businessResult === 'failed' ? '人工确认失败' : '';
     $('orderManualResult').textContent = manualResult
-        ? `人工结果：${manualResult}；${data.manual_result_by || '管理员'} · ${data.manual_result_at || '时间未记录'}；${data.manual_result_reason || '未记录原因'}`
+        ? `人工结果：${manualResult}；${data.manual_result_by || '管理员'} · ${data.business_closed_at || data.manual_result_at || '时间未记录'}；${data.manual_result_reason || '未记录原因'}`
         : '人工结果：尚未登记';
     $('orderManualSettlement').textContent = data.settlement?.allowed === false
         ? `${data.release?.released === true ? '原资金／订阅仍需核对；本地占用已人工释放，原平台扣款仍可能完成。' : '原资金／订阅仍需核对，默认保留原记录与占用。'}${data.settlement.reason || '人工结果与资金处理分别记录。'}`
@@ -944,6 +957,7 @@ async function loadOrderManualControl() {
     $('orderManualReload').disabled = true;
     $('orderManualError').textContent = '';
     $('orderManualState').textContent = '正在读取订单状态与可执行操作…';
+    $('orderManualOriginalState').textContent = '';
     $('orderManualResult').textContent = '正在读取已登记的人工结果…';
     $('orderManualSettlement').textContent = '';
     $('orderManualReleaseState').textContent = '正在读取本地占用信息…';
@@ -1038,7 +1052,7 @@ document.addEventListener('click', event => {
     const retryManual = event.target.closest('[data-retry-manual]');
     if (retryManual) {
         const order = manualOrders.find(item => item.request_id === retryManual.dataset.retryManual);
-        if (order && !order.manual_result && !order.queued && ['preparing','retry_waiting'].includes(order.state)) {
+        if (order && order.business_status !== 'closed' && !order.manual_result && !order.queued && ['preparing','retry_waiting'].includes(order.state)) {
             perform(async () => {
                 if (order.mode === 'test') { await diagResumeOrder(order); return; }
                 await selectView('manual');

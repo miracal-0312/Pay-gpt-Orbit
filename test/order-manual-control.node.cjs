@@ -515,6 +515,28 @@ for (const kind of ['task', 'admin']) {
     });
 }
 
+for (const kind of ['task', 'admin']) {
+    test(`${kind}: saving a manual result closes the business order even while original funds remain pending`, async () => {
+        for (const action of ['success', 'failed']) for (const releaseLocalHold of [false, true]) {
+            const f = fixture(kind); f.setState('funding_pending');
+            const funding = f.intent('funding', { state: 'pending' });
+            const saved = await f.save(action, { releaseLocalHold });
+            assert.equal(saved.business_status, 'closed');
+            assert.equal(saved.business_result, action);
+            assert.equal(saved.business_closed_at, f.row.manual_result_at);
+            assert.equal(saved.state, 'funding_pending');
+            assert.equal(funding.state, 'pending');
+            assert.match(f.row.message, /订单已关闭/);
+            assert.equal(saved.actions.find(item => item.value === 'pause').enabled, false);
+            await assert.rejects(f.save('pause'), error => error.status === 409);
+            const noted = await f.save('note');
+            assert.equal(noted.business_status, 'closed');
+            assert.equal(noted.business_result, action);
+            assert.equal(noted.business_closed_at, saved.business_closed_at);
+        }
+    });
+}
+
 test('local release requires an explicit strict boolean on a manual result action', async () => {
     for (const releaseLocalHold of ['true', 'false', 1, 0, null, [], {}]) {
         const f = fixture(); await assert.rejects(f.save('success', { releaseLocalHold }), error => error.status === 400); assert.equal(f.writes.length, 0);

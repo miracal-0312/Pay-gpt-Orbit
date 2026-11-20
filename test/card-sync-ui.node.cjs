@@ -41,7 +41,7 @@ test('an idle card below its configured successful order limit remains available
     await f.api.loadCards();
     assert.match(f.$('cardRows').innerHTML,/空闲/);
     assert.doesNotMatch(f.$('cardRows').innerHTML,/暂不分配|停止分配/);
-    assert.match(f.$('cardRows').innerHTML,/按卡片状态与订阅错误判断可用性/);
+    assert.match(f.$('cardRows').innerHTML,/最多成功支付三次，满额后自动删卡补开/);
 });
 
 test('deleted and unavailable cards are omitted from rows after local refresh',async()=>{

@@ -44,6 +44,7 @@ module.exports = function createRetirement({ api, cardsApi }) {
         // Legacy keys have no state and may already have been sent. A missing
         // list item is also not proof of deletion; require an explicit detail.
         if (!listed || intent.retirement_state !== 'prepared') return recover();
+        if (card.provider_status === 'DELETED') return confirm(card);
         if (!['ACTIVE', 'CANCELLED'].includes(card.provider_status)) {
             throw new CardPreparationError('卡片当前状态不允许发起删除，已暂停退役');
         }

@@ -74,7 +74,7 @@ test('card snapshots expose durable disable status independently of counts and l
     require('../src/http/orbitcard-card-http')(app,{store:{...core,cardMethods:()=>({listCards:async()=>cards,listIssues:async()=>[],listFundings:async()=>[]})},cardService:{},requireSecondaryAuth(){}});
     const res={set(){},json(value){this.body=value;},status(){return this;}};
     await routes.get('/api/admin/orbitcard/cards')({},res);
-    assert.equal(res.body.cards[0].usable,true);assert.equal(res.body.cards[0].successful_order_count,999);
+    assert.equal(res.body.cards[0].usable,false);assert.equal(res.body.cards[0].successful_order_count,999);
     assert.equal(res.body.cards[1].usable,false);assert.equal(res.body.cards[1].disabled_reason,'卡片被拒绝');
     assert.equal(Object.hasOwn(res.body.cards[0],'successful_order_limit'),false);
     assert.equal(Object.hasOwn(res.body.cards[0],'reuse_after_ms'),false);

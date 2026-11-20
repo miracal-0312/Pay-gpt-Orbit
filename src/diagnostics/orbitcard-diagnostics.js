@@ -76,6 +76,7 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
             }
             const summaries = listed.map(card => ({ card_id: card.card_id, status: card.provider_status,
                 successful_order_count: saved.find(row => Number(row.card_id) === card.card_id)?.successful_order_count,
+                max_successful_orders: poolPolicy.MAX_SUCCESSFUL_ORDERS,
                 availability_basis: 'card_errors', disabled_at: saved.find(row => Number(row.card_id) === card.card_id)?.disabled_at,
                 busy: Boolean(saved.find(row => Number(row.card_id) === card.card_id)?.active_job),
                 balance: null, currency: card.currency || null }));
@@ -136,7 +137,7 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
             } else throw new CardPreparationError('卡片被占用或平台状态尚未确认，实际支付需要等待处理；共享等待位最多 1 个');
             const required = funding;
             if (cfg.enabled) {
-                const retiring = saved.filter(row => !row.active_job && row.retirement_key
+                const retiring = saved.filter(row => !row.active_job && (row.retirement_key || poolPolicy.exhausted(row))
                     && readable.some(card => card.card_id === Number(row.card_id)));
                 result.selection.maintenance = { current_size:readable.length,
                     retire_card_ids:retiring.map(row => Number(row.card_id)), funding_amount:money.cents(funding),

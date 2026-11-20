@@ -5,7 +5,7 @@ const { FundingAwaitingError, FUNDING_POLL_MS } = require('../orbitcard/orbitcar
 
 // Both interactive refresh and restart recovery query the same durable identity.
 module.exports = function createRecovery({ store, query, activeJobs, audit, notify = async () => {}, checkBalance = async () => false,
-    confirmFunding = null, now = Date.now }) {
+    confirmFunding = null, onSuccess = async () => {}, now = Date.now }) {
     const fundingCheckAt = new Map();
     function deferFunding(jobKey, delay = FUNDING_POLL_MS) {
         const waitMs = Math.max(FUNDING_POLL_MS, Number(delay) || 0);
@@ -175,6 +175,10 @@ module.exports = function createRecovery({ store, query, activeJobs, audit, noti
             const latest = await store.getTaskStatus(task.job_key);
             if (latest && latest.status !== task.status && ['success','failed'].includes(latest.status)) {
                 try { await notify(latest); } catch (_) { /* the order is already settled; notifications must never reverse it */ }
+                if (latest.status === 'success') {
+                    try { await onSuccess(latest); }
+                    catch (_) { audit({ jobKey: task.job_key, source: 'orbitcard', event: 'card_quota_maintenance_pending', text: '成功卡片维护待后台恢复' }); }
+                }
             }
         }
         return result;

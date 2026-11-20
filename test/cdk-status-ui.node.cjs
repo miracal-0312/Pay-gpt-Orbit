@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-function fixture(state = 'unused') {
+function fixture(state = 'unused', fields = {}) {
     const source = fs.readFileSync(path.join(__dirname, '../public/admin.js'), 'utf8');
     const block = source.slice(source.indexOf('function cdkListQuery('), source.indexOf('async function exportCdks('));
     const nodes = new Map(), calls = [], notices = [];
@@ -13,7 +13,7 @@ function fixture(state = 'unused') {
             showModal() { this.open = true; }, close() { this.open = false; } });
         return nodes.get(id);
     };
-    let code = { code: 'CODE-SUPPORT', status: state, shipped: false };
+    let code = { code: 'CODE-SUPPORT', status: state, shipped: false, ...fields };
     let fail = false, hold = null;
     const request = async (url, body) => {
         calls.push({ url, body });
@@ -49,6 +49,16 @@ test('every inventory row offers editing and the dialog reflects current usage a
         assert.equal(f.$('cdkEditShipped').value, 'false');
         assert.equal(f.$('cdkStatusCode').textContent, 'CODE-SUPPORT');
     }
+});
+
+test('closed manual failures show retained CDK support ownership rather than a pending order', async () => {
+    const f = fixture('processing', { orbitcard_support_locked: true, orbitcard_pending_confirmation: true, order_business_status: 'closed' });
+    await f.api.loadCdks();
+    assert.match(f.$('cdkRows').innerHTML, /processing/);
+    assert.match(f.$('cdkRows').innerHTML, /订单已关闭；CDK保留售后占用/);
+    assert.doesNotMatch(f.$('cdkRows').innerHTML, /结果待确认|data-delete-cdk/);
+    const original = fixture('processing', { orbitcard_support_locked: true }); await original.api.loadCdks();
+    assert.match(original.$('cdkRows').innerHTML, /支付失败，已锁定；请人工售后/);
 });
 
 test('saving shipping only sends the changed field plus expected states, then closes and refreshes', async () => {

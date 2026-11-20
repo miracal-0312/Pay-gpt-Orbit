@@ -12,6 +12,7 @@ const emailNotifications = require('./integrations/email-notifications')({ store
     audit: entry => runtimeLog.push(entry) });
 const adminAuth = require('./http/admin-auth');
 const { PLAN_LABELS, PROVIDER_TO_PLAN } = require('./config/plan-registry');
+const { projectBusinessOrder } = require('./payments/order-business-status');
 const { notifyTelegramEvent } = require('./integrations/telegram-notify');
 const app = express();
 const activeJobs = new Set();
@@ -30,6 +31,7 @@ function broadcast(jobKey, data) {
     for (const ws of clients.get(jobKey) || []) taskSockets.send(ws, { jobKey, ...data });
 }
 function publicOrder(task) {
+    const { business_status, business_result, business_closed_at } = projectBusinessOrder(task);
     const planType = PROVIDER_TO_PLAN[task.orbitcard_plan_type] || task.orbitcard_plan_type || null;
     const manualResult = ['success', 'failed'].includes(task.manual_result) ? task.manual_result : null;
     const manuallyRedeemed = Boolean(task.manual_redeemed_at);
@@ -42,7 +44,7 @@ function publicOrder(task) {
     return { provider: task.orbitcard_client_order_no ? 'orbitcard' : 'history',
         jobKey: task.orbitcard_retry_root_job_key || task.job_key,
         attemptJobKey: task.job_key, attempt: Number(task.orbitcard_retry_attempt_no || 1),
-        status, message,
+        status, message, business_status, business_result, business_closed_at,
         queued: manualResult ? false : waitingQueue.has(task.job_key), ...queueFeedback(manualResult || manuallyRedeemed ? '' : task.message),
         progress: manualResult === 'success' || !manualResult && manuallyRedeemed ? 100 : manualResult === 'failed' ? 0 : Number(task.progress || 0),
         target_email: task.orbitcard_email || null,
@@ -61,6 +63,7 @@ const cardService = require('./orbitcard/orbitcard-card-service')({ store, audit
 const manualService = require('./payments/orbitcard-manual-service')({ store, activeJobs, cardService, waitingQueue, audit: entry => runtimeLog.push(entry) });
 const recovery = require('./payments/order-recovery')({ store, query: require('./orbitcard/orbitcard-query'), activeJobs,
     audit: entry => runtimeLog.push(entry), notify,
+    onSuccess: () => store.getGptApiConfig().then(cfg => cardService.rotateExhausted(cfg)),
     checkBalance: task => store.getGptApiConfig().then(cfg => cardService.canResumeBalance(cfg,task)),
     confirmFunding: (task, guard) => store.getGptApiConfig().then(cfg => cardService.confirmFunding(
         { ...cfg, auditJobKey: task.job_key, executionGuard: guard }, task.job_key, task.orbitcard_plan_type)) });
@@ -105,9 +108,10 @@ app.post('/api/cdk/orbitcard/status', async (req, res, next) => {
         const result = await recovery.refreshTask(task);
         const latest = await store.getOrbitcardTaskByCdk(cdk);
         const same = latest?.job_key === task.job_key;
-        res.json({ success: result.success, data: publicOrder(latest || task), message: result.error,
-            retry_after_ms: Math.max(result.retryAfterMs || 0, result.waitMs || 0), stop_tracking: result.stopTracking,
-            captcha: same ? result.applied ? result.captcha : activeChallenges.get(task.job_key) || null : null });
+        const data = publicOrder(latest || task), closed = data.business_status === 'closed';
+        res.json({ success: result.success, data, message: result.error,
+            retry_after_ms: Math.max(result.retryAfterMs || 0, result.waitMs || 0), stop_tracking: closed || result.stopTracking,
+            captcha: !closed && same ? result.applied ? result.captcha : activeChallenges.get(task.job_key) || null : null });
     } catch (error) { next(error); }
 });
 app.post('/api/admin/orders/:jobKey/refresh', async (req, res, next) => {
@@ -122,11 +126,25 @@ app.post('/api/admin/orders/:jobKey/refresh', async (req, res, next) => {
 async function describeCdk(cdk) {
     const code = await store.verifyCdkDetails(cdk);
     if (!code || code.type !== '自助') return null;
-    const task = await store.getRunningTaskByCdk(cdk);
+    let task = await store.getRunningTaskByCdk(cdk);
+    if (code.manual_redeemed_at) {
+        const latest = await store.getOrbitcardTaskByCdk(cdk);
+        if (latest && String(latest.cdk_code || '').toLowerCase() === String(cdk).toLowerCase()
+            && ['success', 'failed'].includes(latest.manual_result)) task = latest;
+    }
+    const manualResult = ['success', 'failed'].includes(task?.manual_result) ? task.manual_result : null;
+    const { business_status, business_result, business_closed_at } = projectBusinessOrder(task || {
+        status: code.manual_redeemed_at ? 'success' : code.used_at ? 'used' : 'unused'
+    });
+    const message = manualResult === 'success' ? '订单已由人工售后完成交付' : manualResult === 'failed' ? '订单已由人工确认失败，请联系客服处理'
+        : code.manual_redeemed_at ? '卡密已由人工售后核销' : task?.message || (code.used_at ? 'CDK 已使用' : 'CDK 可兑换');
     return { type: code.type, plan_type: code.plan_type, plan_label: PLAN_LABELS[code.plan_type] || code.plan_type,
-        status: code.manual_redeemed_at ? 'success' : task ? task.orbitcard_state === 'retry_waiting' ? 'retry' : task.status === 'running' ? 'processing' : task.status : code.used_at ? 'used' : 'unused',
+        status: manualResult || (code.manual_redeemed_at ? 'success' : task ? task.orbitcard_state === 'retry_waiting' ? 'retry' : task.status === 'running' ? 'processing' : task.status : code.used_at ? 'used' : 'unused'),
+        business_status, business_result, business_closed_at,
+        cdk_state: manualResult === 'success' || code.manual_redeemed_at || !manualResult && task?.orbitcard_state === 'success' ? 'redeemed'
+            : task?.manual_local_released_at && !code.used_at ? 'available' : code.used_at || task ? 'reserved' : 'available',
         provider: task ? task.orbitcard_client_order_no ? 'orbitcard' : 'history' : 'orbitcard',
-        jobKey: task?.orbitcard_retry_root_job_key || task?.job_key, message: code.manual_redeemed_at ? '卡密已由人工售后核销' : task?.message || (code.used_at ? 'CDK 已使用' : 'CDK 可兑换'),
+        jobKey: task?.orbitcard_retry_root_job_key || task?.job_key, message,
         shipped: Boolean(code.shipped_at), usedAt: code.used_at };
 }
 app.post('/api/cdk/status', async (req, res, next) => {

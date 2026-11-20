@@ -11,18 +11,21 @@ function fixture() {
     let task = { job_key: 'original-job', cdk_code: 'CODE-TEST', orbitcard_client_order_no: 'original-order',
         orbitcard_state: 'funding_pending', status: 'manual', progress: 30, orbitcard_email: 'customer@example.test',
         orbitcard_plan_type: 'gpt-plus', message: 'PRIVATE-ADMIN-NOTE', manual_result_reason: 'PRIVATE-REASON',
+        manual_result_at: '2026-11-17 14:30:00.000',
         manual_result_by: 'private-admin@example.test', gpt_api_raw: JSON.stringify({ status: 'processing',
             client_order_no: 'original-order', subscription_succeeded: false }) };
-    const refreshed = [];
+    const refreshed = [], code = { type: '自助', plan_type: 'plus', used_at: 'reserved' }, recoveryResult = { success: true, querySkipped: true };
     const store = { ensureReady: async () => {}, getAdminPaths: async () => ({ loginPath: 'admin-login', panelPath: 'admin' }),
         getOrbitcardTaskByCdk: async cdk => cdk === 'CODE-TEST' ? task : null,
+        verifyCdkDetails: async cdk => cdk === 'CODE-TEST' ? code : null,
+        getRunningTaskByCdk: async () => task?.manual_local_released_at ? null : task,
         getTaskStatus: async () => task, safeOrder: require('../src/db/mysql-store').safeOrder };
     const filename = path.resolve(__dirname, '../src/server.js'), real = createRequire(filename), module = { exports: {} };
     const mocks = { './config/load-env': () => false, './db/mysql-store': store, './logging/runtime-log': { push() {}, initialize() {} },
-        './payments/order-recovery': () => ({ refreshTask: async current => { refreshed.push(current.job_key); return { success: true, querySkipped: true }; } }) };
+        './payments/order-recovery': () => ({ refreshTask: async current => { refreshed.push(current.job_key); return recoveryResult; } }) };
     new Function('require', 'module', 'exports', '__dirname', fs.readFileSync(filename, 'utf8'))(
         id => Object.hasOwn(mocks, id) ? mocks[id] : real(id), module, module.exports, path.dirname(filename));
-    return { ...module.exports, store, refreshed, get task() { return task; }, setTask(value) { task = value; } };
+    return { ...module.exports, store, refreshed, code, recoveryResult, get task() { return task; }, setTask(value) { task = value; } };
 }
 
 test('manual delivery is customer business success while original funding facts and source task remain unchanged', () => {
@@ -31,6 +34,8 @@ test('manual delivery is customer business success while original funding facts 
         const task = { ...f.task, orbitcard_state: state, manual_result: 'success', manual_local_released_at: released };
         const before = structuredClone(task), result = f.publicOrder(task);
         assert.equal(result.status, 'success'); assert.equal(result.progress, 100); assert.equal(result.cdk_state, 'redeemed');
+        assert.equal(result.business_status, 'closed'); assert.equal(result.business_result, 'success');
+        assert.equal(result.business_closed_at, task.manual_result_at);
         assert.equal(result.queued, false); assert.match(result.message, /人工售后完成交付/);
         assert.deepEqual(result.order, f.store.safeOrder(task.gpt_api_raw));
         assert.notEqual(result.order.status, 'success');
@@ -45,6 +50,8 @@ test('manual failure only exposes an available CDK after explicit release and ne
     for (const released of [null, '2026-11-17']) {
         const result = f.publicOrder({ ...f.task, manual_result: 'failed', manual_local_released_at: released });
         assert.equal(result.status, 'failed'); assert.equal(result.progress, 0);
+        assert.equal(result.business_status, 'closed'); assert.equal(result.business_result, 'failed');
+        assert.equal(result.business_closed_at, f.task.manual_result_at);
         assert.equal(result.cdk_state, released ? 'available' : 'reserved');
         assert.match(result.message, /人工确认失败/); assert.doesNotMatch(JSON.stringify(result), /PRIVATE-|private-admin/);
     }
@@ -60,6 +67,7 @@ test('manual results suppress stale queue prompts while unmarked and legacy orde
     }
     const original = f.publicOrder({ ...f.task, message: queueMessage });
     assert.equal(original.status, 'manual'); assert.equal(original.progress, 30); assert.equal(original.cdk_state, 'reserved');
+    assert.equal(original.business_status, 'funding_pending'); assert.equal(original.business_result, null); assert.equal(original.business_closed_at, null);
     assert.equal(original.message, queueMessage); assert.equal(original.error_code, 'PAYMENT_QUEUE_FULL');
     assert.equal(f.publicOrder({ ...f.task, orbitcard_state: 'retry_waiting' }).status, 'retry');
     const legacy = f.publicOrder({ ...f.task, manual_redeemed_at: 'legacy-redemption' });
@@ -104,6 +112,57 @@ test('WebSocket snapshots use the independent manual result even when getTaskSta
     ws.emit('message', JSON.stringify({ type: 'subscribe', jobKey: 'original-job', cdk: 'CODE-TEST' }));
     await new Promise(setImmediate);
     assert.equal(ws.sent[0].type, 'snapshot'); assert.equal(ws.sent[0].status, 'success');
+    assert.equal(ws.sent[0].business_status, 'closed'); assert.equal(ws.sent[0].business_result, 'success');
     assert.equal(ws.sent[0].progress, 100); assert.equal(ws.sent[0].cdk_state, 'redeemed');
     assert.notEqual(ws.sent[0].order.status, 'success');
+});
+
+test('all persisted manual results stay closed across original funding and subscription reconciliation states', () => {
+    const f = fixture();
+    for (const manual_result of ['success', 'failed']) for (const state of ['preparing', 'prepared', 'funding_waiting', 'funding_review',
+        'funding_pending', 'card_pending', 'submitting', 'pending', 'manual', 'retry_waiting', 'support_locked', 'success', 'failed', 'unknown', null]) {
+        const result = f.publicOrder({ ...f.task, manual_result, orbitcard_state: state,
+            status: state === 'success' ? 'success' : state === 'failed' ? 'failed' : 'manual' });
+        assert.equal(result.status, manual_result);
+        assert.equal(result.business_status, 'closed'); assert.equal(result.business_result, manual_result);
+        assert.equal(result.business_closed_at, f.task.manual_result_at);
+        assert.equal(result.queued, false); assert.equal(result.cdk_state, manual_result === 'success' ? 'redeemed' : 'reserved');
+    }
+});
+
+test('CDK verification and query show a closed manual result without making an unreleased CDK available', async t => {
+    const f = fixture(); Object.assign(f.task, { manual_result: 'failed' });
+    const server = f.app.listen(0, '127.0.0.1'); await once(server, 'listening');
+    t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const query = async route => {
+        const response = await fetch(base + route, route.includes('?') ? {} : {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cdk: 'CODE-TEST' }) });
+        assert.equal(response.status, 200); return (await response.json()).data;
+    };
+    for (const route of ['/api/verify-cdk', '/api/cdk/query?cdk=CODE-TEST']) {
+        const failed = await query(route);
+        assert.equal(failed.status, 'failed'); assert.equal(failed.business_status, 'closed'); assert.equal(failed.business_result, 'failed');
+        assert.equal(failed.business_closed_at, f.task.manual_result_at); assert.equal(failed.cdk_state, 'reserved');
+        assert.match(failed.message, /人工确认失败/); assert.doesNotMatch(JSON.stringify(failed), /PRIVATE-|private-admin/);
+    }
+    Object.assign(f.task, { manual_result: 'success', manual_local_released_at: 'released' });
+    f.code.manual_redeemed_at = 'redeemed';
+    const delivered = await query('/api/verify-cdk');
+    assert.equal(delivered.status, 'success'); assert.equal(delivered.business_status, 'closed');
+    assert.equal(delivered.business_result, 'success'); assert.equal(delivered.cdk_state, 'redeemed');
+    assert.doesNotMatch(JSON.stringify(delivered), /PRIVATE-|private-admin/);
+});
+
+test('customer polling stops for a closed business order while original funding can still be reconciled', async t => {
+    const f = fixture(); Object.assign(f.task, { manual_result: 'failed' });
+    Object.assign(f.recoveryResult, { applied: true, captcha: { url: 'https://captcha.example.test', expires_at: '2099-01-01' } });
+    const server = f.app.listen(0, '127.0.0.1'); await once(server, 'listening');
+    t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/cdk/orbitcard/status`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cdk: 'CODE-TEST' }) });
+    const body = await response.json();
+    assert.equal(response.status, 200); assert.equal(body.stop_tracking, true); assert.equal(body.captcha, null);
+    assert.equal(body.data.business_status, 'closed'); assert.equal(body.data.status, 'failed'); assert.equal(body.data.cdk_state, 'reserved');
+    assert.deepEqual(f.refreshed, ['original-job']); assert.equal(f.task.orbitcard_state, 'funding_pending');
 });

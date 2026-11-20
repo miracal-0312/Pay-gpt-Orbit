@@ -47,16 +47,16 @@ test('manual application persistence cannot create an order-bound automatic open
     assert.equal(await methods.issueForJob(task.jobKey),null);
 });
 
-test('card reservations serialize and verified subscription counts remain statistics',async()=>{
-const f=fixture();await f.addCard();const m=f.store.cardMethods(f.base);for(let n=0;n<7;n++){
+test('card reservations serialize and verified successes cap each card at three',async()=>{
+const f=fixture();await f.addCard();const m=f.store.cardMethods(f.base);for(let n=0;n<3;n++){
  const first=await f.claim(),second=await f.claim();const results=await Promise.all([m.reserveCard(42,first.jobKey,'plus',7),m.reserveCard(42,second.jobKey,'plus',7)]);assert.equal(results.filter(Boolean).length,1);
  await Promise.all([f.settle(first,'success'),f.settle(first,'success')]);assert.equal(f.db.cards[0].successful_order_count,n+1);assert.equal(f.db.cards[0].authorization_count,0);
- }const next=await f.claim();assert.ok(await m.reserveCard(42,next.jobKey,'plus',7));assert.equal(f.db.successfulOrders.length,7);
+ }const next=await f.claim();assert.equal(await m.reserveCard(42,next.jobKey,'plus',7),null);assert.equal(f.db.successfulOrders.length,3);
 });
 
-test('all plans retain shared authorization statistics without a usage cap',async () => {
+test('all plans share the same three-success cap',async () => {
     const f=fixture(); await f.addCard(); const m=f.store.cardMethods(f.base);
-    for(const plan of ['plus','pro100','plus','pro200','plus','pro500','plus']) {
+    for(const plan of ['plus','pro100','pro500']) {
         const task=await f.claim(plan); assert.ok(await m.reserveCard(42,task.jobKey,plan,7)); await f.settle(task,'success');
         const count=f.db.uses.filter(u=>u.state==='consumed').length;
         assert.equal(f.db.cards[0].authorization_count,count-1);
@@ -65,9 +65,9 @@ test('all plans retain shared authorization statistics without a usage cap',asyn
         f.advance();
     }
     for(const plan of ['plus','pro100','pro200','pro500']) {
-        const task=await f.claim(plan); assert.ok(await m.reserveCard(42,task.jobKey,plan,7)); await f.settle(task,'failed');
+        const task=await f.claim(plan); assert.equal(await m.reserveCard(42,task.jobKey,plan,7),null);
     }
-    assert.equal(f.db.uses.filter(row => row.state==='consumed').length,7);
+    assert.equal(f.db.uses.filter(row => row.state==='consumed').length,3);
 });
 
 test('manual and pending hold a card; confirmed failure releases without counting',async () => {
@@ -104,6 +104,7 @@ function serviceFixture(overrides={}) {
     const transport={request:async (config,operation,body={},key='') => {
         calls.push({operation,body,key});
         if (overrides[operation]) return {status:200,...await overrides[operation](body,key,config)};
+        if(operation==='getSubscriptionList') return {success:true,data:{items:[],total:0}};
         if(operation==='cardTransaction') return {success:true,data:{list:[],total:0}};
         if(operation==='getAccountBalance') return {success:true,status:200,data:{available_balance:accountBalance.toFixed(8)}};
         if (operation==='getCardList') return {success:true,data:{list:providerCards,total:providerCards.length}};
@@ -234,7 +235,7 @@ test('every selection refreshes provider removals and preserves local usage hist
     await f.settle(first,'success');
     f.setCards([{...a,status:'DELETED'},{...b,status:'ACTIVE',balance:50}]);
     const next=await f.claim();assert.equal(await f.service.allocate(cfg,next.jobKey,'plus'),43);
-    assert.equal(f.calls.filter(call=>call.operation==='getCardList').length,2);
+    assert.equal(f.calls.filter(call=>call.operation==='getCardList').length,4);
     assert.equal(f.db.cards[0].provider_status,'DELETED');
     assert.equal(f.db.cards[0].balance,null);
     assert.equal(f.db.uses[0].state,'consumed');assert.equal(f.db.cards[0].authorization_count,0);
@@ -550,12 +551,12 @@ test('Retry-After is persisted and changing credentials or original parameters n
 });
 
 test('confirmed platform order success permits card reuse across plans without authorization delay',async () => {
-    const f=serviceFixture();const card=await f.addCard(42,true,4);
+    const f=serviceFixture();const card=await f.addCard(42,true,1);
     f.setCards([{...card,status:'ACTIVE',balance:1000}]);const task=await f.claim('pro200');
     assert.equal(await f.service.allocate(cfg,task.jobKey,'pro200'),42);
     assert.equal(f.calls.filter(c => c.operation==='createCard').length,0);await f.settle(task,'success');
-    assert.equal(f.db.cards[0].authorization_count,4);assert.equal(f.db.uses[0].state,'consumed');
-    assert.equal(f.db.cards[0].successful_order_count,5);
+    assert.equal(f.db.cards[0].authorization_count,1);assert.equal(f.db.uses[0].state,'consumed');
+    assert.equal(f.db.cards[0].successful_order_count,2);
     const next=await f.claim('plus'),m=f.store.cardMethods(f.base);
     assert.ok(await m.reserveCard(42,next.jobKey,'plus',7));
     await m.saveAuthorizations(42,['0','1','2','3','provider-auth-next']);
@@ -1517,7 +1518,7 @@ test('batch selection uses one platform snapshot and never rereads candidates be
 
 test('only existing inventory can serve an order regardless of obsolete plan quotas',async()=>{
     for(const existing of [false,true]) {
-        const f=serviceFixture();if(existing){const card=await f.addCard(42,true,4);f.setCards([{...card,status:'ACTIVE',balance:50}]);}
+        const f=serviceFixture();if(existing){const card=await f.addCard(42,true,2);f.setCards([{...card,status:'ACTIVE',balance:50}]);}
         const task=await f.claim();
         if(existing)assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),42);
         else await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/没有可用|原开卡/);

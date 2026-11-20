@@ -83,24 +83,49 @@ test('failed reads retain a retryable dialog and never enable a stale mutation',
     assert.equal(f.calls.at(-1).url, '/api/admin/orders/job%2F1/manual');
 });
 
-test('lists show a manual result separately from the unresolved original funds and retain the original query', () => {
+test('lists close a manual result and fold unresolved original funds into read-only records', () => {
     const nodes = { tasks: {}, manualOrderRows: {} };
     const status = new Function('escapeHtml', `${source.slice(source.indexOf('function status('), source.indexOf('function renderTasks('))}; return status;`)(escapeHtml);
     const renderTasks = new Function('$', 'escapeHtml', 'status', `${source.slice(source.indexOf('function renderTasks('), source.indexOf('async function loadOverview('))}; return renderTasks;`)(id => nodes[id], escapeHtml, status);
     const renderManualOrders = new Function('$', 'escapeHtml', 'status', `${source.slice(source.indexOf('function renderManualOrders('), source.indexOf('async function loadManualOrders('))}; return renderManualOrders;`)(id => nodes[id], escapeHtml, status);
-    for (const [manual_result, label] of [['success', '人工交付完成'], ['failed', '人工确认失败']]) {
+    for (const [manual_result, label] of [['success', '人工成功'], ['failed', '人工失败']]) {
         renderTasks([{ jobKey: 'job-1', provider: 'orbitcard', status: 'manual', orbitcard_state: 'funding_pending', manual_result, manual_local_released_at: '2026-11-17' }]);
         renderManualOrders([{ request_id: 'admin-1', client_order_no: 'original-1', state: 'funding_pending', manual_result, manual_local_released_at: '2026-11-17' }]);
         for (const node of Object.values(nodes)) {
-            assert.ok(node.innerHTML.includes(`人工结果：${label}</strong></div><div>原平台／资金状态：`));
+            assert.ok(node.innerHTML.includes(`已关闭（${label}）</strong></div><details><summary>原资金核对记录</summary>`));
             assert.match(node.innerHTML, /class="pill funding_pending"/);
             assert.match(node.innerHTML, /本地占用：已释放/);
+            assert.doesNotMatch(node.innerHTML.replace(/<details>[\s\S]*?<\/details>/g, ''), /funding_pending|待核对|处理中|排队等待/);
             assert.doesNotMatch(node.innerHTML, /class="pill success"|失败结案/);
         }
         assert.match(nodes.tasks.innerHTML, /data-refresh-order="job-1"/);
-        assert.match(nodes.manualOrderRows.innerHTML, /data-refresh-manual="admin-1">核对原资金/);
+        assert.match(nodes.manualOrderRows.innerHTML, /data-refresh-manual="admin-1">核对原记录/);
         renderManualOrders([{ request_id: 'admin-1', state: 'retry_waiting', manual_result }]);
         assert.doesNotMatch(nodes.manualOrderRows.innerHTML, /data-retry-manual/);
+    }
+});
+
+test('old markers and projected closure both suppress queued, retry and captcha flows without changing source records', () => {
+    const nodes = { tasks: {}, manualOrderRows: {} };
+    const renderTasks = new Function('$', 'escapeHtml', 'status', `${source.slice(source.indexOf('function renderTasks('), source.indexOf('async function loadOverview('))}; return renderTasks;`)(id => nodes[id], escapeHtml, escapeHtml);
+    const renderManualOrders = new Function('$', 'escapeHtml', 'status', `${source.slice(source.indexOf('function renderManualOrders('), source.indexOf('async function loadManualOrders('))}; return renderManualOrders;`)(id => nodes[id], escapeHtml, escapeHtml);
+    for (const result of ['success', 'failed']) for (const projection of [false, true]) for (const state of ['preparing', 'retry_waiting', 'funding_pending', 'pending']) {
+        const marker = projection ? { business_status: 'closed', business_result: result, business_closed_at: '2026-11-17' } : { manual_result: result };
+        const task = { jobKey: 'old-job', provider: 'orbitcard', status: 'manual', orbitcard_state: state, queued: true, ...marker };
+        const order = { request_id: 'old-order', state, queued: true, captcha: { url: 'https://example.test/verify' }, message: '<script>internal</script>', ...marker };
+        const before = structuredClone({ task, order });
+        renderTasks([task]); renderManualOrders([order]);
+        for (const node of Object.values(nodes)) {
+            assert.ok(node.innerHTML.includes(`已关闭（人工${result === 'success' ? '成功' : '失败'}）`));
+            assert.match(node.innerHTML, /<details><summary>原资金核对记录<\/summary>/);
+            assert.doesNotMatch(node.innerHTML, /<details open|排队等待|data-retry-manual|继续准备|提交 Session|打开平台验证链接|<script>/);
+            assert.match(node.innerHTML, /核对原记录/);
+        }
+        assert.deepEqual({ task, order }, before);
+    }
+    for (const state of ['manual', 'support_locked']) {
+        renderTasks([{ jobKey: 'unresolved', provider: 'orbitcard', status: 'manual', orbitcard_state: state, manual_result: null }]);
+        assert.doesNotMatch(nodes.tasks.innerHTML, /已关闭|原资金核对记录/);
     }
 });
 
@@ -127,9 +152,32 @@ test('funding_pending can record external manual delivery without treating it as
         assert.deepEqual(f.refreshes, [kind]);
         await f.open(kind, id);
         assert.match(f.node('orderManualResult').textContent, /人工交付完成.*admin@example\.test.*另一张卡/);
-        assert.match(f.node('orderManualState').textContent, /manual \/ funding_pending/);
+        assert.equal(f.node('orderManualState').textContent, '业务订单：已关闭（人工成功）');
+        assert.match(f.node('orderManualOriginalState').textContent, /manual \/ funding_pending/);
         assert.match(f.node('orderManualSettlement').textContent, /仍需核对.*保留/);
     }
+});
+
+test('manual dialog closes old and projected business results while notes and pauses remain open business states', async () => {
+    for (const result of ['success', 'failed']) for (const projected of [false, true]) {
+        const f = fixture();
+        const closure = projected ? { business_status: 'closed', business_result: result, business_closed_at: '2026-11-17' }
+            : { manual_result: result, manual_result_at: '2026-11-17' };
+        f.request(async () => ({ data: control('task', 'job/1', { state: 'funding_pending', ...closure }) }));
+        await f.open();
+        assert.equal(f.node('orderManualState').textContent, `业务订单：已关闭（人工${result === 'success' ? '成功' : '失败'}）`);
+        assert.match(f.node('orderManualOriginalState').textContent, /funding_pending/);
+        assert.match(f.node('orderManualResult').textContent, /2026-11-17/);
+    }
+    for (const action of ['note', 'pause']) {
+        const f = fixture(); f.request(async () => ({ data: control('task', 'job/1', { history: [{ action, reason: '跟进中' }] }) }));
+        await f.open(); assert.doesNotMatch(f.node('orderManualState').textContent, /已关闭/);
+        assert.equal(f.node('orderManualResult').textContent, '人工结果：尚未登记');
+    }
+    assert.match(html, /<details><summary>原资金核对记录<\/summary><p id="orderManualOriginalState"/);
+    assert.match(html, /平台确认成功或人工交付完成/);
+    assert.match(html, /含人工失败结案/);
+    assert.match(html, /不含已人工关闭的业务订单/);
 });
 
 test('recorded manual metadata and settlement warnings are plain text and reset when loading another order', async () => {
@@ -316,7 +364,7 @@ test('late reads from another order or a dismissed dialog never replace the acti
     await f.open('admin', 'second');
     release({ data: control('task', 'first', { state: 'pending' }) }); await previous;
     assert.equal(f.node('orderManualCode').textContent, '管理员订单：second');
-    assert.match(f.node('orderManualState').textContent, /closed/);
+    assert.match(f.node('orderManualOriginalState').textContent, /closed/);
     f.request(() => new Promise(resolve => { release = resolve; }));
     const pending = f.api.loadOrderManualControl();
     f.api.closeOrderManualControl(); release({ data: control('admin', 'second') }); await pending;

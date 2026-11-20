@@ -41,14 +41,14 @@ test('verified terminal platform snapshots count, conflicting identities cannot 
     assert.deepEqual(f.db.cards.map(c=>c.successful_order_count),[1,0]);
 });
 
-test('self-service platform settlement counts atomically and leaves a healthy card reusable',async()=>{
+test('self-service platform settlement counts atomically and stops reuse after the third success',async()=>{
     const f=fixture();await f.addCard();
-    for(let n=0;n<4;n++){
+    for(let n=0;n<3;n++){
         const task=await f.claim();assert.ok(await f.store.cardMethods(f.base).reserveCard(42,task.jobKey,'plus',4));
         await Promise.all([f.settle(task,'success'),f.settle(task,'success')]);
         assert.equal(f.db.cards[0].successful_order_count,n+1);assert.equal(f.db.cards[0].active_job,null);
     }
-    const next=await f.claim();assert.ok(await f.store.cardMethods(f.base).reserveCard(42,next.jobKey,'plus',4));
+    const next=await f.claim();assert.equal(await f.store.cardMethods(f.base).reserveCard(42,next.jobKey,'plus',4),null);
     assert.equal(f.db.cards[0].authorization_count,0);
 });
 

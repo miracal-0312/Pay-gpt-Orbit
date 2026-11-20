@@ -70,3 +70,17 @@ test('manual accepted queue blocks repeat preparation and exposes original-order
     assert.equal(f.node('manualSubmit').disabled, false);
     assert.equal(f.node('paymentQueueDialog').open, true);
 });
+
+test('manual business closure clears stale local queue tracking without showing a queue-full or resume prompt', async () => {
+    for (const marker of [{ manual_result: 'failed' }, { business_status: 'closed', business_result: 'success' }]) {
+        const f = setup(); await f.submit();
+        assert.equal(f.node('manualSubmit').disabled, true);
+        f.setOrder({ ...marker, queued: true, state: 'funding_pending', error_code: 'PAYMENT_QUEUE_FULL' });
+        await f.context.loadManualOrders();
+        assert.equal(f.node('manualSubmit').disabled, false);
+        assert.notEqual(f.node('paymentQueueDialog').open, true);
+        assert.match(f.node('manualOrderRows').innerHTML, /已关闭/);
+        assert.doesNotMatch(f.node('manualOrderRows').innerHTML, /排队等待|data-retry-manual/);
+        assert.equal(f.calls.filter(call => call.body).length, 1);
+    }
+});

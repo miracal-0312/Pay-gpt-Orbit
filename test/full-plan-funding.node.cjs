@@ -20,6 +20,7 @@ async function setup({ plan = 'plus', balance = '5.00', available = '1000.00' } 
         products: async () => { throw new Error('Existing-card payments must not query the opening catalog'); } };
     const api = { request: async (_cfg, operation, body, key) => {
         calls.push({ operation, body, key });
+        if (operation === 'getSubscriptionList') return { success: true, data: { items: [], total: 0 } };
         if (operation === 'getAccountBalance') return { success: true, status: 200, data: { available_balance: available } };
         assert.equal(operation, 'rechargeCard', 'no other remote operation is allowed');
         currentBalance += money.units(body.amount);
@@ -56,21 +57,21 @@ test('a sub-cent shortfall still uses the full selected plan, and sufficient bal
     assert.equal(almost.db.fundings[0].amount, '20.00');
     const funded = await setup({ balance: '20.00', available: '0.00' });
     await funded.allocate();
-    assert.deepEqual(funded.calls, []);
+    assert.deepEqual(funded.calls.map(c=>c.operation), ['getSubscriptionList']);
     assert.deepEqual(funded.db.fundings, []);
 });
 
 test('account funds that could cover an old difference cannot authorize a full plan recharge', async () => {
     const f = await setup({ balance: '19.00', available: '19.99' });
     await assert.rejects(f.allocate(), error => error instanceof AccountBalanceError && /联系客服/.test(error.message));
-    assert.deepEqual(f.calls.map(call => call.operation), ['getAccountBalance']);
+    assert.deepEqual(f.calls.map(call => call.operation), ['getSubscriptionList', 'getAccountBalance']);
     assert.deepEqual(f.db.fundings, []);
 });
 
 test('an empty existing card funds exactly the plan without an opening-product reserve', async () => {
     const f = await setup({ balance: '0.00' });
     assert.equal(await f.allocate(), 42);
-    assert.deepEqual(f.calls.map(call => call.operation), ['getAccountBalance', 'rechargeCard']);
+    assert.deepEqual(f.calls.map(call => call.operation), ['getSubscriptionList', 'getAccountBalance', 'rechargeCard']);
     assert.equal(f.db.fundings.length, 1);
     assert.equal(f.db.fundings[0].amount, '20.00');
     assert.equal(money.units(f.db.fundings[0].target_balance), money.units('20.00'));

@@ -28,6 +28,7 @@ module.exports = function createPaymentAutomation({ runQuery }) {
         const activeOwner = !owner.cdk_code || Boolean(code?.is_active && !code.manual_redeemed_at);
         const state = manual ? owner.state : owner.orbitcard_state;
         const localReleased = Boolean(owner.manual_local_released_at);
+        const manualClosed = ['success', 'failed'].includes(owner.manual_result);
         const allowed = !localReleased && !owner.manual_result && (!manual || owner.client_order_no === jobKey) && activeOwner
             && (manual ? ['preparing', 'prepared', 'funding_waiting', 'submitting', 'pending'].includes(owner.state)
                 : !requiresManualHandling(owner) && ['preparing', 'prepared', 'funding_waiting', 'submitting', 'pending'].includes(owner.orbitcard_state));
@@ -36,8 +37,8 @@ module.exports = function createPaymentAutomation({ runQuery }) {
         // preserves a manually redeemed CDK while releasing its payment card.
         const canReconcileFunding = localReleased || (!owner.cdk_code || Boolean(code))
             && ['funding_waiting', 'funding_review', 'funding_pending'].includes(state);
-        const canReconcileIssue = localReleased || (!owner.cdk_code || Boolean(code)) && state === 'card_pending';
-        return { allowed, canReconcileFunding, canReconcileIssue, localReleased, state,
+        const canReconcileIssue = localReleased || manualClosed || (!owner.cdk_code || Boolean(code)) && state === 'card_pending';
+        return { allowed, canReconcileFunding, canReconcileIssue, localReleased, manualClosed, state,
             keys: localReleased ? [`reconcile:${jobKey.toLowerCase()}`] : manual ? manualLockKeys(owner.request_id, owner.cdk_code)
             : owner.cdk_code ? [cdkLockKey(owner.cdk_code)] : [`task:${jobKey.toLowerCase()}`] };
     }

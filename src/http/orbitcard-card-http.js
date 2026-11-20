@@ -2,7 +2,7 @@
 
 const cardsApi = require('../orbitcard/orbitcard-cards-client');
 const api = require('../orbitcard/orbitcard-client');
-const { eligible } = require('../orbitcard/orbitcard-pool');
+const { eligible, exhausted, MAX_SUCCESSFUL_ORDERS } = require('../orbitcard/orbitcard-pool');
 const { CardPreparationError } = require('../orbitcard/orbitcard-card-policy');
 const { PLAN_TYPES: CANONICAL_PLAN_TYPES, PROVIDER_PLANS } = require('../config/plan-registry');
 
@@ -19,6 +19,8 @@ module.exports = function registerCardRoutes(app, { store, cardService, requireS
             card_id: Number(card.card_id), active_job: card.active_job,
             authorization_count: card.authorization_count == null ? null : Number(card.authorization_count),
             successful_order_count: card.successful_order_count == null ? null : Number(card.successful_order_count),
+            max_successful_orders: MAX_SUCCESSFUL_ORDERS, quota_exhausted: exhausted(card),
+            remaining_successful_orders: card.successful_order_count == null ? null : Math.max(0, MAX_SUCCESSFUL_ORDERS - Number(card.successful_order_count)),
             availability_basis: 'card_errors', usable: eligible(card) && card.provider_status === 'ACTIVE',
             disabled_at: card.disabled_at, disabled_code: card.disabled_code,
             disabled_reason: card.disabled_reason, disabled_job_key: card.disabled_job_key, card_bin: card.card_bin,
