@@ -8,7 +8,8 @@ function setup(syncResponse, transactionResponse, localResponse, applicationResp
     const block=source.slice(source.indexOf('function renderCardRow('),source.indexOf('async function loadCdkPlans('));
     const nodes=new Map();
     const $=id=>{
-        if(!nodes.has(id))nodes.set(id,{value:'',innerHTML:'',textContent:'',disabled:false,replaceChildren(){},add(){}});
+        if(!nodes.has(id))nodes.set(id,{value:'',innerHTML:'',textContent:'',disabled:false,
+            replaceChildren(...options){this.options=options;this.value=options[0]?.value ?? '';},add(option){this.options.push(option);}});
         return nodes.get(id);
     };
     const card={card_id:42,provider_status:'ACTIVE',balance:'20.00',currency:'USD',successful_order_count:null,successful_order_limit:7,last4:'4139'};
@@ -23,7 +24,7 @@ function setup(syncResponse, transactionResponse, localResponse, applicationResp
     };
     const escapeHtml=value=>String(value ?? '').replaceAll('<','&lt;').replaceAll('>','&gt;');
     const api=new Function('$','request','escapeHtml','cardPlans','Option','notice',block+'\nreturn {loadCards,synchronizeCards,loadCardTransactions,applyCard};')(
-        $,request,escapeHtml,{plus:'Plus'},function(){},(text,type)=>notices.push({text,type}));
+        $,request,escapeHtml,{plus:'Plus'},function(_label,value){this.value=String(value);},(text,type)=>notices.push({text,type}));
     return {api,$,card,calls,notices};
 }
 test('local refresh labels cached balances and does not show green live ACTIVE',async()=>{
@@ -49,7 +50,7 @@ test('deleted and unavailable cards are omitted from rows after local refresh',a
         const f=setup(()=>{});
         f.card.provider_status=status;
         await f.api.loadCards();
-        assert.match(f.$('cardRows').innerHTML,/尚无卡片/);
+        assert.match(f.$('cardRows').innerHTML,/暂无可显示的卡片/);
         assert.doesNotMatch(f.$('cardRows').innerHTML,/data-card-transactions/);
     }
 });
@@ -102,20 +103,22 @@ test('successful and partial sync distinguish confirmed rows from stale ones',as
     assert.doesNotMatch(f.$('cardRows').innerHTML,/card-provider-status active/);
 });
 
-test('an exhausted card remains visibly unavailable even when the provider is active or missing',async()=>{
-    const f=setup(()=>{});
+test('exhausted cards disappear from platform rows while recoverable cards and issue history remain visible',async()=>{
+    const recoverable={card_id:43,provider_status:'ACTIVE',successful_order_count:2,disabled_at:'2026-11-20',disabled_code:'manual'};
+    const f=setup(()=>{},null,card=>({cards:[card,recoverable],issues:[{replacement_for_card_id:42}],fundings:[]}));
     await f.api.loadCards();
     assert.match(f.$('cardRows').innerHTML,/待同步/);
     assert.doesNotMatch(f.$('cardRows').innerHTML,/data-update-card-usage|data-bind-card/);
     Object.assign(f.card,{successful_order_count:3,quota_exhausted:true,disabled_at:'2026-11-20',disabled_code:'manual'});
     await f.api.loadCards({count:1,synced_ids:[42],failed_ids:[],listed_ids:[42],checked_at:'2026-11-20T12:00:00Z'});
-    assert.match(f.$('cardRows').innerHTML,/3 笔成功会员订单 \/ 上限 3 笔/);
-    assert.match(f.$('cardRows').innerHTML,/不可用 · 已达成功订单上限/);
-    assert.doesNotMatch(f.$('cardRows').innerHTML,/data-card-availability|card-provider-status active/);
+    assert.doesNotMatch(f.$('cardRows').innerHTML,/<strong class="card-id">42</);
+    assert.match(f.$('cardRows').innerHTML,/<strong class="card-id">43<.*恢复使用/);
+    assert.match(f.$('issueRows').innerHTML,/替换原卡 42/);
+    assert.deepEqual(f.$('transactionCardId').options.map(option=>option.value),['','42','43']);
     for (const status of ['UNAVAILABLE','DELETED']) {
         f.card.provider_status=status; await f.api.loadCards();
-        assert.match(f.$('cardRows').innerHTML,/不可用 · 已达成功订单上限/);
-        assert.doesNotMatch(f.$('cardRows').innerHTML,/data-card-transactions/);
+        assert.doesNotMatch(f.$('cardRows').innerHTML,/<strong class="card-id">42</);
+        assert.deepEqual(f.$('transactionCardId').options.map(option=>option.value),['','43']);
     }
     Object.assign(f.card,{provider_status:'ACTIVE',successful_order_count:2,quota_exhausted:false,disabled_at:null,retiring:true});
     await f.api.loadCards();
@@ -179,8 +182,8 @@ test('viewing transactions refreshes authorization counts without maintaining th
     f.$('transactionCardId').value='42';f.$('transactionPage').value='1';
     await f.api.loadCardTransactions();
     assert.deepEqual(f.calls,['/api/admin/orbitcard/cards','/api/admin/orbitcard/cards/42/transactions?page=1','/api/admin/orbitcard/cards']);
-    assert.match(f.$('cardRows').innerHTML,/3 笔成功会员订单/);
-    assert.match(f.$('cardRows').innerHTML,/授权流水仅供对账/);
+    assert.match(f.$('cardRows').innerHTML,/暂无可显示的卡片/);
+    assert.equal(f.$('transactionCardId').value,'42');
     assert.equal(JSON.parse(f.$('cardTransactions').textContent).transactions.length,2);
     assert.equal(f.$('loadTransactions').disabled,false);
 });
@@ -192,7 +195,8 @@ test('transaction query failures replace stale results with an error and preserv
     f.$('cardTransactions').textContent='previous response';
     await assert.rejects(f.api.loadCardTransactions(),/HTTP 403/);
     assert.match(f.$('cardTransactions').textContent,/查询失败.*HTTP 403.*授权次数未更新/);
-    assert.match(f.$('cardRows').innerHTML,/3 笔成功会员订单/);
+    assert.equal(f.card.successful_order_count,3);
+    assert.doesNotMatch(f.$('cardRows').innerHTML,/<strong class="card-id">42</);
     assert.equal(f.$('loadTransactions').disabled,false);
 });
 

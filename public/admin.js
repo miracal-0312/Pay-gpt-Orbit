@@ -310,35 +310,33 @@ function apiInput() {
 function renderCardRow(card, sync = null) {
     const id = escapeHtml(card.card_id);
     const limit = card.max_successful_orders || 3;
-    const exhausted = card.quota_exhausted ?? (Number(card.successful_order_count) >= limit);
     const usage = `${escapeHtml(card.successful_order_count ?? '待同步')} 笔成功会员订单 / 上限 ${escapeHtml(limit)} 笔`;
-    const previousReason = card.disabled_reason && card.disabled_code !== 'success_limit_reached' ? `<br>${escapeHtml(card.disabled_reason)}` : '';
-    const history = exhausted ? `不可用 · 已达成功订单上限，选卡无合格现有卡时按需补开${previousReason}`
-        : card.disabled_at ? `已停用 · ${escapeHtml(card.disabled_code || '')}<br>${escapeHtml(card.disabled_reason || '订阅卡片错误')}`
-            : card.retiring ? '待核对旧删卡记录' : '满额后自动停用';
+    const history = card.disabled_at ? `已停用 · ${escapeHtml(card.disabled_code || '')}<br>${escapeHtml(card.disabled_reason || '订阅卡片错误')}`
+        : card.retiring ? '待核对旧删卡记录' : '满额后自动停用';
     const countedAt = '授权流水仅供对账，不影响订单计数';
     const last4 = card.last4 ? `****${escapeHtml(card.last4)}` : '尾号未提供';
     const confirmed = sync?.synced_ids?.includes(Number(card.card_id));
-    const checked = confirmed || sync?.removed_ids?.includes(Number(card.card_id));
-    const snapshot = checked ? `本次同步：${sync.checked_at}` : sync?.failed ? '同步失败 · 以下为旧快照'
+    const snapshot = confirmed ? `本次同步：${sync.checked_at}` : sync?.failed ? '同步失败 · 以下为旧快照'
         : sync?.failed_ids?.includes(Number(card.card_id)) ? '详情读取失败 · 以下为旧快照'
             : sync?.listed_ids && !sync.listed_ids.includes(Number(card.card_id)) ? '本次平台列表未返回' : '本地快照 · 未实时查询';
-    const labels = { ACTIVE: '正常（ACTIVE）', CANCELLED: '冻结（CANCELLED）', DELETED: '已删除（DELETED）', UNAVAILABLE: '平台列表未返回' };
-    const active = confirmed && card.provider_status === 'ACTIVE' && !exhausted && !card.disabled_at && !card.retiring;
-    const availabilityButton = exhausted ? '' : `<button type="button" data-card-availability="${id}" data-disable="${!card.disabled_at}" class="secondary"${card.active_job || card.retiring ? ' disabled' : ''}>${card.disabled_at ? '恢复使用' : '人工停用'}</button>`;
-    const transactionsButton = ['DELETED', 'UNAVAILABLE'].includes(card.provider_status) ? ''
-        : `<button type="button" data-card-transactions="${id}" class="secondary">查看交易</button>`;
+    const labels = { ACTIVE: '正常（ACTIVE）', CANCELLED: '冻结（CANCELLED）' };
+    const active = confirmed && card.provider_status === 'ACTIVE' && !card.disabled_at && !card.retiring;
+    const availabilityButton = `<button type="button" data-card-availability="${id}" data-disable="${!card.disabled_at}" class="secondary"${card.active_job || card.retiring ? ' disabled' : ''}>${card.disabled_at ? '恢复使用' : '人工停用'}</button>`;
+    const transactionsButton = `<button type="button" data-card-transactions="${id}" class="secondary">查看交易</button>`;
     return `<tr><td><strong class="card-id">${id}</strong><span class="card-meta">${last4}</span><span class="card-meta">${escapeHtml(card.product_code || '产品未知')}</span></td><td><span class="card-meta">${escapeHtml(snapshot)}</span><span class="card-provider-status${active ? ' active' : ''}">${escapeHtml(labels[card.provider_status] || card.provider_status || '未知状态')}</span><span class="card-balance">${escapeHtml(card.balance ?? '未知')} ${escapeHtml(card.currency || '')}</span></td><td><div class="card-usage-list">${usage}</div><span class="card-meta">${countedAt}</span></td><td>${card.active_job ? `<code>${escapeHtml(card.active_job)}</code>` : '<span class="card-idle">空闲</span>'}</td><td><div class="card-row-actions">${history}${availabilityButton}${transactionsButton}</div></td></tr>`;
 }
 async function loadCards(sync = null) {
     const data = await request('/api/admin/orbitcard/cards');
     const present = data.cards.filter(card => !['DELETED', 'UNAVAILABLE'].includes(card.provider_status));
-    const visible = data.cards.filter(card => card.quota_exhausted || !['DELETED', 'UNAVAILABLE'].includes(card.provider_status));
+    const visible = present.filter(card => {
+        const limit = card.max_successful_orders || 3;
+        return !(card.quota_exhausted ?? (Number(card.successful_order_count) >= limit));
+    });
     const currentCardId = $('transactionCardId').value;
     $('transactionCardId').replaceChildren(new Option('请选择平台卡片', ''));
     for (const card of present) $('transactionCardId').add(new Option(`${card.card_id} / ${card.last4 ? `****${card.last4}` : '尾号未提供'}`, card.card_id));
     if (present.some(card => String(card.card_id) === currentCardId)) $('transactionCardId').value = currentCardId;
-    $('cardRows').innerHTML = visible.map(card => renderCardRow(card, sync)).join('') || '<tr><td colspan="5">尚无卡片，请同步或申请。</td></tr>';
+    $('cardRows').innerHTML = visible.map(card => renderCardRow(card, sync)).join('') || '<tr><td colspan="5">暂无可显示的卡片。</td></tr>';
     $('cardSyncState').textContent = sync?.failed ? `平台同步失败${sync.message ? `：${sync.message}` : ''}。下面显示旧的本地快照，不能用于确认当前状态和余额。`
         : sync?.checked_at ? `查询完成：${sync.checked_at}，同步 ${sync.count} 张，详情读取失败 ${sync.failed_ids.length} 张，已注销或未返回 ${(sync.removed_ids || []).length} 张。数值为本次查询时的快照。`
             : '状态、余额和成功会员订单次数为本地快照，点击“同步卡片与订单”更新。“刷新本地记录”不会调用平台；API 不可见的网页订单不计入，授权流水仅供对账。';
