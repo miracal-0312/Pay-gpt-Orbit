@@ -28,7 +28,7 @@ READ_OPERATIONS = frozenset({
     "getAccountBalance", "getProductCode", "getCardList", "cardDetail",
     "cardTransaction", "getCardFlow", "getSubscriptionPlans",
     "getSubscriptionCatalog", "getSubscriptionPaymentRegions",
-    "getSubscriptionList", "getSubscription",
+    "getSubscription",
 })
 BALANCE_FIELDS = (
     "available_balance", "frozen_balance", "total_balance",
@@ -266,14 +266,11 @@ def summarize(operation: str, data: Any) -> Any:
             return None
         return {"total": data.get("total") if isinstance(data, dict) else None,
                 "count": len(items), "cards": [safe_card(item) for item in items]}
-    if operation in ("cardTransaction", "getCardFlow", "getSubscriptionList"):
+    if operation in ("cardTransaction", "getCardFlow"):
         items = rows(data)
         if items is None:
             return None
-        summary: dict[str, Any] = {"count": len(items), "total": data.get("total") if isinstance(data, dict) else None}
-        if operation == "getSubscriptionList":
-            summary["statuses"] = [str(item.get("status") or "")[:32] for item in items]
-        return summary
+        return {"count": len(items), "total": data.get("total") if isinstance(data, dict) else None}
     if operation == "getSubscription":
         if not isinstance(data, dict):
             return None
@@ -364,7 +361,6 @@ def run_checks(client: OrbitcardClient, config: dict[str, Any]) -> dict[str, Any
     else:
         checks.append({"operation": "cardDetail/cardTransaction/getCardFlow", "status": "skipped",
                        "reason": "卡列表为空，且配置中未提供 card_id"})
-    check("getSubscriptionList", {"page": 1, "page_size": 20})
     if config["task_no"] or config["client_order_no"]:
         check("getSubscription", {"task_no": config["task_no"]} if config["task_no"] else
               {"client_order_no": config["client_order_no"]})

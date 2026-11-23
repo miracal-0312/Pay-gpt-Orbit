@@ -5,7 +5,7 @@ const { sanitize } = require('../logging/log-safety');
 // This module describes recovery actions. It never proves that a payment was
 // rejected, verifies ownership, releases funds, or authorizes another POST.
 // Callers must establish those facts before applying a classified failure.
-const SUBSCRIPTION_OPERATIONS = new Set(['createSubscription', 'getSubscription', 'getSubscriptionList',
+const SUBSCRIPTION_OPERATIONS = new Set(['createSubscription', 'getSubscription',
     'getSubscriptionPlans', 'getSubscriptionPaymentRegions']);
 const ASSISTANT_OPERATIONS = new Set(['session', 'upgrade-price', 'auto-renewal', 'billing-portal', 'latest-session']
     .map(name => `/api/open/v1/assistants/gpt/${name}`));

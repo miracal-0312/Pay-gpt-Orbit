@@ -94,7 +94,13 @@ async function diagPreflight(stage) {
     try {
         const data = await diagnosticFetch('/api/admin/orbitcard/diagnostics/preflight', input);
         diagFollow(data.trace_id);
-        $('diagSteps').innerHTML = data.steps.map(step => `<li class="${step.state === 'passed' ? 'debug-passed' : 'debug-failed'}"><strong>${step.state === 'passed' ? step.step === 'concurrency' ? '完成模拟' : '通过' : '未通过'}</strong> · ${escapeHtml(step.message)} <small>${step.elapsed_ms} ms</small></li>`).join('');
+        $('diagSteps').innerHTML = data.steps.map(step => {
+            const passed = step.state === 'passed';
+            const label = passed ? step.step === 'concurrency' ? '完成模拟' : step.simulated ? '模拟通过' : '通过'
+                : step.state === 'waiting' ? '等待' : '未通过';
+            const colorClass = passed ? 'debug-passed' : step.state === 'waiting' ? 'muted' : 'debug-failed';
+            return `<li class="${colorClass}"><strong>${label}</strong> · ${escapeHtml(step.message)} <small>${step.elapsed_ms} ms</small></li>`;
+        }).join('');
         $('diagResult').textContent = JSON.stringify({ read_only: data.read_only, ready: data.ready, ...data.result }, null, 2);
         diagShowConcurrency(data.result.concurrency);
         if (Array.isArray(data.result.plans)) {
@@ -103,7 +109,10 @@ async function diagPreflight(stage) {
             for (const plan of data.result.plans) $('diagPlan').add(new Option(`${plan.name}（${plan.type}）`, plan.type));
             if (data.result.plans.some(plan => plan.type === selectedPlan)) $('diagPlan').value = selectedPlan;
         }
-        notice(data.passed ? stage === 'concurrency' ? '模拟完成，请查看分配与等待结果；未创建订单或扣款。' : '只读预检完成；未创建订单或扣款。' : '预检未通过，请查看具体步骤及日志。', data.passed ? 'success' : 'error');
+        const completed = stage === 'full' ? '完整流程模拟成功，未创建订单或扣款。'
+            : stage === 'concurrency' ? '并发模拟完成，请查看分配与等待结果。' : '只读预检完成。';
+        const waiting = data.steps.at(-1)?.state === 'waiting';
+        notice(data.passed ? completed : waiting ? '模拟停在等待步骤，请查看原因。' : '预检未通过，请查看具体步骤及日志。', data.passed ? 'success' : waiting ? '' : 'error');
         await diagReadLogs();
     } catch (error) { $('diagSteps').textContent = `预检失败：${error.message}`; await diagReadLogs().catch(() => {}); throw error; }
     finally { diagPreflightBusy = false; buttons.forEach(button => { button.disabled = false; }); }

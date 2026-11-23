@@ -104,7 +104,6 @@ function serviceFixture(overrides={}) {
     const transport={request:async (config,operation,body={},key='') => {
         calls.push({operation,body,key});
         if (overrides[operation]) return {status:200,...await overrides[operation](body,key,config)};
-        if(operation==='getSubscriptionList') return {success:true,data:{items:[],total:0}};
         if(operation==='cardTransaction') return {success:true,data:{list:[],total:0}};
         if(operation==='getAccountBalance') return {success:true,status:200,data:{available_balance:accountBalance.toFixed(8)}};
         if (operation==='getCardList') return {success:true,data:{list:providerCards,total:providerCards.length}};
@@ -1333,7 +1332,7 @@ test('live V1 batch refreshes card metadata and preserves previously observed au
     assert.equal(f.db.cards[0].last4,'4139'); assert.equal(f.db.cards[0].authorization_count,2);
     assert.equal(f.db.cards[1].provider_status,'CANCELLED');
     assert.ok(!JSON.stringify(f.db.cards).includes('private-address'));
-    assert.ok(f.calls.every(call=>['getCardList','cardDetail','getSubscriptionList'].includes(call.operation)));
+    assert.ok(f.calls.every(call=>['getCardList','cardDetail'].includes(call.operation)));
 });
 
 test('partial batch failure syncs confirmed cards and identifies stale card snapshots',async () => {

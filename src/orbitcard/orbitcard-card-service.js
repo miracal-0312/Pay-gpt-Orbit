@@ -101,7 +101,6 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
     const fundingService = require('./orbitcard-funding-service')({api,cardsApi,audit,now,
         assertPaymentAllowed, assertReconciliationAllowed, withRecoveryOwner});
     const reconcileRetirement = require('./orbitcard-retirement')({ cardsApi });
-    const orderSync = require('./orbitcard-order-sync')({ api, store });
     async function account(cfg) {
         const result=await api.request(cfg,'getAccountBalance');
         if(!result.success || result.requestError || result.data?.request_error || result.code != null && result.code !== 0) {
@@ -500,16 +499,6 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
     }
 
     async function synchronize(cfg) {
-        // Order-history I/O must not hold the allocation lock. Per-card row locks
-        // serialize successful-order imports against live payment settlement.
-        const observed = await cardsApi.listCards(cfg);
-        await store.withCardAllocationLock(cfg.base_url, locked => locked.syncCards(observed));
-        let orderResult;
-        try { orderResult = await orderSync.synchronize(cfg, observed); }
-        catch (error) {
-            orderResult = { complete: false, added: 0, error: error instanceof CardPreparationError ? error.message : '会员订单同步失败，保留已确认计数' };
-        }
-        record('', 'card_orders_synchronized', orderResult.complete ? '已核对卡台成功会员订单' : '会员订单未完全同步，保留已确认计数', orderResult);
         return store.withCardAllocationLock(cfg.base_url, async locked => {
             try {
                 const listed = await cardsApi.listCards(cfg);
@@ -520,7 +509,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
                 const detailed = await cardsApi.cardDetailsInBatches(cfg,readable.map(card=>card.card_id),{allowPartial:true});
                 const live = new Map(listed.map(card => [card.card_id, card]));
                 // Absence from a complete list means unavailable, not proven deletion.
-                // Retain quotas and reservations for reconciliation of historical orders.
+                // Retain quotas and reservations for existing orders.
                 const saved = await locked.listCards();
                 const missing = saved.filter(card => !live.has(Number(card.card_id)));
                 // List metadata can fill identification fields, never the detail balance/status.
@@ -537,7 +526,7 @@ module.exports = function createCardService({ store, audit, sleep = ms => new Pr
                 ]);
                 if (saved.some(row => poolPolicy.exhausted(row) && !row.disabled_at)) await locked.disableExhaustedCards();
                 const confirmed = new Set(detailed.map(card => card.card_id));
-                const result = { order_sync: orderResult, count: confirmed.size, listed_ids: listed.map(card => card.card_id),
+                const result = { count: confirmed.size, listed_ids: listed.map(card => card.card_id),
                     synced_ids: [...confirmed], failed_ids: readable.filter(card => !confirmed.has(card.card_id)).map(card => card.card_id),
                     removed_ids: [...new Set([...deleted, ...missing, ...detailed.filter(card => card.provider_status === 'DELETED')].map(card => Number(card.card_id)))],
                     checked_at: new Date(now()).toISOString() };

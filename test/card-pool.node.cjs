@@ -26,7 +26,6 @@ async function setup(counts=[0,0,0,0,0],overrides={}) {
     const transport={request:async(config,operation,body={},key)=>{
         calls.push({operation,body,key});
         if(overrides[operation]) {const r=await overrides[operation](body,key,remote);if(r)return r;}
-        if(operation==='getSubscriptionList')return {success:true,data:{items:[],total:0}};
         if(operation==='getCardList')return {success:true,data:{list:remote,total:remote.length}};
         if(operation==='cardTransaction') {const rows=ledger.get(body.card_id)||[];return {success:true,data:{list:rows.slice((body.page-1)*body.page_size,body.page*body.page_size),total:rows.length}};}
         if(operation==='cardDetail')return {success:true,data:body.card_ids?{list:body.card_ids.map(id=>remote.find(c=>c.card_id===id))}:remote.find(c=>c.card_id===body.card_id)};
@@ -569,29 +568,15 @@ test('an order opens one card when all existing cards are inactive',async()=>{
 });
 
 
-test('account reconciliation imports verified historical subscriptions and later selection respects the quota',async()=>{
- const rows=Array.from({length:3},(_,i)=>({task_no:`history-${i}`,client_order_no:`client-${i}`,card_id:42,
-  plan_type:'gpt-plus',status:'succeeded',subscription_succeeded:true,query_source:'upstream'}));
- const f=await setup([0],{getSubscriptionList:async()=>({success:true,data:{items:rows,total:rows.length}}),
-  getSubscription:async body=>({success:true,data:rows.find(row=>row.task_no===body.task_no)})});
- await f.service.synchronize(cfg);
- const task=await f.claim();assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),100);
- assert.equal(f.db.cards[0].successful_order_count,3);assert.equal(f.db.successfulOrders.length,3);
- await f.service.synchronize(cfg);await f.restart().recover(cfg);
- assert.equal(f.db.cards[0].successful_order_count,3);assert.equal(f.db.issues.length,1);
- assert.equal(f.calls.filter(c=>c.operation==='deleteCard').length,0);
- assert.equal(f.calls.filter(c=>c.operation==='createCard').length,1);
-});
-
-test('failed or unresolved historical reconciliation leaves live cards available for selection',async()=>{
- for(const response of [{success:false,status:503},{success:true,data:{items:[{task_no:'old',client_order_no:'old-client',card_id:42}],total:1}}]) {
-  const f=await setup([0],{getSubscriptionList:async()=>response,getSubscription:async()=>({success:true,data:{status:'processing'}})});
-  assert.equal((await f.service.synchronize(cfg)).order_sync.complete,false);
-  f.calls.length=0;
-  const task=await f.claim();assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),42);
-  assert.equal(f.db.cards[0].active_job,task.jobKey);
-  assert.deepEqual(f.calls.map(c=>c.operation),['getCardList','cardDetail']);
- }
+test('card synchronization and allocation only read the live card list and details', async () => {
+    const f = await setup([2]);
+    assert.equal((await f.service.synchronize(cfg)).count, 1);
+    assert.deepEqual(f.calls.map(call => call.operation), ['getCardList', 'cardDetail']);
+    assert.equal(f.db.cards[0].successful_order_count, 2);
+    f.calls.length = 0;
+    const task = await f.claim();
+    assert.equal(await f.service.allocate(cfg, task.jobKey, 'plus'), 42);
+    assert.deepEqual(f.calls.map(call => call.operation), ['getCardList', 'cardDetail']);
 });
 
 test('a failed platform card list does not count as a confirmed shortage',async()=>{

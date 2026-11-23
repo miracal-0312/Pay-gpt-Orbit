@@ -6,7 +6,7 @@ const { MAX_PAYMENT_ATTEMPTS, confirmedFailure, confirmedSuccess, confirmedRejec
 const { classifyFailure } = require('../orbitcard/orbitcard-error-policy');
 
 module.exports = function createManualStore({ runQuery, runExecute, withTransaction, enqueueRedemption = async () => {} }) {
-    const usage = require('./orbitcard-order-usage')({ runQuery, runExecute, withTransaction });
+    const usage = require('./orbitcard-order-usage')({ runQuery, runExecute });
     async function getManualOrder(requestId, options) {
         const rows = await runQuery('SELECT * FROM orbitcard_admin_orders WHERE request_id = ? LIMIT 1', [requestId], options);
         return rows[0] || null;

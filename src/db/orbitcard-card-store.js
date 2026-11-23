@@ -5,7 +5,7 @@ const { CardPreparationError } = require('../orbitcard/orbitcard-card-policy');
 const { cardScope, planFor, settlementState } = require('../orbitcard/orbitcard-card-policy');
 
 module.exports = function createCardStore({ runQuery, runExecute, withTransaction, openLockConnection }) {
-    const usage = require('./orbitcard-order-usage')({ runQuery, runExecute, withTransaction });
+    const usage = require('./orbitcard-order-usage')({ runQuery, runExecute });
     function methods(baseUrl, connection = null) {
         const scope = cardScope(baseUrl), options = connection ? { connection } : {};
         const query = (sql, args = []) => runQuery(sql, args, options);
@@ -77,17 +77,6 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
                     disabled_reason = NULL, disabled_job_key = NULL WHERE scope=? AND card_id=?`, [scope, cardId], opts);
                 return { card_id: Number(cardId), disabled, provider_status: card.provider_status };
             });
-        }
-        async function listSuccessfulOrders() {
-            return query('SELECT * FROM orbitcard_successful_orders WHERE scope=?', [scope]);
-        }
-        async function subscriptionBindings() {
-            return query(`SELECT orbitcard_client_order_no AS client_order_no, gpt_api_order_id AS order_no,
-                orbitcard_card_id AS card_id FROM task_logs WHERE orbitcard_base_url=? AND orbitcard_card_id > 0
-                UNION ALL SELECT client_order_no, task_no AS order_no, card_id FROM orbitcard_admin_orders WHERE scope=? AND card_id > 0`, [baseUrl, scope]);
-        }
-        async function recordSuccessfulOrder(order) {
-            return transaction(async connection => usage.recordSuccess({ ...order, scope }, { connection }));
         }
         async function issueForJob(jobKey) {
             const rows = await query('SELECT * FROM orbitcard_card_issues WHERE scope=? AND job_key=? ORDER BY created_at DESC LIMIT 1', [scope, jobKey]);
@@ -193,7 +182,7 @@ module.exports = function createCardStore({ runQuery, runExecute, withTransactio
             return query(`SELECT * FROM orbitcard_card_fundings WHERE scope=?${pending ? " AND state IN ('prepared','submitting','pending','unknown')" : ''}
                 ORDER BY updated_at ${pending ? 'ASC' : 'DESC'} LIMIT 100`, [scope]);
         }
-        return { confirmRetirement, syncCards, listCards, disableExhaustedCards, setCardAvailability, listSuccessfulOrders, subscriptionBindings, recordSuccessfulOrder, saveAuthorizations, reserveCard, pendingIssue, createManualIssue, replacementForCard, updateIssue, completeIssue, listIssues, issueForJob,
+        return { confirmRetirement, syncCards, listCards, disableExhaustedCards, setCardAvailability, saveAuthorizations, reserveCard, pendingIssue, createManualIssue, replacementForCard, updateIssue, completeIssue, listIssues, issueForJob,
             fundingForJob, createFunding, updateFunding, deferFunding, listFundings };
     }
 

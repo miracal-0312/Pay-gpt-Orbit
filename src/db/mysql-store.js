@@ -103,7 +103,6 @@ async function recoverHistoricalTasks() {
 async function ensureReady() {
     await runQuery(fs.readFileSync(path.resolve(__dirname, '..', '..', 'database', 'mysql-schema.sql'), 'utf8'));
     await ensureLegacyColumns();
-    await require('./orbitcard-order-usage')({ runQuery, runExecute, withTransaction }).backfill();
     await initializeBaseData();
     await core.ensureGptApiConfigDefaults();
     await recoverHistoricalTasks();

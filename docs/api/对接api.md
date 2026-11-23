@@ -12,7 +12,7 @@
 
 卡片可用性按实时平台状态、持久化停用标记、订单占用及资金条件判断。后台通过 `getProductCode` 读取开卡渠道（`product_code`）与 BIN，多选项保存在 `orbitcard_product_codes` 和 `orbitcard_bins`，同时选择取交集；这些偏好和产品规则仅用于手动开卡、错误补开与满额补开，不筛选现有卡池，现有卡支付准备和预检不查询开卡产品目录。旧单一产品配置迁移为单项选择。订阅明确出现卡片错误时停用原卡。现有卡预选无合格卡时才补开，每张首充 20 USD。重试优先使用现有健康卡，不因开卡渠道或库存失败而阻断。管理员可在「卡片与开卡」填写原因后人工停用或恢复使用，操作需要二级验证并记录日志。详细规则见 [卡片可用状态与错误补开](../operations/ORBITCARD-CARDS.md#卡片可用状态与错误补开)。
 
-成功会员订单计数继续通过 `getSubscriptionList` 与 `getSubscription` 核验，并按平台范围及唯一订单号去重保存，作为每卡三次成功上限的依据。选卡及预占读取独立的 `disabled_*` 停用记录。卡片错误会停用原卡，按需补开时持久化申请。平台同步保留停用记录。消费授权流水继续用于独立对账，详情见 [卡片规则](../operations/ORBITCARD-CARDS.md)。
+本次会员订单在查询原单确认成功后，按平台范围及唯一订单号去重结算，作为每卡三次成功上限的依据。选卡及预占读取独立的 `disabled_*` 停用记录。卡片错误会停用原卡，按需补开时持久化申请。平台同步保留停用记录。消费授权流水继续用于独立对账，详情见 [卡片规则](../operations/ORBITCARD-CARDS.md)。
 
 订阅调用需要 `subscriptions:read`、`subscriptions:create` 权限，余额查询另需 `account:read`。卡池还需 `cards:create`、`cards:read`、`products:read`、`cards:fund`；交易对账另需 `transactions:read`，不需要敏感卡资料。接口一键测试仅向平台发送读取请求，财务写操作只做本地参数与幂等键模拟，不创建订阅或开卡。卡片协议见 [Open API](Orbitcard-Open-API-V1.md)。
 

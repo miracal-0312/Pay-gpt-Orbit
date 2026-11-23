@@ -5,6 +5,7 @@ const { parseSession } = require('./session-input');
 const config = require('../config/orbitcard-config');
 const { cdkLockKey } = require('./payment-execution-lock');
 const { PaymentQueueFullError, queueFeedback } = require('./payment-waiting-queue');
+const { retryableTask } = require('./payment-retry-policy');
 const { projectBusinessOrder } = require('./order-business-status');
 
 // The only redemption entry point. Reservation is acquired before any remote create.
@@ -12,9 +13,6 @@ module.exports = function createActivationHandler({ store, ensureStoreReady, act
     return async function handleActivationRequest(req, res) {
         const cdk = String(req.body?.cdk || '').trim();
         if (!/^[a-zA-Z0-9_-]{4,32}$/.test(cdk)) return res.status(400).json({ success: false, message: '请输入有效 CDK' });
-        let session;
-        try { session = parseSession(req.body?.session || req.body?.token); }
-        catch (error) { return res.status(400).json({ success: false, message: error.message }); }
         let slot = null, task = null, dispatched = false, executionGuard = null, waitingTicket = null;
         try {
             await ensureStoreReady();
@@ -31,7 +29,7 @@ module.exports = function createActivationHandler({ store, ensureStoreReady, act
                 }
             } else existing = code && await store.getRunningTaskByCdk(cdk);
 
-            const resumingRetry = require('./payment-retry-policy').retryableTask(existing);
+            const resumingRetry = retryableTask(existing);
             if (existing && !resumingRetry) {
                 const manualResult = ['success', 'failed'].includes(existing.manual_result) ? existing.manual_result : null;
                 const { business_status, business_result, business_closed_at } = projectBusinessOrder(existing);
@@ -46,6 +44,9 @@ module.exports = function createActivationHandler({ store, ensureStoreReady, act
                         : existing.message || '已恢复原订单，请查询充值结果' });
             }
             if (!code || (code.used_at && !resumingRetry) || code.type !== '自助') return res.status(403).json({ success: false, message: 'CDK 无效、已使用或不支持此类型' });
+            let session;
+            try { session = parseSession(req.body?.session || req.body?.token); }
+            catch (error) { return res.status(400).json({ success: false, message: error.message }); }
             const maintenance = await store.getMaintenanceModeState();
             if (isDraining() || maintenance.enabled) return res.status(503).json({ success: false, message: '系统暂停接单，请稍后再试' });
             const cfg = await store.getGptApiConfig();

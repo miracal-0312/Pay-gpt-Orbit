@@ -9,7 +9,6 @@ const {OPERATIONS} = require('../src/orbitcard/orbitcard-api-contract');
 const requests = {
     getAccountBalance: {}, getProductCode: {}, getSubscriptionPlans: {},
     getSubscriptionPaymentRegions: {plan_type:'gpt-plus'},
-    getSubscriptionList: {page:1,page_size:20,service_code:'all'},
     getSubscription: {client_order_no:'persisted-order'},
     getCardList: {page:1,page_size:100},
     cardDetail: {card_ids:[42],reveal_sensitive:false},

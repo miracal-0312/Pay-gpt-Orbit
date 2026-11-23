@@ -1,6 +1,6 @@
 'use strict';
 
-const { CardPreparationError, cardScope } = require('../orbitcard/orbitcard-card-policy');
+const { CardPreparationError } = require('../orbitcard/orbitcard-card-policy');
 const { outcome, terminalUpstreamSnapshot } = require('../orbitcard/orbitcard-client');
 const { validOrder } = require('../payments/orbitcard-cdk');
 const { MAX_SUCCESSFUL_ORDERS, validCount } = require('../orbitcard/orbitcard-pool');
@@ -12,7 +12,7 @@ function verifiedSuccess(snapshot, expected) {
 }
 
 // Called after confirmation, inside the order settlement/release transaction.
-module.exports = function createOrderUsage({ runQuery, runExecute, withTransaction }) {
+module.exports = function createOrderUsage({ runQuery, runExecute }) {
     async function disableExhaustedCards(scope, { cardId, connection } = {}) {
         const result = await runExecute(`UPDATE orbitcard_managed_cards SET disabled_at=UTC_TIMESTAMP(3),
             disabled_code='success_limit_reached', disabled_reason=?, disabled_job_key=NULL
@@ -64,37 +64,6 @@ module.exports = function createOrderUsage({ runQuery, runExecute, withTransacti
         }
         return true;
     }
-    async function backfill() {
-        // Import only saved verified platform responses, irrespective of local
-        // task/CDK state. Missing evidence is left for a fresh platform query.
-        for (const source of ['tasks', 'manual']) {
-            let cursor = source === 'tasks' ? 0 : '';
-            for (;;) {
-                const rows = source === 'tasks'
-                    ? await runQuery(`SELECT t.id AS cursor_id, t.orbitcard_base_url AS base_url,
-                        t.orbitcard_card_id AS card_id, t.orbitcard_client_order_no AS client_order_no,
-                        t.gpt_api_order_id AS order_no, t.gpt_api_raw AS snapshot FROM task_logs t
-                        WHERE t.orbitcard_client_order_no IS NOT NULL
-                        AND t.orbitcard_card_id > 0 AND t.id > ? ORDER BY t.id LIMIT 200`, [cursor])
-                    : await runQuery(`SELECT request_id AS cursor_id, scope, card_id, client_order_no, task_no AS order_no, snapshot
-                        FROM orbitcard_admin_orders WHERE card_id > 0
-                        AND request_id > ? ORDER BY request_id LIMIT 200`, [cursor]);
-                if (!rows.length) break;
-                for (const row of rows) {
-                    let snapshot;
-                    try { snapshot = JSON.parse(row.snapshot); } catch { continue; }
-                    if (!verifiedSuccess(snapshot, { orderId: row.order_no, clientOrderNo: row.client_order_no, cardId: row.card_id })) continue;
-                    const scope = row.scope || cardScope(row.base_url);
-                    await withTransaction(async connection => {
-                        const options = { connection };
-                        await runExecute('INSERT IGNORE INTO orbitcard_managed_cards (scope,card_id) VALUES (?,?)', [scope, row.card_id], options);
-                        await recordSuccess({ scope, cardId: row.card_id, clientOrderNo: row.client_order_no, orderId: row.order_no || null, snapshot }, options);
-                    });
-                }
-                cursor = rows[rows.length - 1].cursor_id;
-            }
-        }
-    }
-    return { recordSuccess, disableExhaustedCards, backfill };
+    return { recordSuccess, disableExhaustedCards };
 };
 module.exports.verifiedSuccess = verifiedSuccess;

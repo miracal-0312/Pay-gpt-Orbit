@@ -36,8 +36,13 @@ function fixture(overrides = {}) {
     }
     return { store, handler, request, events, activeJobs };
 }
-test('malformed/incomplete/expired Sessions are rejected before touching a CDK', async () => {
-    const f = fixture({ verifyCdkDetails: async () => { throw new Error('must not reach database'); } });
+test('CDK eligibility is checked before Session validation or any payment reservation', async () => {
+    const invalid = fixture({ verifyCdkDetails: async () => null });
+    const rejected = await invalid.request({ cdk: 'CDK-TEST', session: 'opaque-token' });
+    assert.equal(rejected.code, 403);
+    assert.match(rejected.data.message, /CDK 无效/);
+    assert.deepEqual(invalid.events, []);
+    const f = fixture({ acquirePaymentLock: async () => assert.fail('invalid Session must not reserve resources') });
     for (const input of ['opaque-token','{}',JSON.stringify({ ...session, user: {} }),JSON.stringify({ ...session, expires: '2000-01-01' })]) {
         assert.equal((await f.request({ cdk: 'CDK-TEST', session: input })).code,400);
     }

@@ -20,7 +20,6 @@ async function setup({ plan = 'plus', balance = '5.00', available = '1000.00' } 
         products: async () => { throw new Error('Existing-card payments must not query the opening catalog'); } };
     const api = { request: async (_cfg, operation, body, key) => {
         calls.push({ operation, body, key });
-        if (operation === 'getSubscriptionList') return { success: true, data: { items: [], total: 0 } };
         if (operation === 'getAccountBalance') return { success: true, status: 200, data: { available_balance: available } };
         assert.equal(operation, 'rechargeCard', 'no other remote operation is allowed');
         currentBalance += money.units(body.amount);

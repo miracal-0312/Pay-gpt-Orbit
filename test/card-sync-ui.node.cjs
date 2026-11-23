@@ -32,8 +32,7 @@ test('local refresh labels cached balances and does not show green live ACTIVE',
     await f.api.loadCards();
     assert.match(f.$('cardRows').innerHTML,/本地快照/);
     assert.doesNotMatch(f.$('cardRows').innerHTML,/card-provider-status active/);
-    assert.match(f.$('cardSyncState').textContent,/不会调用平台/);
-    assert.match(f.$('cardSyncState').textContent,/API 不可见的网页订单不计入/);
+    assert.match(f.$('cardSyncState').textContent,/状态和余额为本地快照.*成功次数来自本地已结算记录/);
 });
 
 test('an idle card below its configured successful order limit remains available',async()=>{

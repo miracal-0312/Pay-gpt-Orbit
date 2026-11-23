@@ -294,7 +294,7 @@ test('CDK editing ignores released old results but respects current occupancy an
 const replacementCard = { card_id: 9, product_code: 'product-1', provider_status: 'ACTIVE', currency: 'USD', balance_amount: '20.00' };
 const selectionStoreMethods = {
     fundingForJob: async () => null, issueForJob: async () => null,
-    listSuccessfulOrders: async () => [], subscriptionBindings: async () => [], reserveCard: async () => replacementCard
+    reserveCard: async () => replacementCard
 };
 const selectionCardReads = {
     listCards: async () => [{ card_id: 8, provider_status: 'ACTIVE' }],
@@ -330,7 +330,6 @@ function replacementRace({ existing = false, releaseBeforeLock = false } = {}) {
         isReleased = true; await guard.release(); return true;
     };
     const api = { request: async (_config, operation, body, key) => {
-        if (operation === 'getSubscriptionList') return { success: true, data: { items: [], total: 0 } };
         assert.equal(held, true); assert.equal(await attemptRelease(), false);
         calls.push({ operation, body, key });
         if (operation === 'getAccountBalance') return { success: true, data: { available_balance: '100.00' } };
@@ -444,7 +443,6 @@ function closedIssueFixture({ manualResult = 'failed', existing = false, orderNo
         assert.equal(held, true); assert.equal(await attemptClose(), false);
     }
     const api = { request: async (_cfg, operation, body, key) => {
-        if (operation === 'getSubscriptionList') return { success: true, data: { items: [], total: 0 } };
         if (issue?.replacement_for_job_key || issue?.job_key || !issue && !owner.manual_result) await assertOriginalLocked();
         calls.push({ operation, body, key });
         if (operation === 'getAccountBalance') return { success: true, data: { available_balance: '100.00' } };

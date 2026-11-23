@@ -8,7 +8,6 @@ const definitions = {
     getSubscriptionPlans: [],
     getSubscriptionPaymentRegions: ['plan_type'],
     getSubscription: ['task_no', 'client_order_no', 'orderId'],
-    getSubscriptionList: ['page', 'page_size', 'status', 'plan_type', 'service_code'],
     getCardList: ['page', 'page_size', 'status', 'product_code', 'card_id', 'card_type', 'search', 'start_time', 'end_time'],
     cardDetail: ['card_id', 'card_ids', 'reveal_sensitive'],
     cardTransaction: ['card_id', 'page', 'page_size', 'transaction_type', 'status', 'merchant', 'start_time', 'end_time'],

@@ -36,7 +36,6 @@ class FakeClient:
             "getCardList": {"list": [{"card_id": 42, "status": "ACTIVE", "card_number": "5555555555554444"}], "total": 1},
             "cardTransaction": {"list": [{"card_id": 42, "merchant": "private-merchant"}], "total": 1},
             "getCardFlow": {"list": [{"order_no": "private-funding"}], "total": 1},
-            "getSubscriptionList": {"items": [{"status": "succeeded", "session_json": {"accessToken": "private-session"}}], "total": 1},
             "getSubscription": {"task_no": "SUB-1", "status": "succeeded", "session_json": {"accessToken": "private-session"}},
         }
         if operation == "cardDetail":
@@ -109,8 +108,7 @@ class OpenApiProbeTests(unittest.TestCase):
         dumped = json.dumps(report)
         for secret in ("private-key", "private-secret", "private-session", "5555555555554444", "private-merchant", "private-funding", "123"):
             self.assertNotIn(secret, dumped)
-        self.assertEqual(next(item for item in report["checks"] if item["operation"] == "getSubscriptionList")["summary"]["statuses"],
-                         ["succeeded"])
+        self.assertNotIn("getSubscriptionList", [operation for operation, _ in client.calls])
         products = next(item for item in report["checks"] if item["operation"] == "getProductCode")["summary"]
         self.assertEqual(products["products"][0]["card_type"], "save")
         self.assertEqual(products["products"][0]["open_card_inventory_mode"], "provider_validated")

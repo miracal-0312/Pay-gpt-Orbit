@@ -45,6 +45,8 @@ function fixture() {
     const write = name => async () => { writes.push(name); throw Error('Diagnostics must not write'); };
     const store = { getGptApiConfig: async()=>cfg, withCardAllocationLock:write('allocation_lock'),
         cardMethods:()=>({ listCards:async()=>{ if(state.countReadError)throw state.countReadError;return state.rows; },
+            pendingIssue: async plan => state.pendingIssues?.find(issue => issue.plan_type === plan) || null,
+            listIssues: async () => state.issues || [],
             syncCards:write('sync_cards'), saveAuthorizations:write('save_authorizations'), reserveCard:write('reserve_card'), retireCard:write('retire_card') }) };
     const service = createDiagnostics({store,provider,cards,audit:entry=>events.push(entry)});
     return {service,events,calls,writes,state,cfg};
@@ -206,17 +208,71 @@ test('invalid simulation sizes fail before any platform request and separate sim
     assert.equal(f.state.rows[0].active_job, undefined); assert.deepEqual(f.writes, []);
 });
 
-test('full preflight checks all four plans with readonly authorization queries', async()=>{
+test('full preflight simulates submission, original-order query and settlement for all four plans', async()=>{
     for(const plan of Object.keys(PROVIDER_PLANS)) {
         const f=fixture(), result=await f.service.preflight({stage:'full',plan_type:plan,session});
         assert.equal(result.ready,true);assert.equal(result.result.selection.action,'pay');
         assert.equal(result.result.selection.card_id,42);assert.equal(result.result.selection.reserved,false);
-        assert.deepEqual(result.steps.map(s=>s.step),['session','config','plans','balance','regions','cards']);
+        assert.deepEqual(result.steps.map(s=>s.step),['session','config','plans','balance','regions','cards','funding','submission','query','settlement']);
+        assert.deepEqual(result.steps.filter(s=>s.simulated).map(s=>s.step),['funding','submission','query','settlement']);
+        assert.equal(result.result.simulation.outcome,'simulated_success');
+        assert.equal(result.result.simulation.funding.topup_usd,'0.00');
+        assert.equal(result.result.simulation.order_created,false);
+        const submitted = result.steps.find(step => step.step === 'submission').data;
+        assert.equal(submitted.sent_to_platform,false);
+        assert.equal(result.steps.find(step => step.step === 'query').data.order_id,submitted.order_id);
+        assert.equal(result.result.simulation.settlement.order_id,submitted.order_id);
+        assert.equal(result.steps.at(-1).data.successful_order_count_after,1);
         assert.ok(f.calls.every(([,trace])=>trace===result.trace_id));assert.ok(f.events.every(e=>e.jobKey===result.trace_id));
         const output=JSON.stringify([result,f.events]);
         for(const secret of ['never-log-access','never-log-session','preview@example.test','prices','16.00'])assert.ok(!output.includes(secret));
         assert.equal(f.state.rows[0].active_job,undefined);assert.deepEqual(f.writes,[]);
         assert.equal(f.calls.filter(([operation])=>operation==='cardTransaction').length,0);
+    }
+});
+
+test('full preflight budgets the new card deposit plus a full-plan topup on an empty pool', async () => {
+    const f = managedPool(0);
+    f.cfg.orbitcard_plan_prices.pro100 = '30.00';
+    f.state.available = '50.00';
+    const run = () => f.service.preflight({ stage: 'full', plan_type: 'pro100', session });
+    const result = await run();
+    assert.equal(result.ready, true);
+    assert.equal(result.result.selection.action, 'open');
+    assert.deepEqual(result.result.simulation.opening, { product_code: 'p1', initial_deposit_usd: '20.00' });
+    assert.deepEqual(result.result.simulation.funding, { card_source: 'simulated_new_card', card_id: null,
+        topup_usd: '30.00', account_required_usd: '50.00', includes_platform_fees: false });
+    assert.equal(result.steps.find(step => step.step === 'opening').simulated, true);
+    assert.equal(result.result.simulation.funds_moved, false);
+    assert.ok(f.calls.some(([op]) => op === 'getProductCode'));
+    assert.deepEqual(f.state.rows, []);
+    assert.deepEqual(f.writes, []);
+
+    f.state.available = '49.99';
+    const short = await run();
+    assert.equal(short.ready, false);
+    assert.equal(short.steps.at(-1).step, 'funding');
+    assert.equal(short.steps.at(-1).state, 'failed');
+    assert.equal(short.steps.some(step => step.step === 'submission'), false);
+    assert.deepEqual(f.writes, []);
+});
+
+test('full preflight stops at occupied cards, pending issues and unconfirmed data without opening', async () => {
+    const run = f => f.service.preflight({ stage: 'full', plan_type: 'plus', session });
+    const busy = managedPool(1);
+    busy.state.rows[0].active_job = 'private-existing-owner';
+    const pending = managedPool(0);
+    pending.state.pendingIssues = [{ plan_type: 'pro100', issue_key: 'private-pending-issue' }];
+    const incomplete = managedPool(1);
+    incomplete.state.details = [{ ...incomplete.state.details[0], balance_amount: null }];
+    for (const [f, step, state] of [[busy, 'cards', 'waiting'], [pending, 'opening', 'waiting'], [incomplete, 'cards', 'failed']]) {
+        const result = await run(f);
+        assert.equal(result.ready, false);
+        assert.equal(result.steps.at(-1).step, step);
+        assert.equal(result.steps.at(-1).state, state);
+        assert.equal(f.calls.some(([op]) => op === 'getProductCode'), false);
+        assert.doesNotMatch(JSON.stringify([result, f.events]), /private-existing-owner|private-pending-issue/);
+        assert.deepEqual(f.writes, []);
     }
 });
 test('preflight models funding and reports disabled cards without making replacement writes',async()=>{

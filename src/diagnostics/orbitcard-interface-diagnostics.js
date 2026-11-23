@@ -8,11 +8,11 @@ const { validOrder } = require('../payments/orbitcard-cdk');
 const { normalizeCard } = require('../orbitcard/orbitcard-cards-client');
 
 const LABELS = Object.freeze({ getAccountBalance: '账户余额', getProductCode: '开卡产品',
-    getSubscriptionPlans: '订阅套餐', getSubscriptionPaymentRegions: '四档支付地区', getSubscription: '原订阅订单', getSubscriptionList: '会员订单列表',
+    getSubscriptionPlans: '订阅套餐', getSubscriptionPaymentRegions: '四档支付地区', getSubscription: '待确认订阅订单',
     getCardList: '卡片列表', cardDetail: '卡片详情', cardTransaction: '消费交易', getCardFlow: '卡片充值流水',
     createCard: '手动开卡', rechargeCard: '卡片补款', deleteCard: '卡片注销', createSubscription: '创建订阅' });
 const CARD_OPERATIONS = new Set(['cardDetail', 'cardTransaction', 'getCardFlow']);
-const SUBMITTED_STATES = new Set(['submitting', 'pending', 'manual', 'success', 'failed', 'retry_waiting', 'support_locked']);
+const PENDING_ORDER_STATES = new Set(['submitting', 'pending']);
 const STATUS_VALUES = new Set(['ACTIVE', 'INACTIVE', 'FROZEN', 'CANCELLED', 'DELETED', 'PENDING', 'SUCCESS', 'FAILED',
     'pending', 'processing', 'succeeded', 'failed', 'success', 'manual', 'completed', 'pending_confirm']);
 const positiveId = value => (typeof value === 'number' || typeof value === 'string' && /^\d+$/.test(value))
@@ -24,7 +24,7 @@ const amount = value => typeof value === 'string' && /^\d{1,14}(?:\.\d{1,8})?$/.
 const operationRow = operation => ({ operation, path: OPERATIONS[operation].path, label: LABELS[operation],
     mode: OPERATIONS[operation].write ? 'local_simulation' : 'live_read' });
 const OPERATION_ORDER = ['getAccountBalance', 'getProductCode', 'getSubscriptionPlans', 'getSubscriptionPaymentRegions',
-    'getCardList', 'cardDetail', 'cardTransaction', 'getCardFlow', 'getSubscriptionList', 'getSubscription',
+    'getCardList', 'cardDetail', 'cardTransaction', 'getCardFlow', 'getSubscription',
     'createCard', 'rechargeCard', 'deleteCard', 'createSubscription'];
 
 // Diagnostics deliberately bypass payment services: querying must never reserve,
@@ -53,22 +53,18 @@ module.exports = function createInterfaceDiagnostics({ store, provider = require
                 orbitcard_base_url AS base_url, orbitcard_api_key_hash AS api_key_hash, updated_at
                 FROM task_logs WHERE orbitcard_base_url = ? AND orbitcard_api_key_hash = ?
                 AND orbitcard_client_order_no IS NOT NULL
-                AND orbitcard_state IN ('submitting','pending','manual','success','failed','retry_waiting','support_locked')
-                AND (NULLIF(gpt_api_order_id,'') IS NOT NULL OR orbitcard_state IN ('submitting','pending','manual','success','retry_waiting'))
-                ORDER BY (orbitcard_state = 'success') DESC, updated_at DESC LIMIT 1`, [cfg.base_url, hash]],
+                AND orbitcard_state IN ('submitting','pending')
+                ORDER BY updated_at DESC LIMIT 1`, [cfg.base_url, hash]],
             [`SELECT client_order_no, task_no, plan_type, card_id, state, scope, api_key_hash, updated_at
                 FROM orbitcard_admin_orders WHERE scope = ? AND api_key_hash = ? AND client_order_no IS NOT NULL
-                AND state IN ('submitting','pending','manual','success','failed','retry_waiting','support_locked')
-                AND (NULLIF(task_no,'') IS NOT NULL OR state IN ('submitting','pending','manual','success','retry_waiting'))
-                ORDER BY (state = 'success') DESC, updated_at DESC LIMIT 1`, [scope, hash]]
+                AND state IN ('submitting','pending')
+                ORDER BY updated_at DESC LIMIT 1`, [scope, hash]]
         ];
         const candidates = (await Promise.all(queries.map(([sql, params]) => store.runQuery(sql, params)))).flat();
         return candidates.filter(row => row.api_key_hash === hash && (row.scope === scope || row.base_url === cfg.base_url)
-            && SUBMITTED_STATES.has(row.state) && identifier(row.client_order_no)
-            && (!row.task_no || identifier(row.task_no)) && positiveId(row.card_id)
-            && (row.task_no || !['failed', 'support_locked'].includes(row.state)))
-            .sort((a, b) => Number(b.state === 'success') - Number(a.state === 'success')
-                || (new Date(b.updated_at).getTime() || 0) - (new Date(a.updated_at).getTime() || 0))[0] || null;
+            && PENDING_ORDER_STATES.has(row.state) && identifier(row.client_order_no)
+            && (!row.task_no || identifier(row.task_no)) && positiveId(row.card_id))
+            .sort((a, b) => (new Date(b.updated_at).getTime() || 0) - (new Date(a.updated_at).getTime() || 0))[0] || null;
     }
     function summarize(operation, data, body, expected) {
         if (operation === 'getAccountBalance') {
@@ -151,7 +147,6 @@ module.exports = function createInterfaceDiagnostics({ store, provider = require
                 message: '四档套餐各查询一次；每档结果见明细', checks });
         }
         let body = {}, expected;
-        if (operation === 'getSubscriptionList') body = { page: 1, page_size: 20, service_code: 'all' };
         if (operation === 'getCardList') body = { page: 1, page_size: 100 };
         if (CARD_OPERATIONS.has(operation)) {
             const cardId = await selectedCard(cfg, input);
@@ -161,7 +156,7 @@ module.exports = function createInterfaceDiagnostics({ store, provider = require
         }
         if (operation === 'getSubscription') {
             const order = await selectedOrder(cfg);
-            if (!order) return finish({ status: 'skipped', message: '当前平台及 API 身份没有可查询的已提交订阅订单' });
+            if (!order) return finish({ status: 'skipped', message: '当前平台及 API 身份没有待确认的订阅订单' });
             let planType;
             try { planType = PROVIDER_PLANS[paymentPlan(order.plan_type)]; }
             catch { return finish({ status: 'skipped', message: '本地原订单套餐无法识别，未发送查询' }); }

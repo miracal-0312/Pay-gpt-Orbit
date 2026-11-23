@@ -11,12 +11,12 @@
 | 选卡与资金 | src/orbitcard/orbitcard-card-service.js → src/orbitcard/orbitcard-payment-decision.js、src/orbitcard/orbitcard-funding-service.js | 实时资料与余额、本地停用、事务预占、原补款恢复 |
 | 订阅与查询 | src/payments/orbitcard-worker.js、src/orbitcard/orbitcard-subscription-service.js、src/orbitcard/orbitcard-query.js | 原子认领、单次提交、归属校验、成功／失败／未知结果判断 |
 | 结算与计数 | src/db/orbitcard-cdk-store.js／src/db/orbitcard-manual-store.js → src/db/orbitcard-order-usage.js | 同一事务内核销、写成功订单账本、去重计数、释放卡片 |
-| 后台恢复与同步 | src/payments/order-recovery.js、src/orbitcard/orbitcard-order-sync.js、src/server.js 定时任务 | 查原订阅和原资金；补记 API 可见的历史成功订单；维护卡片 |
+| 后台恢复与同步 | src/payments/order-recovery.js、src/orbitcard/orbitcard-card-service.js、src/server.js 定时任务 | 查待确认的原订阅和原资金，刷新卡片信息 |
 | 独立对账与诊断 | src/orbitcard/orbitcard-authorizations.js、src/diagnostics/orbitcard-diagnostics.js、src/diagnostics/orbitcard-concurrency-simulation.js | 授权流水对账；只读预检和选卡模拟，不替代会员订单成功证据 |
 
 用户确认只存在当前页面内存中；修改 CDK 或 Session 后必须重新确认。提交后以及刷新页面查单时，成功弹窗的账号、套餐均取自原订单，不能从当前输入框推断。Session 不写数据库、日志或浏览器持久存储。
 
-需要区分三种数据：**本地任务状态**决定任务如何恢复；**卡台订阅结果**决定是否计入成功订单；**消费授权流水**仅用于对账。订单列表同步只能覆盖当前 API 可见范围，API 不可见的网页订单不计数，`order_sync.complete` 不等于全渠道完整。
+需要区分三种数据：**本地任务状态**决定任务如何恢复；**卡台订阅结果**决定是否计入成功订单；**消费授权流水**仅用于对账。已确认成功的原单在结算事务中记入本地账本。
 
 以下依次展开受理、等待、提交结算、重启恢复和审计。卡片细节见 [ORBITCARD-CARDS.md](../operations/ORBITCARD-CARDS.md)，服务器更新见 [DEPLOY.md](../operations/DEPLOY.md)。
 
@@ -90,7 +90,7 @@ Session 必须是 JSON 对象，包含 `user`、`account`、字符串 `accessTok
 
 后台通过 `getProductCode` 提供开卡渠道（product_code）和 BIN 多选，保存于 `orbitcard_product_codes` 与 `orbitcard_bins`。选卡和事务预占检查独立的 `disabled_*` 停用记录。成功订单计数用于每卡累计三次上限；满额后停用旧卡。实际支付预选无合格现有卡时按需补开一张。明确卡片相关错误与原订单结算、卡片释放在同一事务内登记停用，自动补开按原卡和失败任务身份唯一保存。人工停用与恢复需要二级验证、修改原因及管理员审计。
 
-之后读取 `orbitcard_plan_prices` 套餐 USD 金额，缺配置时停止，不从历史订单或 USDT 服务费推测。MySQL 命名锁保护同步和选卡，只选 ACTIVE、USD、资料完整、无本地停用标记、未占用的现有卡，重试排除此前用过的卡，优先使用现有健康卡，不因开卡渠道或库存失败阻断；现有卡选择不查询开卡产品目录。卡内足额准备订阅；不足时按本次套餐完整 USD 金额（向上取到分）补款，不扣减卡内余额，不叠加开卡产品最低留存。只有本次补款后满足套餐 USD 金额，且账户 `available_balance` 足够时才保存意图并提交；否则提示联系客服，不发起资金请求。首笔准备失败安全释放无未决资金占用，重试准备失败保留 CDK 售后锁定。明确卡片错误停用后，缺少合格现有卡的实际支付可以按需补开，管理员仍可手动申请。卡片释放后按停用记录、实时状态、余额和未决资金决定能否复用，冻结闲卡排除；消费授权延迟不阻塞选卡。后台同步卡片及当前 API 可见的成功会员订单，保留历史退役记录。自动补开仅在实际支付准备时按唯一原申请处理。成功会员订单按唯一订单号去重，授权流水只作独立对账。详见 [ORBITCARD-CARDS.md](../operations/ORBITCARD-CARDS.md)。
+之后读取 `orbitcard_plan_prices` 套餐 USD 金额，缺配置时停止，不从历史订单或 USDT 服务费推测。MySQL 命名锁保护同步和选卡，只选 ACTIVE、USD、资料完整、无本地停用标记、未占用的现有卡，重试排除此前用过的卡，优先使用现有健康卡，不因开卡渠道或库存失败阻断；现有卡选择不查询开卡产品目录。卡内足额准备订阅；不足时按本次套餐完整 USD 金额（向上取到分）补款，不扣减卡内余额，不叠加开卡产品最低留存。只有本次补款后满足套餐 USD 金额，且账户 `available_balance` 足够时才保存意图并提交；否则提示联系客服，不发起资金请求。首笔准备失败安全释放无未决资金占用，重试准备失败保留 CDK 售后锁定。明确卡片错误停用后，缺少合格现有卡的实际支付可以按需补开，管理员仍可手动申请。卡片释放后按停用记录、实时状态、余额和未决资金决定能否复用，冻结闲卡排除；消费授权延迟不阻塞选卡。后台刷新卡片资料并维护原退役记录。自动补开仅在实际支付准备时按唯一原申请处理。成功会员订单按唯一订单号去重，授权流水只作独立对账。详见 [ORBITCARD-CARDS.md](../operations/ORBITCARD-CARDS.md)。
 
 ## 共享等待与恢复
 
@@ -123,7 +123,7 @@ Session 只保留内存，不写数据库、浏览器存储或日志。管理员
 | 历史账户余额锁定任务 | `balance_blocked` / `failed` | 保留原恢复逻辑；新任务不进入此状态 |
 | 已核验的订阅出现卡片相关错误 | 持久化停用并登记补开 | 按原卡及失败任务唯一开卡，保留固定幂等身份 |
 | 只有占用中的候选卡 | 申请共享等待位 | 有等待位时保留原任务，卡真正可用才继续；已满提示 10 分钟后下单 |
-| 成功会员历史订单待核对 | 保留统计待核对提示 | 选卡依据实时状态、停用、占用、资金和已核实次数，单张卡的本地计数无效时跳过该卡 |
+| 本地成功次数无效 | 提示核对卡片记录 | 跳过该卡，其他卡仍按实时状态、停用、占用和余额筛选 |
 | 卡片已释放，仅新增授权仍未同步 | 可按正常条件复用 | 以本地停用标记、实时余额、状态和占用决定，不等待消费授权同步 |
 | 准备记录临时无法读取 | `preparing` 或旧 `prepared` / `manual` | 保留 CDK 与支付卡，不查询尚未创建的订阅 |
 | 批量详情整体缺失或归属异常 | `support_locked` / `failed` | 锁定，提示联系人工售后；不盲目开卡 |
@@ -186,7 +186,7 @@ Session 只保留内存，不写数据库、浏览器存储或日志。管理员
 | `TASK_LOG_DIR/runtime-YYYY-MM-DD.jsonl` | 按北京时间日期保存的运行事件 |
 | 后台“下载日志” | 管理员认证后下载对应完整任务文件 |
 
-支付前记录 card_funds_before_subscription 与 card_payment_preflight，成功后只读复查资金快照。卡片复用按本地停用、实时状态、占用及资金判断，成功会员订单数达到 3 次即停止分配；第三次成功结算时持久化停用标记。后续实际支付缺少合格现有卡时按需补开一张，未完成申请沿用原身份。历史同步通过 getSubscriptionList 发现订单，再用 getSubscription 校验结果及原卡归属。授权流水保留独立对账，不改变会员订单次数、不核销 CDK；对账失败不改变已确认的订阅结论。
+支付前记录 card_funds_before_subscription 与 card_payment_preflight，成功后只读复查资金快照。卡片复用按本地停用、实时状态、占用及资金判断，成功会员订单数达到 3 次即停止分配；第三次成功结算时持久化停用标记。后续实际支付缺少合格现有卡时按需补开一张，未完成申请沿用原身份。原单通过 getSubscription 返回的结果和归属确认后再结算。授权流水保留独立对账，不改变会员订单次数、不核销 CDK；对账失败不改变已确认的订阅结论。
 
 实际 HTTP 请求记录开始/结束、耗时、操作、HTTP 状态、平台码、请求结果类型、原订单身份及服务费/支付金额白名单字段。不会写 Session 请求体、API Key、HMAC Secret、签名、验证码凭据或含原始请求的 Axios 错误对象。
 

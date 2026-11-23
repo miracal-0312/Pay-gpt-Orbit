@@ -69,3 +69,16 @@ test('concurrency reasons are escaped before rendering', () => {
     assert.doesNotMatch(f.$('diagConcurrencyRows').innerHTML, /<img/);
     assert.match(f.$('diagConcurrencyRows').innerHTML, /&lt;img/);
 });
+
+test('full preflight distinguishes real checks, local simulation and waiting', async () => {
+    const f = setup(async () => ({ trace_id: 'debug-test', passed: false, ready: false, read_only: true,
+        steps: [{ step: 'cards', state: 'passed', message: '读取卡片', elapsed_ms: 1 },
+            { step: 'opening', state: 'passed', simulated: true, message: '模拟开卡', elapsed_ms: 1 },
+            { step: 'funding', state: 'waiting', simulated: true, message: '等待确认', elapsed_ms: 1 }],
+        result: { simulation: { outcome: 'waiting' } } }));
+    await f.api.diagPreflight('full');
+    assert.equal(f.calls[0].input.stage, 'full');
+    assert.match(f.$('diagSteps').innerHTML, /<strong>通过<\/strong>.*读取卡片/);
+    assert.match(f.$('diagSteps').innerHTML, /<strong>模拟通过<\/strong>.*模拟开卡/);
+    assert.match(f.$('diagSteps').innerHTML, /<strong>等待<\/strong>.*等待确认/);
+});

@@ -339,7 +339,7 @@ async function loadCards(sync = null) {
     $('cardRows').innerHTML = visible.map(card => renderCardRow(card, sync)).join('') || '<tr><td colspan="5">暂无可显示的卡片。</td></tr>';
     $('cardSyncState').textContent = sync?.failed ? `平台同步失败${sync.message ? `：${sync.message}` : ''}。下面显示旧的本地快照，不能用于确认当前状态和余额。`
         : sync?.checked_at ? `查询完成：${sync.checked_at}，同步 ${sync.count} 张，详情读取失败 ${sync.failed_ids.length} 张，已注销或未返回 ${(sync.removed_ids || []).length} 张。数值为本次查询时的快照。`
-            : '状态、余额和成功会员订单次数为本地快照，点击“同步卡片与订单”更新。“刷新本地记录”不会调用平台；API 不可见的网页订单不计入，授权流水仅供对账。';
+            : '状态和余额为本地快照，点击“同步卡片”获取最新数据。成功次数来自本地已结算记录，授权流水仅供对账。';
     $('issueRows').innerHTML = data.issues.map(issue => `<tr><td>${escapeHtml(issue.created_at)}<br><code>${escapeHtml(issue.issue_key)}</code></td><td>${escapeHtml(issue.product_code)}<br>${escapeHtml(issue.amount)}</td><td>${issue.job_key ? escapeHtml(cardPlans[issue.plan_type] || issue.plan_type) : '共享卡池'} / ${escapeHtml(issue.state)}${issue.replacement_for_card_id ? `<br>替换原卡 ${escapeHtml(issue.replacement_for_card_id)}` : ''}<br>${escapeHtml(issue.provider_status || '')}<br>${escapeHtml(issue.message)}</td><td>${escapeHtml(issue.order_no || '待返回')}<br>${escapeHtml(issue.card_id || '待返回')}</td></tr>`).join('') || '<tr><td colspan="4">暂无开卡申请</td></tr>';
     $('fundingRows').innerHTML=(data.fundings || []).map(funding => `<tr><td>${escapeHtml(funding.created_at)}<br><code>${escapeHtml(funding.job_key)}</code></td><td>${escapeHtml(funding.card_id)}<br>${escapeHtml(funding.amount)} USD</td><td>${escapeHtml(funding.state)} / ${escapeHtml(funding.provider_status)}<br>${escapeHtml(funding.order_no || funding.funding_key)}<br>${escapeHtml(funding.message)}</td><td>${escapeHtml(funding.fee_snapshot || '待确认')}<br>支付前要求余额：${escapeHtml(funding.target_balance)}</td></tr>`).join('') || '<tr><td colspan="4">暂无卡片补款</td></tr>';
 }
@@ -361,7 +361,7 @@ async function loadCardTransactions() {
 async function synchronizeCards() {
     $('syncCards').disabled = true;
     $('loadCards').disabled = true;
-    $('cardSyncState').textContent = '正在同步卡片信息和卡台成功会员订单…';
+    $('cardSyncState').textContent = '正在同步卡台卡片资料…';
     let result;
     try {
         result = await request('/api/admin/orbitcard/cards/sync', {});
