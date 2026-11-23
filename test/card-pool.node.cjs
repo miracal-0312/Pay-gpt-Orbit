@@ -208,7 +208,7 @@ test('platform-confirmed success permits immediate reuse without authorization s
 test('queued requests continue after original settlement without waiting for authorizations',async()=>{
  const f=await setup([0]),first=await f.claim(),next=await f.claim();await f.service.allocate(cfg,first.jobKey,'plus');
  await assert.rejects(f.service.allocate(cfg,next.jobKey,'plus'),require('../src/orbitcard/orbitcard-card-policy').CardBusyError);
- await f.settle(first,'success');assert.equal(await f.service.allocate(cfg,next.jobKey,'plus',{waitForAvailability:true}),42);assert.equal(f.db.cards[0].successful_order_count,1);
+ await f.settle(first,'success');assert.equal(await f.service.allocate(cfg,next.jobKey,'plus'),42);assert.equal(f.db.cards[0].successful_order_count,1);
 });
 
 test('a busy card remains a waiting candidate alongside another card with unknown provider status',async()=>{
@@ -229,18 +229,18 @@ test('a settled card with delayed authorization never causes opening while anoth
     assert.equal(f.db.cards[0].successful_order_count,1);
 });
 
-test('frozen idle cards with pending authorizations cannot cause automatic opening',async()=>{
+test('a frozen idle card with pending authorizations is skipped when opening a usable card',async()=>{
     const f=await setup([0]); f.remote[0].status='FROZEN'; f.db.cards[0].authorization_pending_count=1;
     const task=await f.claim();
-    await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/没有可用|原开卡/);
-    assert.equal(f.calls.filter(c=>c.operation==='createCard').length,0);
-
+    assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),100);
+    assert.equal(f.db.cards[0].active_job,null);
+    assert.equal(f.calls.filter(c=>c.operation==='createCard').length,1);
 });
 
 test('a confirmed frozen idle card does not need payment details when automatic opening is disabled',async()=>{
     const f=await setup([0],{cardDetail:async()=>{throw Error('must not read frozen details');}}); f.remote[0].status='CANCELLED';
     const task=await f.claim();
-    await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/没有可用|原开卡/);
+    await assert.rejects(f.service.allocate({...cfg,enabled:false},task.jobKey,'plus'),/没有可用/);
     assert.equal(f.calls.filter(c=>c.operation==='createCard').length,0);
 
 });
@@ -342,12 +342,15 @@ test('insufficient account money rejects a full-plan topup before creating a fun
     assert.equal(f.calls.filter(c=>['createCard','rechargeCard','deleteCard'].includes(c.operation)).length,0);
 });
 
-test('allocation rejects an empty pool without opening cards',async()=>{
+test('allocation opens and reserves one card for an empty pool',async()=>{
     const f=await setup([]);
     const task=await f.claim();
-    await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/没有可用|原开卡/);
-    assert.equal(f.calls.filter(c=>c.operation==='createCard').length,0);
-    assert.equal(f.db.issues.length,0);
+    assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),100);
+    assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),100);
+    assert.equal(f.calls.filter(c=>c.operation==='createCard').length,1);
+    assert.equal(f.db.issues.length,1);
+    assert.equal(f.db.issues[0].state,'ready');
+    assert.equal(f.db.cards[0].active_job,task.jobKey);
 });
 
 test('allocation cannot open around an unresolved card issue belonging to another plan',async()=>{
@@ -431,7 +434,7 @@ test('an occupied exhausted card is a replacement source only after its order re
  const f=await setup([3]);f.db.cards[0].active_job='unresolved';
  await f.service.synchronize(cfg);assert.equal(f.calls.filter(c=>['deleteCard','createCard'].includes(c.operation)).length,0);
  assert.equal(f.db.cards[0].disabled_code,'success_limit_reached');
- const task=await f.claim();await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/没有可用支付卡/);
+ const task=await f.claim();await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/支付卡正在使用/);
  f.db.cards[0].active_job=null;await f.service.synchronize(cfg);await f.service.recover(cfg);
  assert.deepEqual(f.db.issues,[]);
  assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),100);
@@ -558,20 +561,20 @@ test('manual requests can each open one card beyond five without synchronization
     assert.equal(f.calls.filter(c=>c.operation==='deleteCard').length,0);
 });
 
-test('an order cannot open around any number of inactive cards',async()=>{
+test('an order opens one card when all existing cards are inactive',async()=>{
     const f=await setup(Array(6).fill(0)); for(const card of f.remote)card.status='CANCELLED';
     const task=await f.claim();
-    await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'),/没有可用|原开卡/);
-    assert.equal(f.calls.filter(c=>c.operation==='createCard').length,0);
-
+    assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),100);
+    assert.equal(f.calls.filter(c=>c.operation==='createCard').length,1);
 });
 
 
-test('selection imports three verified historical subscriptions before reserving and never counts them twice',async()=>{
+test('account reconciliation imports verified historical subscriptions and later selection respects the quota',async()=>{
  const rows=Array.from({length:3},(_,i)=>({task_no:`history-${i}`,client_order_no:`client-${i}`,card_id:42,
   plan_type:'gpt-plus',status:'succeeded',subscription_succeeded:true,query_source:'upstream'}));
  const f=await setup([0],{getSubscriptionList:async()=>({success:true,data:{items:rows,total:rows.length}}),
   getSubscription:async body=>({success:true,data:rows.find(row=>row.task_no===body.task_no)})});
+ await f.service.synchronize(cfg);
  const task=await f.claim();assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),100);
  assert.equal(f.db.cards[0].successful_order_count,3);assert.equal(f.db.successfulOrders.length,3);
  await f.service.synchronize(cfg);await f.restart().recover(cfg);
@@ -580,12 +583,14 @@ test('selection imports three verified historical subscriptions before reserving
  assert.equal(f.calls.filter(c=>c.operation==='createCard').length,1);
 });
 
-test('unknown or failed historical lookup stops selection before any financial write',async()=>{
+test('failed or unresolved historical reconciliation leaves live cards available for selection',async()=>{
  for(const response of [{success:false,status:503},{success:true,data:{items:[{task_no:'old',client_order_no:'old-client',card_id:42}],total:1}}]) {
   const f=await setup([0],{getSubscriptionList:async()=>response,getSubscription:async()=>({success:true,data:{status:'processing'}})});
-  const task=await f.claim();await assert.rejects(f.service.allocate(cfg,task.jobKey,'plus'));
-  assert.equal(f.db.cards[0].active_job,null);
-  assert.equal(f.calls.filter(c=>['deleteCard','createCard','rechargeCard'].includes(c.operation)).length,0);
+  assert.equal((await f.service.synchronize(cfg)).order_sync.complete,false);
+  f.calls.length=0;
+  const task=await f.claim();assert.equal(await f.service.allocate(cfg,task.jobKey,'plus'),42);
+  assert.equal(f.db.cards[0].active_job,task.jobKey);
+  assert.deepEqual(f.calls.map(c=>c.operation),['getCardList','cardDetail']);
  }
 });
 

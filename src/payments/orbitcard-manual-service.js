@@ -281,7 +281,7 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
             if (order.state !== 'prepared') {
                 const cardId = await waitingQueue.allocate({ key: identity, session, cfg,
                     allocate: () => cardService.allocate(cfg, identity, order.plan_type, { manualRequestId: order.request_id,
-                        excludedCardIds: manualHistory(order).map(item => Number(item.card_id)), waitForAvailability: waitingQueue.has(identity) }),
+                        excludedCardIds: manualHistory(order).map(item => Number(item.card_id)) }),
                     onWait: message => store.noteManualWaiting(order.request_id, identity, message) });
                 await cfg.executionGuard?.assertOwned();
                 parseSession(session);
@@ -511,8 +511,7 @@ module.exports = function createManualService({ store, activeJobs, audit, cardSe
         let background = false;
         try {
             const allocate = () => cardService.allocate(retryCfg, next.client_order_no, next.plan_type, {
-                manualRequestId: next.request_id, excludedCardIds: manualHistory(next).map(item => Number(item.card_id)),
-                ...(waitingQueue ? { waitForAvailability: waitingQueue.has(retryIdentity) } : {})
+                manualRequestId: next.request_id, excludedCardIds: manualHistory(next).map(item => Number(item.card_id))
             });
             let cardId;
             try {

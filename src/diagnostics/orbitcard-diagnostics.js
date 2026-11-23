@@ -5,7 +5,7 @@ const crypto = require('node:crypto');
 const { parseSession } = require('../payments/session-input');
 const { PLAN_TYPES, PROVIDER_PLANS, paymentPlan } = require('../config/plan-registry');
 const { paymentRegion, planPrice } = require('../config/orbitcard-config');
-const { CardPreparationError } = require('../orbitcard/orbitcard-card-policy');
+const { CardPreparationError, INACTIVE_CARD_STATUSES } = require('../orbitcard/orbitcard-card-policy');
 const { decideCards } = require('../orbitcard/orbitcard-payment-decision');
 const { simulateSelection, taskCount } = require('./orbitcard-concurrency-simulation');
 const money = require('../orbitcard/orbitcard-money');
@@ -85,7 +85,7 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
             const readable = listed.filter(card => card.provider_status !== 'DELETED');
             const snapshotNow = Date.now();
             const relevant = saved.filter(row => readable.some(card => card.card_id === Number(row.card_id)
-                && !['DELETED','CANCELLED','FROZEN'].includes(card.provider_status))
+                && !INACTIVE_CARD_STATUSES.has(card.provider_status))
                 && poolPolicy.eligible(row) && !row.active_job);
             const detailed = await cards.cardDetailsInBatches(cfg, relevant.map(row => Number(row.card_id)), { allowPartial: true });
             if (relevant.length && !detailed.length) throw new CardPreparationError('批量卡片详情全部缺失，停止选卡，请联系售后');
@@ -115,7 +115,7 @@ module.exports = function createDiagnostics({ store, audit, provider = require('
                 result.selection.funding_amount = money.cents(funding);
                 if (!selected.fundingSufficient) throw new CardPreparationError('支付卡余额不足，按套餐全额补款后仍不满足套餐金额，请联系客服');
             } else if (decision.action === 'unavailable') {
-                throw new CardPreparationError('没有可用支付卡，请核对停用卡的补开申请或手动补充卡片');
+                throw new CardPreparationError('当前快照没有可选的现有卡。实际支付时会重新核对，确认缺卡后按需开卡');
             } else throw new CardPreparationError('卡片被占用或平台状态尚未确认，实际支付需要等待处理；共享等待位最多 1 个');
             const required = funding;
             if (cfg.enabled) {

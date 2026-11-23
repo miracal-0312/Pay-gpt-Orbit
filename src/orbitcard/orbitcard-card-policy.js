@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 
 const { paymentPlan } = require('../config/plan-registry');
+const INACTIVE_CARD_STATUSES = new Set(['INACTIVE', 'CANCELLED', 'FROZEN', 'DELETED']);
 class CardPreparationError extends Error {}
 class CardBusyError extends CardPreparationError {}
 class AccountBalanceError extends CardPreparationError {}
@@ -39,4 +40,4 @@ function settlementState(current, orbitcardState) {
 }
 
 module.exports = { planFor, cardScope, settlementState, CardPreparationError, CardBusyError, AccountBalanceError, FundingPendingError, FundingAwaitingError, FUNDING_POLL_MS, FUNDING_WAIT_MS,
-    CardDataError, CardSelectionError };
+    CardDataError, CardSelectionError, INACTIVE_CARD_STATUSES };

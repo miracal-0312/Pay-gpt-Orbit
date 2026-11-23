@@ -36,8 +36,7 @@ module.exports = function createPaymentService({ store, cardService, worker, act
             }
             let pending;
             const allocate = () => cardService.allocate(task.apiConfig, jobKey, planType, {
-                excludedCardIds: [task.orbitcardRetryFirstCardId, task.orbitcardRetrySecondCardId].filter(Boolean).map(Number),
-                ...(waitingQueue ? { waitForAvailability: waitingQueue.has(jobKey) } : {})
+                excludedCardIds: [task.orbitcardRetryFirstCardId, task.orbitcardRetrySecondCardId].filter(Boolean).map(Number)
             });
             try { return await ready(await (waitingQueue ? waitingQueue.allocate({ key: jobKey, session, cfg: task.apiConfig, allocate,
                 onWait: message => setProgress('running', 10, message, { orbitcardState: preparationState,
