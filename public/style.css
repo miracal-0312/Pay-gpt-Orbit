@@ -61,3 +61,35 @@ pre{margin:16px 0 0;padding:18px;background:#152034;color:#cfdef2;border:1px sol
 .progress>div{width:0%}
 [hidden]{display:none!important}
 .password-field{position:relative;display:flex;align-items:center;margin-bottom:18px}.password-field input{margin-bottom:0;padding-right:64px}.password-toggle{position:absolute;right:6px;width:auto!important;min-height:30px!important;padding:4px 10px;font-size:12px;background:transparent;color:var(--muted);border:1px solid transparent;border-radius:6px}.password-toggle:hover{color:var(--ink);background:#f3f5fa}
+
+/* Elevated visual polish, status feedback and Orbitcard error guidance cards. */
+:root{--shadow-sm:0 1px 2px rgba(20,31,51,.04),0 4px 12px rgba(20,31,51,.04);--shadow-md:0 12px 32px rgba(20,31,51,.08)}
+.recharge-page,.login-page{background:radial-gradient(circle at 12% 0%,#e7efff 0%,transparent 42%),radial-gradient(circle at 88% 8%,#e8f7f2 0%,transparent 36%),var(--bg)}
+.panel{box-shadow:var(--shadow-sm);transition:border-color .18s,box-shadow .18s}
+.redeem-panel{box-shadow:var(--shadow-md);border-color:#dce4f2}
+.brand-mark{background:linear-gradient(135deg,#375bd2 0%,#5478f0 100%);box-shadow:0 4px 12px rgba(55,91,210,.24)}
+.login-brand-panel{background:linear-gradient(160deg,#121d33 0%,#1d2e50 60%,#19315e 100%)}
+.admin-sidebar{background:linear-gradient(180deg,#121c30 0%,#172540 100%)}
+.metrics .panel{transition:transform .16s,box-shadow .16s,border-color .16s}.metrics .panel:hover{transform:translateY(-2px);box-shadow:var(--shadow-md);border-color:#cdd9ee}
+.plan{transition:transform .16s,border-color .16s,box-shadow .16s,background .16s}.plan:hover{transform:translateY(-1px);border-color:#c4d4f5}
+.plan.active{background:linear-gradient(180deg,#f5f8ff 0%,#fff 100%);border-color:var(--primary);border-top-width:3px;box-shadow:0 6px 18px rgba(55,91,210,.12)}
+.plan.active small{color:var(--primary);font-weight:700}
+.progress{height:8px;background:#e6ecf7}.progress>div{border-radius:12px;background:linear-gradient(90deg,#375bd2 0%,#5b82ff 100%)}
+.progress.is-success>div{background:linear-gradient(90deg,#087f68 0%,#14a386 100%)}
+.progress.is-failed>div{background:linear-gradient(90deg,#b4233c 0%,#df3b57 100%)}
+.progress.is-manual>div{background:linear-gradient(90deg,#c27d14 0%,#e5a02c 100%)}
+.order-meta-row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin:12px 0}.order-meta-row #orderInfo{margin:0}
+.compact-btn{min-height:30px;padding:4px 10px;font-size:11px;border-radius:7px}
+.runtime-bar{display:inline-flex;align-items:center;gap:8px;padding:6px 12px;border-radius:999px;background:rgba(255,255,255,.78);border:1px solid var(--line);margin-top:4px}
+.status-dot{width:8px;height:8px;border-radius:50%;background:var(--success);box-shadow:0 0 0 3px rgba(8,127,104,.16);flex-shrink:0}
+.guidance-card{margin-top:16px;padding:16px 18px;border-radius:12px;border:1px solid #d7e2f8;border-left:4px solid var(--primary);background:#f7faff;display:grid;gap:8px}
+.guidance-card strong{font-size:14px;color:var(--ink)}.guidance-card p{font-size:12px;color:#4f607d;margin:0;line-height:1.7}
+.guidance-steps{margin:4px 0 0;padding-left:18px;display:grid;gap:6px;font-size:12px;color:#384967;line-height:1.7}
+.guidance-cat-session{border-color:#f3dfb6;border-left-color:#d48a16;background:#fffbf2}.guidance-cat-session strong{color:#8a5607}
+.guidance-cat-account{border-color:#f3d2da;border-left-color:var(--danger);background:#fff6f8}.guidance-cat-account strong{color:var(--danger)}
+.guidance-cat-captcha{border-color:#c9d6ff;border-left-color:#375bd2;background:#f3f6ff}.guidance-cat-captcha strong{color:#2342a6}
+.guidance-cat-card{border-color:#cde7e0;border-left-color:var(--success);background:#f3fbf8}.guidance-cat-card strong{color:#0b6b58}
+.guidance-cat-capacity,.guidance-cat-pending{border-color:#d5e2fb;border-left-color:#4b74e0;background:#f5f8ff}
+.guidance-cat-service{border-color:#e5d8f7;border-left-color:#6d4bc3;background:#faf7ff}.guidance-cat-service strong{color:#4d2fa0}
+.result-guidance{margin:14px 0 6px;padding:12px 14px 12px 28px;border-radius:10px;background:#f7f9fd;border:1px solid var(--line)}
+.result-modal,.account-confirm-modal::backdrop{backdrop-filter:blur(4px)}

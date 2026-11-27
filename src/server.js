@@ -13,6 +13,7 @@ const emailNotifications = require('./integrations/email-notifications')({ store
 const adminAuth = require('./http/admin-auth');
 const { PLAN_LABELS, PROVIDER_TO_PLAN } = require('./config/plan-registry');
 const { projectBusinessOrder } = require('./payments/order-business-status');
+const { buildCustomerGuidance } = require('./payments/customer-error-guide');
 const { notifyTelegramEvent } = require('./integrations/telegram-notify');
 const app = express();
 const activeJobs = new Set();
@@ -41,6 +42,8 @@ function publicOrder(task) {
     const cdkState = manualResult === 'success' || manuallyRedeemed ? 'redeemed'
         : manualResult === 'failed' ? task.manual_local_released_at ? 'available' : 'reserved'
             : task.orbitcard_state === 'success' ? 'redeemed' : ['failed','rejected'].includes(task.orbitcard_state) ? 'available' : 'reserved';
+    const safeOrder = store.safeOrder(task.gpt_api_raw);
+    const guidance = buildCustomerGuidance({ ...task, status }, safeOrder);
     return { provider: task.orbitcard_client_order_no ? 'orbitcard' : 'history',
         jobKey: task.orbitcard_retry_root_job_key || task.job_key,
         attemptJobKey: task.job_key, attempt: Number(task.orbitcard_retry_attempt_no || 1),
@@ -51,7 +54,8 @@ function publicOrder(task) {
         plan_type: planType, plan_label: PLAN_LABELS[planType] || planType,
         order_id: task.gpt_api_order_id || null, client_order_no: task.orbitcard_client_order_no || null,
         cdk_state: cdkState,
-        order: store.safeOrder(task.gpt_api_raw) };
+        guidance,
+        order: safeOrder };
 }
 async function notify(task) {
     if (!['success', 'failed', 'manual'].includes(task.status)) return;

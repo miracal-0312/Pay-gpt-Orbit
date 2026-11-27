@@ -1,6 +1,6 @@
 'use strict';
 const $ = id => document.getElementById(id);
-let activeCdk = '', activeJob = '', activePlanLabel = '', generation = 0, timer, expiryTimer, trackingStarted = 0, busy = false;
+let activeCdk = '', activeJob = '', activeOrderRef = '', activePlanLabel = '', generation = 0, timer, expiryTimer, trackingStarted = 0, busy = false;
 let pollFailures = 0, verifying = false, submitting = false, runtimeBusy = false;
 let trackingQueued = false;
 function trackingBudget() { return (trackingQueued ? 45 : 15) * 60 * 1000; }
@@ -15,6 +15,42 @@ function publicText(text) {
         ? `${value}；请联系客服处理` : value;
 }
 function message(text, type = '') { $('statusMessage').textContent = publicText(text); $('statusMessage').className = `message ${type}`; }
+function highlightPlan(planType) {
+    for (const card of document.querySelectorAll('.plan')) {
+        card.classList?.toggle('active', Boolean(planType && card.dataset?.plan === planType));
+    }
+}
+function clearGuidance() {
+    const box = $('guidanceBox');
+    if (box) { box.hidden = true; box.className = 'guidance-card'; }
+    if ($('guidanceTitle')) $('guidanceTitle').textContent = '';
+    if ($('guidanceSummary')) $('guidanceSummary').textContent = '';
+    $('guidanceSteps')?.replaceChildren();
+}
+function renderGuidance(guidance) {
+    const box = $('guidanceBox');
+    if (!box) return;
+    if (!guidance || typeof guidance !== 'object' || !guidance.title) { clearGuidance(); return; }
+    const category = ['session', 'account', 'captcha', 'card', 'capacity', 'service', 'pending', 'unknown'].includes(guidance.category)
+        ? guidance.category : 'unknown';
+    box.className = `guidance-card guidance-cat-${category}`;
+    $('guidanceTitle').textContent = publicText(guidance.title);
+    $('guidanceSummary').textContent = publicText(guidance.summary || '');
+    const stepsEl = $('guidanceSteps');
+    stepsEl.replaceChildren();
+    for (const step of Array.isArray(guidance.steps) ? guidance.steps.slice(0, 4) : []) {
+        const item = document.createElement('li');
+        item.textContent = publicText(step);
+        stepsEl.append(item);
+    }
+    box.hidden = false;
+}
+function setOrderReference(value) {
+    activeOrderRef = String(value || '').trim();
+    $('orderInfo').textContent = activeOrderRef ? `订单：${activeOrderRef}` : '';
+    const copyBtn = $('copyOrderBtn');
+    if (copyBtn) copyBtn.hidden = !activeOrderRef || activeOrderRef === '待分配';
+}
 async function requestJson(url, options = {}) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 30000);
@@ -135,9 +171,23 @@ function closeResult() {
     $('resultAccountInfo').hidden = true;
     $('resultEmail').textContent = '';
     $('resultPlan').textContent = '';
+    if ($('resultGuidance')) { $('resultGuidance').hidden = true; $('resultGuidance').replaceChildren(); }
     resultReturnFocus?.focus();
 }
 $('resultClose').addEventListener('click', closeResult);
+if ($('copyOrderBtn')) {
+    $('copyOrderBtn').addEventListener('click', async () => {
+        if (!activeOrderRef) return;
+        const btn = $('copyOrderBtn');
+        try {
+            await navigator.clipboard.writeText(activeOrderRef);
+            btn.textContent = '已复制';
+            setTimeout(() => { btn.textContent = '复制订单号'; }, 2000);
+        } catch (_) {
+            message(`请手动复制订单号：${activeOrderRef}`);
+        }
+    });
+}
 $('resultModal').addEventListener('keydown', event => {
     if (event.key === 'Escape') { event.preventDefault(); closeResult(); }
     if (event.key === 'Tab') { event.preventDefault(); $('resultClose').focus(); }
@@ -155,6 +205,17 @@ function showResult(data, repeat = false) {
     const reason = data.order?.failureMessage || data.message || '暂未取得具体错误原因';
     $('resultDescription').textContent = queueFull ? QUEUE_FULL_MESSAGE : success ? '订阅成功，请等待一会刷新账户状态。'
         : publicText(`${uncertain ? '充值结果尚未确认，请勿重复充值。\n' : ''}${reason}`);
+    const modalSteps = $('resultGuidance');
+    if (modalSteps) {
+        modalSteps.replaceChildren();
+        const steps = !success && !queueFull && Array.isArray(data.guidance?.steps) ? data.guidance.steps.slice(0, 3) : [];
+        for (const step of steps) {
+            const li = document.createElement('li');
+            li.textContent = publicText(step);
+            modalSteps.append(li);
+        }
+        modalSteps.hidden = !steps.length;
+    }
     $('resultSupport').textContent = success || queueFull ? '' : '请联系售后QQ 2244527967处理';
     $('resultAccountInfo').hidden = !success;
     $('resultEmail').textContent = success ? data.target_email || '原订单未记录账号' : '';
@@ -167,6 +228,7 @@ function display(data) {
     if (data.jobKey && activeJob && data.jobKey !== activeJob) return false;
     activeJob = data.jobKey || activeJob;
     if (data.plan_label) activePlanLabel = publicText(data.plan_label);
+    if (data.plan_type) highlightPlan(data.plan_type);
     const queued = Boolean(data.queued);
     if (queued) trackingQueued = true;
     const label = queued ? '排队等待' : statusNames[data.status] || data.status;
@@ -182,10 +244,12 @@ function display(data) {
     const progress = Math.max(0, Math.min(100, Number(data.progress) || 0));
     $('progressBox').setAttribute('aria-label', label);
     $('progressBar').parentElement.setAttribute('aria-valuenow', String(data.status === 'success' ? 100 : progress));
+    $('progressBar').parentElement.className = `progress${data.status === 'success' ? ' is-success' : data.status === 'failed' ? ' is-failed' : data.status === 'manual' ? ' is-manual' : ''}`;
     $('progressBar').style.width = `${data.status === 'success' ? 100 : progress}%`;
     $('progressText').textContent = label;
     message(data.message || statusNames[data.status] || '等待查询', data.status === 'success' ? 'success' : data.status === 'failed' ? 'error' : '');
-    $('orderInfo').textContent = `订单：${data.order_id || data.client_order_no || activeJob || '待分配'}`;
+    renderGuidance(data.guidance);
+    setOrderReference(data.order_id || data.client_order_no || activeJob || '待分配');
     showResult(data);
     if (!queued && ['success', 'failed', 'retry'].includes(data.status)) {
         clearTimeout(timer); clearChallenge();
@@ -229,28 +293,34 @@ async function refresh(auto = false, expected = generation) {
 function startTracking() { clearTimeout(timer); trackingStarted = Date.now(); pollFailures = 0; $('refreshBtn').hidden = false; return refresh(true); }
 $('cdkInput').addEventListener('input', () => {
     resetAccountConfirmation();
+    clearGuidance();
+    highlightPlan('');
     showRedeemStep(1);
     closeResult();
     generation++; clearTimeout(timer); clearChallenge(); activeCdk = ''; activeJob = ''; activePlanLabel = ''; trackingQueued = false;
     $('redeemForm').hidden = true; $('refreshBtn').hidden = true; $('retryBtn').hidden = true; $('progressBox').hidden = true;
     $('sessionInput').value = '';
-    $('orderInfo').textContent = ''; $('trackingHint').textContent = ''; $('planInfo').textContent = ''; message('');
+    setOrderReference(''); $('trackingHint').textContent = ''; $('planInfo').textContent = ''; message('');
 });
 async function verifyCurrentCdk(event) {
     event.preventDefault();
     if (verifying) return;
     resetAccountConfirmation();
+    clearGuidance();
     verifying = true;
     const current = ++generation; clearTimeout(timer); clearChallenge(); activeJob = '';
-    const cdk = $('cdkInput').value.trim(); $('verifyBtn').disabled = true; $('retryBtn').disabled = true;
+    const cdk = $('cdkInput').value.trim();
+    $('cdkInput').value = cdk;
+    $('verifyBtn').disabled = true; $('retryBtn').disabled = true;
     activeCdk = ''; $('redeemForm').hidden = true; $('retryBtn').hidden = true;
     $('refreshBtn').hidden = true; $('progressBox').hidden = true;
-    $('orderInfo').textContent = ''; $('trackingHint').textContent = '';
+    setOrderReference(''); $('trackingHint').textContent = '';
     try {
         const result = await post('/api/verify-cdk', { cdk });
         if (current !== generation) return;
         activeCdk = cdk;
         const data = result.data; activePlanLabel = publicText(data.plan_label || data.plan_type);
+        highlightPlan(data.plan_type);
         if (!data.jobKey) trackingQueued = false;
         if (data.queued) trackingQueued = true;
         $('planInfo').textContent = `${activePlanLabel} · ${statusNames[data.status] || data.status}`;
