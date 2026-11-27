@@ -101,7 +101,8 @@ async function recoverHistoricalTasks() {
 }
 
 async function ensureReady() {
-    await runQuery(fs.readFileSync(path.resolve(__dirname, '..', '..', 'database', 'mysql-schema.sql'), 'utf8'));
+    const executeSchema = core.runSchemaScript || runQuery;
+    await executeSchema(fs.readFileSync(path.resolve(__dirname, '..', '..', 'database', 'mysql-schema.sql'), 'utf8'));
     await ensureLegacyColumns();
     await initializeBaseData();
     await core.ensureGptApiConfigDefaults();

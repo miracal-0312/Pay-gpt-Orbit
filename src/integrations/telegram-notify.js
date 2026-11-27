@@ -33,11 +33,19 @@ function formatTelegramMessage(event, fields) {
     return lines.join('\n');
 }
 
+function isSafeBotToken(token) {
+    return typeof token === 'string' && token.length > 0 && token.length <= 256
+        && /^[A-Za-z0-9:_-]+$/.test(token) && !token.includes('..');
+}
+
 async function sendTelegramMessage(botToken, chatId, text) {
     const token = String(botToken || '').trim();
     const chat = String(chatId || '').trim();
     if (!token || !chat) {
         return { ok: false, error: '缺少 Bot Token 或 Chat ID' };
+    }
+    if (!isSafeBotToken(token)) {
+        return { ok: false, error: 'Telegram Bot Token 格式无效' };
     }
     if (activeRequests >= MAX_ACTIVE_REQUESTS) return { ok: false, error: 'Telegram 通知繁忙，请稍后重试' };
     activeRequests++;

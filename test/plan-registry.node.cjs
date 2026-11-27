@@ -17,7 +17,8 @@ test('public/admin pages offer all four plans and their JavaScript compiles', ()
         const html = fs.readFileSync(require.resolve(`../public/${page}.html`), 'utf8');
         for (const plan of registry.PLAN_TYPES) assert.ok(html.includes(plan));
     }
-    for (const file of ['app.js', 'admin.js']) new vm.Script(fs.readFileSync(require.resolve(`../public/${file}`), 'utf8'));
+    for (const file of ['app.js', 'admin.js', 'admin-login.js']) new vm.Script(fs.readFileSync(require.resolve(`../public/${file}`), 'utf8'));
     const login = fs.readFileSync(require.resolve('../public/admin-login.html'), 'utf8');
+    assert.ok(login.includes('/admin-login.js'));
     for (const match of login.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) if (!/\bsrc=/.test(match[1])) new vm.Script(match[2]);
 });

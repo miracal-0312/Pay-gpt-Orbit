@@ -13,9 +13,15 @@ const LOGIN_MAX_ATTEMPTS = 5;
 const LOGIN_LOCK_MS = 30 * 60 * 1000;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const TG_CODE_MAX_ATTEMPTS = 5;
+const TG_CODE_RESEND_MS = 60 * 1000;
+const TG_CODE_MAX_SENDS = 3;
 
 const loginAttempts = new Map();
 const tgLoginCodes = new Map();
+// Login challenges are single use: a verified challenge cannot mint a second token.
+const consumedChallenges = new Map();
+// The last accepted TOTP time step per secret prevents replay inside the drift window.
+const usedTotpSteps = new Map();
 const MAX_AUTH_ENTRIES = 10000;
 let nextCacheCleanupAt = 0;
 function pruneAuthCaches(now = Date.now()) {
@@ -25,6 +31,12 @@ function pruneAuthCaches(now = Date.now()) {
         if (now >= Math.max(entry.firstAt + LOGIN_WINDOW_MS, entry.lockedUntil || 0)) loginAttempts.delete(key);
     }
     for (const [key, entry] of tgLoginCodes) if (now >= entry.exp) tgLoginCodes.delete(key);
+    for (const [key, exp] of consumedChallenges) if (now >= exp) consumedChallenges.delete(key);
+    for (const [key, entry] of usedTotpSteps) if (now >= entry.exp) usedTotpSteps.delete(key);
+}
+
+function authError(message, status = 429) {
+    return Object.assign(new Error(message), { status });
 }
 
 function resolveAdminTokenSecret() {
@@ -132,7 +144,17 @@ function issueLoginChallenge({ email, passwordVersion, ip, fingerprint }) {
 }
 
 function verifyLoginChallenge(token) {
-    return verifySignedToken(token, { expectedSub: 'admin_login_challenge' });
+    const payload = verifySignedToken(token, { expectedSub: 'admin_login_challenge' });
+    if (!payload || consumedChallenges.has(String(payload.cid || ''))) return null;
+    return payload;
+}
+
+function consumeLoginChallenge(challenge) {
+    const cid = String(challenge?.cid || '');
+    if (!cid) return;
+    pruneAuthCaches();
+    consumedChallenges.set(cid, Math.max(Date.now() + 1000, Number(challenge.exp) || Date.now() + CHALLENGE_TTL_MS));
+    tgLoginCodes.delete(cid);
 }
 
 function issueSecondaryToken(secondaryPasswordVersion, ip = '') {
@@ -162,7 +184,8 @@ function normalizeEmail(email) {
 }
 
 function checkLoginRateLimit(ip) {
-    const key = String(ip || 'unknown').slice(0, 45);
+    // Scoped keys such as "<ipv6>:secondary" must not be truncated into another scope.
+    const key = String(ip || 'unknown').slice(0, 80);
     const now = Date.now();
     pruneAuthCaches(now);
     if (!loginAttempts.has(key) && loginAttempts.size >= MAX_AUTH_ENTRIES) return { allowed: false, retryAfterSec: 60, reason: 'busy' };
@@ -254,19 +277,36 @@ function generateTotpSecret() {
     return base32Encode(crypto.randomBytes(20));
 }
 
-function verifyTotpCode(secret, token, window = 1) {
+function matchTotpStep(secret, token, window = 1) {
     const normalizedSecret = String(secret || '').replace(/\s+/g, '').toUpperCase();
-    const normalizedToken = String(token || '').trim().padStart(6, '0');
+    const normalizedToken = String(token || '').trim();
     if (!normalizedSecret || !/^\d{6}$/.test(normalizedToken)) {
-        return false;
+        return null;
     }
     const counter = Math.floor(Date.now() / 1000 / 30);
     for (let w = -window; w <= window; w += 1) {
-        if (generateTotpToken(normalizedSecret, counter + w) === normalizedToken) {
-            return true;
+        const candidate = generateTotpToken(normalizedSecret, counter + w);
+        if (safeEqualString(candidate, normalizedToken)) {
+            return counter + w;
         }
     }
-    return false;
+    return null;
+}
+
+function verifyTotpCode(secret, token, window = 1) {
+    return matchTotpStep(secret, token, window) !== null;
+}
+
+// Accept each time step at most once per secret, so an observed code cannot be replayed.
+function verifyTotpCodeOnce(secret, token, window = 1) {
+    const step = matchTotpStep(secret, token, window);
+    if (step === null) return false;
+    pruneAuthCaches();
+    const key = crypto.createHash('sha256').update(String(secret || '').replace(/\s+/g, '').toUpperCase()).digest('hex');
+    const previous = usedTotpSteps.get(key);
+    if (previous && step <= previous.step) return false;
+    usedTotpSteps.set(key, { step, exp: Date.now() + (window * 2 + 2) * 30000 });
+    return true;
 }
 
 function getTotpUri(email, secret, issuer = 'PlusPapay') {
@@ -281,11 +321,21 @@ function storeTelegramLoginCode(challengeId, code) {
     const key = String(challengeId || '').trim();
     if (!key) return;
     pruneAuthCaches();
-    if (!tgLoginCodes.has(key) && tgLoginCodes.size >= MAX_AUTH_ENTRIES) throw new Error('验证码请求过多，请稍后重试');
+    const now = Date.now();
+    const previous = tgLoginCodes.get(key);
+    if (!previous && tgLoginCodes.size >= MAX_AUTH_ENTRIES) throw authError('验证码请求过多，请稍后重试');
+    if (previous) {
+        const wait = previous.sentAt + TG_CODE_RESEND_MS - now;
+        if (wait > 0) throw authError(`验证码发送过于频繁，请 ${Math.ceil(wait / 1000)} 秒后再试`);
+        if (previous.sends >= TG_CODE_MAX_SENDS) throw authError('本次登录的验证码发送次数已达上限，请重新登录');
+    }
     tgLoginCodes.set(key, {
         code: String(code),
-        exp: Date.now() + TG_CODE_TTL_MS,
-        attempts: 0
+        exp: now + TG_CODE_TTL_MS,
+        sentAt: now,
+        sends: (previous?.sends || 0) + 1,
+        // Resending must not reset the wrong-code budget of this challenge.
+        attempts: previous?.attempts || 0
     });
 }
 
@@ -313,7 +363,7 @@ function verifyTelegramLoginCode(challengeId, inputCode) {
 }
 
 function generateTelegramLoginCode() {
-    return String(Math.floor(100000 + Math.random() * 900000));
+    return String(crypto.randomInt(100000, 1000000));
 }
 
 function getAvailable2faMethods(authConfig = {}, telegramSettings = {}) {
@@ -373,6 +423,7 @@ module.exports = {
     verifyAdminToken,
     issueLoginChallenge,
     verifyLoginChallenge,
+    consumeLoginChallenge,
     issueSecondaryToken,
     getClientMeta,
     normalizeEmail,
@@ -381,6 +432,7 @@ module.exports = {
     clearLoginAttempts,
     generateTotpSecret,
     verifyTotpCode,
+    verifyTotpCodeOnce,
     getTotpUri,
     storeTelegramLoginCode,
     verifyTelegramLoginCode,

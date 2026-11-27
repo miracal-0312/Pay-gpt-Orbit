@@ -1,9 +1,46 @@
 // Database transport, administrator security and Orbitcard configuration.
 'use strict';
+const crypto = require('node:crypto');
 const { createPasswordHash } = require('../http/admin-auth');
 const mysql = require('mysql2/promise');
 const orbitcardConfig = require('../config/orbitcard-config');
 const { normalizeAdminPaths } = require('../http/admin-paths');
+const SECRET_AAD = Buffer.from('Pay-gpt-Orbit:app_config_secret:v1');
+
+function secretEncryptionKey(env = process.env) {
+    const secret = String(env.ADMIN_TOKEN_SECRET || '');
+    if (Buffer.byteLength(secret) < 32) return null;
+    return crypto.hkdfSync('sha256', Buffer.from(secret), SECRET_AAD, Buffer.from('AES-256-GCM'), 32);
+}
+
+function encryptConfigSecret(value, env = process.env) {
+    const text = String(value || '');
+    if (!text) return '';
+    const key = secretEncryptionKey(env);
+    if (!key) return text;
+    const iv = crypto.randomBytes(12), cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+    cipher.setAAD(SECRET_AAD);
+    const encrypted = Buffer.concat([cipher.update(text, 'utf8'), cipher.final()]);
+    return ['gcm1', iv.toString('base64url'), cipher.getAuthTag().toString('base64url'), encrypted.toString('base64url')].join('.');
+}
+
+function decryptConfigSecret(value, env = process.env) {
+    const text = String(value || '');
+    if (!text) return '';
+    if (!/^gcm1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(text)) return text;
+    const key = secretEncryptionKey(env);
+    if (!key) return '';
+    try {
+        const [, ivText, tagText, contentText] = text.split('.');
+        const iv = Buffer.from(ivText, 'base64url'), tag = Buffer.from(tagText, 'base64url'), content = Buffer.from(contentText, 'base64url');
+        if (iv.length !== 12 || tag.length !== 16 || content.length > 4096) return '';
+        const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+        decipher.setAAD(SECRET_AAD); decipher.setAuthTag(tag);
+        return Buffer.concat([decipher.update(content), decipher.final()]).toString('utf8');
+    } catch (_) {
+        return '';
+    }
+}
 let pool = null;
 let lockConnections = 0;
 function boundedInteger(value, fallback, maximum) {
@@ -42,13 +79,29 @@ function getPool() {
             maxPreparedStatements: boundedInteger(process.env.DB_STATEMENT_CACHE_LIMIT, 256, 16000),
             queueLimit: DB_QUEUE_LIMIT,
             namedPlaceholders: false,
-            multipleStatements: true,
+            multipleStatements: false,
             enableKeepAlive: true,
             keepAliveInitialDelay: 10000
         });
     }
 
     return pool;
+}
+
+// Multi-statement execution is isolated to startup schema initialization.
+async function runSchemaScript(sql) {
+    const connection = await mysql.createConnection({
+        host: DB_HOST, port: DB_PORT, user: DB_USER, password: DB_PASSWORD,
+        database: DB_NAME, charset: 'utf8mb4', multipleStatements: true, connectTimeout: 10000
+    });
+    try {
+        const [result] = await connection.query(sql);
+        return result;
+    } catch (error) {
+        throw queryError(error);
+    } finally {
+        await connection.end().catch(() => connection.destroy());
+    }
 }
 
 async function openLockConnection() {
@@ -214,7 +267,7 @@ async function getTelegramConfig() {
     ];
     const map = await getConfigValues(keys);
     return {
-        bot_token: String(map.telegram_bot_token || '').trim(),
+        bot_token: decryptConfigSecret(map.telegram_bot_token || '').trim(),
         admin_chat_id: String(map.telegram_admin_chat_id || '').trim(),
         group_chat_id: String(map.telegram_group_chat_id || '').trim(),
         notify_admin: String(map.telegram_notify_admin || '0') === '1',
@@ -226,7 +279,12 @@ async function getTelegramConfig() {
 
 async function saveTelegramConfig(config = {}) {
     const existing = await getTelegramConfig();
-    const values = { telegram_bot_token: String(config.bot_token || '').trim() || existing.bot_token,
+    const rawToken = String(config.bot_token || '').trim();
+    if (rawToken && (!/^[A-Za-z0-9:_-]{1,256}$/.test(rawToken) || rawToken.includes('..'))) {
+        throw new Error('Telegram Bot Token 格式无效');
+    }
+    const nextToken = rawToken || existing.bot_token;
+    const values = { telegram_bot_token: encryptConfigSecret(nextToken),
         telegram_admin_chat_id: String(config.admin_chat_id || '').trim(), telegram_group_chat_id: String(config.group_chat_id || '').trim(),
         telegram_notify_admin: config.notify_admin ? '1' : '0', telegram_notify_group: config.notify_group ? '1' : '0',
         telegram_on_success: config.on_success ? '1' : '0', telegram_on_failure: config.on_failure ? '1' : '0' };
@@ -254,7 +312,7 @@ async function getAdminAuthConfig() {
         passwordVersion: Math.max(1, Number(map.admin_password_version || 1)),
         secondaryPasswordHash: String(map.admin_secondary_password_hash || ''),
         secondaryPasswordVersion: Math.max(1, Number(map.admin_secondary_password_version || 1)),
-        totpSecret: String(map.admin_totp_secret || ''),
+        totpSecret: decryptConfigSecret(map.admin_totp_secret || ''),
         totpEnabled: String(map.admin_totp_enabled || '0') === '1',
         notifyAdminLogin: String(map.telegram_on_admin_login || '1') !== '0',
         login2faMode: ['either', 'totp', 'telegram'].includes(String(map.admin_2fa_login_mode || '').trim().toLowerCase())
@@ -306,7 +364,7 @@ async function updateAdminSecondaryPassword(password) {
 }
 
 async function saveAdminTotpConfig({ secret, enabled }) {
-    await saveConfigValues({ admin_totp_secret: String(secret || ''), admin_totp_enabled: enabled ? '1' : '0' });
+    await saveConfigValues({ admin_totp_secret: encryptConfigSecret(String(secret || '')), admin_totp_enabled: enabled ? '1' : '0' });
 }
 
 async function insertAdminLoginLog({
@@ -362,4 +420,4 @@ async function updateAdminPassword(password) {
         passwordVersion: nextVersion
     };
 }
-module.exports = { getPool, openLockConnection, createPasswordHash, runQuery, runExecute, withTransaction, ensureGptApiConfigDefaults, getGptApiConfig, saveGptApiConfig, ensureColumn, getAppConfigValue, getConfigValues, saveConfigValues, getTelegramConfig, saveTelegramConfig, getMaintenanceModeState, getAdminAuthConfig, saveAdmin2faLoginMode, getAdminPaths, saveAdminPaths, updateAdminEmail, updateAdminSecondaryPassword, saveAdminTotpConfig, insertAdminLoginLog, listAdminLoginLogs, updateAdminPassword, close: async () => { if (pool) await pool.end(); }, connectionInfo: { host: DB_HOST, port: DB_PORT, database: DB_NAME, user: DB_USER } };
+module.exports = { getPool, openLockConnection, runSchemaScript, createPasswordHash, runQuery, runExecute, withTransaction, ensureGptApiConfigDefaults, getGptApiConfig, saveGptApiConfig, ensureColumn, getAppConfigValue, getConfigValues, saveConfigValues, getTelegramConfig, saveTelegramConfig, getMaintenanceModeState, getAdminAuthConfig, saveAdmin2faLoginMode, getAdminPaths, saveAdminPaths, updateAdminEmail, updateAdminSecondaryPassword, saveAdminTotpConfig, insertAdminLoginLog, listAdminLoginLogs, updateAdminPassword, close: async () => { if (pool) await pool.end(); }, connectionInfo: { host: DB_HOST, port: DB_PORT, database: DB_NAME, user: DB_USER } };

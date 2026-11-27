@@ -5,21 +5,22 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 function fixture() {
-    const html = fs.readFileSync(require.resolve('../public/admin-login.html'), 'utf8');
+    const script = fs.readFileSync(require.resolve('../public/admin-login.js'), 'utf8');
     const nodes = new Map(), tokens = new Map([['plus_admin_secondary_token', 'old-secondary']]), calls = [], timers = new Map();
     let reply = async () => ({ ok: true, json: async () => ({ success: true, token: 'login-token', panelUrl: '/custom-admin' }) });
     const node = id => {
-        if (!nodes.has(id)) nodes.set(id, { value: '', disabled: false, style: {}, classList: { add() {}, remove() {}, toggle() {} }, focus() {} });
+        if (!nodes.has(id)) nodes.set(id, { value: '', disabled: false, hidden: false, style: {}, classList: { add() {}, remove() {}, toggle() {} }, focus() {}, setAttribute() {} });
         return nodes.get(id);
     };
-    const context = vm.createContext({ AbortController, document: { getElementById: node, querySelectorAll: () => [] },
+    const context = vm.createContext({ AbortController, Date, document: { getElementById: node, querySelectorAll: () => [] },
         navigator: { userAgent: 'test', language: 'zh-CN' }, screen: { width: 1, height: 1 },
         btoa: value => Buffer.from(value).toString('base64'), unescape, encodeURIComponent,
         localStorage: { getItem: key => tokens.get(key), setItem: (key, value) => tokens.set(key, value), removeItem: key => tokens.delete(key) },
         location: {}, setTimeout: fn => { timers.set(fn, fn); return fn; }, clearTimeout: id => timers.delete(id),
+        setInterval: () => 0, clearInterval: () => {},
         fetch: async (url, options) => { calls.push({ url, options }); return reply(options); }
     });
-    vm.runInContext(html.slice(html.indexOf('const TOKEN_KEY ='), html.indexOf("document.getElementById('stepLogin').addEventListener")), context);
+    vm.runInContext(script.slice(script.indexOf('const TOKEN_KEY ='), script.indexOf("document.getElementById('stepLogin').addEventListener")), context);
     return { node, calls, tokens, context, timers, reply: fn => { reply = fn; } };
 }
 

@@ -95,6 +95,18 @@ function getBearerToken(req) {
     return null;
 }
 
+// Every route that checks a stored password or code shares one failure budget per scope and IP.
+function beginCredentialAttempt(req, res, scope) {
+    const rate = adminAuth.checkLoginRateLimit(`${adminAuth.getClientMeta(req).ip}:${scope}`);
+    if (!rate.allowed) {
+        res.status(429).json({ success: false, message: `验证尝试过多，请 ${rate.retryAfterSec} 秒后再试` });
+        return null;
+    }
+    return rate;
+}
+function failCredentialAttempt(rate) { adminAuth.recordLoginFailure(rate.key, rate.entry); }
+function passCredentialAttempt(rate) { adminAuth.clearLoginAttempts(rate.key); }
+
 async function authenticateAdmin(req, res, next) {
     const token = getBearerToken(req);
     const payload = verifyAdminToken(token);
@@ -234,9 +246,13 @@ app.post('/api/admin/login/send-tg-code', handle(async (req, res) => {
     }
 
     await ensureStoreReady();
+    const authConfig = await store.getAdminAuthConfig();
+    const clientMeta = adminAuth.getClientMeta(req);
+    if (Number(challenge.pv) !== authConfig.passwordVersion || challenge.ip !== clientMeta.ip) {
+        return res.status(401).json({ success: false, message: '登录会话已失效，请重新登录' });
+    }
     const code = adminAuth.generateTelegramLoginCode();
     adminAuth.storeTelegramLoginCode(challenge.cid, code);
-    const clientMeta = adminAuth.getClientMeta(req);
     const sendResult = await sendTelegramLoginCode(store, code, {
         email: challenge.email,
         ip: clientMeta.ip || challenge.ip
@@ -245,7 +261,7 @@ app.post('/api/admin/login/send-tg-code', handle(async (req, res) => {
         return res.status(400).json({ success: false, message: sendResult.error || 'Telegram 验证码发送失败' });
     }
     return res.json({ success: true, message: '验证码已发送到管理员 Telegram' });
-}));
+}, error => error.status || 500));
 app.post('/api/admin/login/verify-2fa', handle(async (req, res) => {
     const challengeToken = String(req.body?.challengeToken || '').trim();
     const method = String(req.body?.method || '').trim().toLowerCase();
@@ -272,6 +288,10 @@ app.post('/api/admin/login/verify-2fa', handle(async (req, res) => {
     await ensureStoreReady();
     const authConfig = await store.getAdminAuthConfig();
     const telegramSettings = await store.getTelegramConfig();
+    // The challenge is bound to the password version and client address that passed step one.
+    if (Number(challenge.pv) !== authConfig.passwordVersion || challenge.ip !== clientMeta.ip) {
+        return res.status(401).json({ success: false, message: '登录会话已失效，请重新登录' });
+    }
     const methods = adminAuth.resolveLogin2faMethods(authConfig, telegramSettings);
     if (!methods.includes(method)) {
         return res.status(400).json({ success: false, message: '不支持的验证方式' });
@@ -279,7 +299,7 @@ app.post('/api/admin/login/verify-2fa', handle(async (req, res) => {
 
     const telegram = method === 'telegram';
     const verification = telegram ? adminAuth.verifyTelegramLoginCode(challenge.cid, code)
-        : { ok: adminAuth.verifyTotpCode(authConfig.totpSecret, code) };
+        : { ok: adminAuth.verifyTotpCodeOnce(authConfig.totpSecret, code) };
     if (!verification.ok) {
         adminAuth.recordLoginFailure(rate.key, rate.entry);
         const meta = { ...clientMeta, email: challenge.email };
@@ -294,18 +314,8 @@ app.post('/api/admin/login/verify-2fa', handle(async (req, res) => {
     }
 
     adminAuth.clearLoginAttempts(rate.key);
+    adminAuth.consumeLoginChallenge(challenge);
     return res.json(await finishLogin(authConfig, clientMeta, method));
-}));
-app.get('/api/public/admin-paths', handle(async (req, res) => {
-    await ensureStoreReady();
-    const paths = await store.getAdminPaths();
-    return res.json({
-        success: true,
-        loginPath: paths.loginPath,
-        panelPath: paths.panelPath,
-        loginUrl: buildAdminLoginUrl(paths),
-        panelUrl: buildAdminPanelUrl(paths)
-    });
 }));
 app.use('/api/admin', authenticateAdmin);
 require('./orbitcard-card-http')(app, { store, cardService, requireSecondaryAuth });
@@ -328,7 +338,7 @@ app.post('/api/admin/runtime-logs/clear', handle((req, res) => {
     runtimeLog.push({ jobKey: '', level: 'system', source: 'server', text: '运行日志显示缓存已清空，磁盘日志保留最近 15 天' });
     res.json({ success: true, message: '显示缓存已清空，持久化日志保留' });
 }));
-app.get('/api/admin/session', (req, res) => {
+app.get('/api/admin/session', handle(async (req, res) => {
     const age = Date.now() - Number(req.admin.iat || 0);
     const shouldRefresh = age >= ADMIN_REFRESH_AFTER_MS;
     let refreshedToken = null;
@@ -340,7 +350,8 @@ app.get('/api/admin/session', (req, res) => {
         payload = refreshed.payload;
     }
 
-    return res.json({
+    // Entry paths are only disclosed to an authenticated administrator.
+    return res.json(await attachAdminPaths({
         success: true,
         refreshed: shouldRefresh,
         token: refreshedToken,
@@ -348,8 +359,8 @@ app.get('/api/admin/session', (req, res) => {
         issuedAt: payload.iat,
         permissions: payload.permissions,
         email: payload.email || ''
-    });
-});
+    }));
+}));
 app.get('/api/admin/security/status', handle(async (req, res) => {
     await ensureStoreReady();
     const authConfig = await store.getAdminAuthConfig();
@@ -381,10 +392,13 @@ app.post('/api/admin/verify-secondary', handle(async (req, res) => {
     if (!password) {
         return res.status(400).json({ success: false, message: '请输入二级密码' });
     }
+    const rate = beginCredentialAttempt(req, res, 'secondary');
+    if (!rate) return;
 
     await ensureStoreReady();
     const authConfig = await store.getAdminAuthConfig();
     if (!verifyPassword(password, authConfig.secondaryPasswordHash)) {
+        failCredentialAttempt(rate);
         await logAdminSecurityEvent('secondary_failed', {
             ...clientMeta,
             email: req.admin?.email || authConfig.email,
@@ -392,6 +406,7 @@ app.post('/api/admin/verify-secondary', handle(async (req, res) => {
         });
         return res.status(401).json({ success: false, message: '二级密码错误' });
     }
+    passCredentialAttempt(rate);
 
     const { token, payload } = adminAuth.issueSecondaryToken(
         authConfig.secondaryPasswordVersion,
@@ -413,13 +428,14 @@ app.post('/api/admin/verify-secondary', handle(async (req, res) => {
         expiresAt: payload.exp
     });
 }));
-app.post('/api/admin/security/2fa-mode', handle(async (req, res) => {
+// Login security settings can redirect or weaken future logins, so they need a fresh secondary token.
+app.post('/api/admin/security/2fa-mode', requireSecondaryAuth, handle(async (req, res) => {
     const mode = String(req.body?.mode || '').trim().toLowerCase();
     await ensureStoreReady();
     const saved = await store.saveAdmin2faLoginMode(mode);
     res.json({ success: true, login2faMode: saved, message: '登录验证方式已保存' });
 }, 400));
-app.post('/api/admin/security/paths', handle(async (req, res) => {
+app.post('/api/admin/security/paths', requireSecondaryAuth, handle(async (req, res) => {
     await ensureStoreReady();
     const saved = await store.saveAdminPaths({
         loginPath: req.body?.loginPath,
@@ -438,8 +454,12 @@ app.post('/api/admin/security/paths', handle(async (req, res) => {
 app.post('/api/admin/2fa/setup', handle(async (req, res) => {
     await ensureStoreReady();
     const authConfig = await store.getAdminAuthConfig();
+    // An enabled authenticator is only removed through /2fa/disable, which checks password and code.
+    if (authConfig.totpEnabled) {
+        return res.status(409).json({ success: false, message: 'Authenticator 已启用；如需更换，请先输入登录密码和验证码关闭后再重新绑定' });
+    }
     let secret = String(authConfig.totpSecret || '').trim();
-    if (!secret || authConfig.totpEnabled) {
+    if (!secret) {
         secret = adminAuth.generateTotpSecret();
         await store.saveAdminTotpConfig({ secret, enabled: false });
     }
@@ -448,37 +468,56 @@ app.post('/api/admin/2fa/setup', handle(async (req, res) => {
         success: true,
         secret,
         otpauthUrl,
-        message: '请使用 Google Authenticator 扫码后输入验证码确认启用'
+        message: '请使用 Google Authenticator 扫码后输入登录密码和验证码确认启用'
     });
 }));
 app.post('/api/admin/2fa/confirm', handle(async (req, res) => {
     const code = String(req.body?.code || '').trim();
-    if (!code) {
-        return res.status(400).json({ success: false, message: '请输入 Authenticator 验证码' });
+    const currentPassword = String(req.body?.currentPassword || '');
+    if (!code || !currentPassword) {
+        return res.status(400).json({ success: false, message: '请输入登录密码和 Authenticator 验证码' });
     }
+    const rate = beginCredentialAttempt(req, res, 'password');
+    if (!rate) return;
     await ensureStoreReady();
     const authConfig = await store.getAdminAuthConfig();
+    if (authConfig.totpEnabled) {
+        return res.status(409).json({ success: false, message: 'Authenticator 已启用' });
+    }
     if (!authConfig.totpSecret) {
         return res.status(400).json({ success: false, message: '请先发起 2FA 绑定' });
     }
-    if (!adminAuth.verifyTotpCode(authConfig.totpSecret, code)) {
+    if (!verifyPassword(currentPassword, authConfig.passwordHash)) {
+        failCredentialAttempt(rate);
+        return res.status(400).json({ success: false, message: '登录密码错误' });
+    }
+    if (!adminAuth.verifyTotpCodeOnce(authConfig.totpSecret, code)) {
+        failCredentialAttempt(rate);
         return res.status(400).json({ success: false, message: '验证码错误，请重试' });
     }
+    passCredentialAttempt(rate);
     await store.saveAdminTotpConfig({ secret: authConfig.totpSecret, enabled: true });
+    await logAdminSecurityEvent('totp_enabled', { ...adminAuth.getClientMeta(req), email: req.admin?.email || authConfig.email, detail: 'Authenticator 已启用' });
     res.json({ success: true, message: 'Google Authenticator 已启用' });
 }));
 app.post('/api/admin/2fa/disable', handle(async (req, res) => {
     const currentPassword = String(req.body?.currentPassword || '');
     const code = String(req.body?.code || '').trim();
+    const rate = beginCredentialAttempt(req, res, 'password');
+    if (!rate) return;
     await ensureStoreReady();
     const authConfig = await store.getAdminAuthConfig();
     if (!verifyPassword(currentPassword, authConfig.passwordHash)) {
+        failCredentialAttempt(rate);
         return res.status(400).json({ success: false, message: '登录密码错误' });
     }
-    if (authConfig.totpEnabled && !adminAuth.verifyTotpCode(authConfig.totpSecret, code)) {
+    if (authConfig.totpEnabled && !adminAuth.verifyTotpCodeOnce(authConfig.totpSecret, code)) {
+        failCredentialAttempt(rate);
         return res.status(400).json({ success: false, message: 'Authenticator 验证码错误' });
     }
+    passCredentialAttempt(rate);
     await store.saveAdminTotpConfig({ secret: '', enabled: false });
+    await logAdminSecurityEvent('totp_disabled', { ...adminAuth.getClientMeta(req), email: req.admin?.email || authConfig.email, detail: 'Authenticator 已关闭' });
     res.json({ success: true, message: 'Google Authenticator 已关闭' });
 }));
 app.post('/api/admin/change-secondary-password', handle(async (req, res) => {
@@ -487,14 +526,18 @@ app.post('/api/admin/change-secondary-password', handle(async (req, res) => {
     if (!currentPassword) {
         return res.status(400).json({ success: false, message: '请输入当前二级密码' });
     }
-    if (newPassword.length < 6) {
-        return res.status(400).json({ success: false, message: '新二级密码至少 6 位' });
+    if (newPassword.length < 8 || newPassword.length > 128) {
+        return res.status(400).json({ success: false, message: '新二级密码需为 8–128 位' });
     }
+    const rate = beginCredentialAttempt(req, res, 'secondary');
+    if (!rate) return;
     await ensureStoreReady();
     const authConfig = await store.getAdminAuthConfig();
     if (!verifyPassword(currentPassword, authConfig.secondaryPasswordHash)) {
+        failCredentialAttempt(rate);
         return res.status(400).json({ success: false, message: '当前二级密码错误' });
     }
+    passCredentialAttempt(rate);
     await store.updateAdminSecondaryPassword(newPassword);
     res.json({ success: true, message: '二级密码已更新，敏感模块需重新验证' });
 }));
@@ -504,7 +547,7 @@ app.get('/api/admin/task-logs', handle(async (req, res) => {
     const tasks = await store.listAdminTaskLogs(limit);
     res.json({ success: true, tasks });
 }));
-app.post('/api/admin/telegram', handle(async (req, res) => {
+app.post('/api/admin/telegram', requireSecondaryAuth, handle(async (req, res) => {
     await ensureStoreReady();
     const body = req.body || {};
     await store.saveTelegramConfig({
@@ -517,7 +560,7 @@ app.post('/api/admin/telegram', handle(async (req, res) => {
         on_failure: Boolean(body.on_failure)
     });
     res.json({ success: true, message: 'Telegram 通知配置已保存' });
-}));
+}, 400));
 app.get('/api/admin/task-logs/:jobKey/audit', async (req, res) => {
     try {
         await runtimeLog.downloadTask(req.params.jobKey, res);
@@ -555,12 +598,12 @@ app.get('/api/admin/gpt-api', handle(async (req, res) => {
         }
     });
 }));
-app.post('/api/admin/gpt-api', handle(async (req, res) => {
+app.post('/api/admin/gpt-api', requireSecondaryAuth, handle(async (req, res) => {
     await ensureStoreReady();
     await store.saveGptApiConfig(req.body || {});
     res.json({ success: true, message: 'Orbitcard HMAC 代充配置已保存' });
 }, 400));
-app.post('/api/admin/gpt-api/test', handle(async (req, res) => {
+app.post('/api/admin/gpt-api/test', requireSecondaryAuth, handle(async (req, res) => {
     await ensureStoreReady();
     const body = req.body || {};
     const saved = await store.getGptApiConfig();
@@ -571,7 +614,7 @@ app.post('/api/admin/gpt-api/test', handle(async (req, res) => {
     let target;
     try { target = normalizeBaseUrl(merged.base_url); }
     catch (error) { return res.status(400).json({ success: false, message: error.message }); }
-    const result = await gptApi.testConnection(merged);
+    const result = await gptApi.testConnection({ ...merged, base_url: target });
     if (!result.success) {
         return res.status(400).json({ success: false, message: result.error || '连接失败', target, checks: result.checks || [] });
     }
@@ -613,20 +656,25 @@ app.post('/api/admin/change-password', handle(async (req, res) => {
         return res.status(400).json({ success: false, message: '请输入原密码' });
     }
 
-    if (newPassword.length < 6) {
-        return res.status(400).json({ success: false, message: '新密码至少 6 位' });
+    if (newPassword.length < 8 || newPassword.length > 128) {
+        return res.status(400).json({ success: false, message: '新密码需为 8–128 位' });
     }
+
+    const rate = beginCredentialAttempt(req, res, 'password');
+    if (!rate) return;
 
     await ensureStoreReady();
     const authConfig = await store.getAdminAuthConfig();
 
     if (!verifyPassword(currentPassword, authConfig.passwordHash)) {
+        failCredentialAttempt(rate);
         return res.status(400).json({ success: false, message: '原密码错误' });
     }
 
     if (verifyPassword(newPassword, authConfig.passwordHash)) {
         return res.status(400).json({ success: false, message: '新密码不能与原密码相同' });
     }
+    passCredentialAttempt(rate);
 
     await store.updateAdminPassword(newPassword);
     await logAdminSecurityEvent('password_changed', {
@@ -647,14 +695,19 @@ app.post('/api/admin/change-email', handle(async (req, res) => {
         return res.status(400).json({ success: false, message: '请输入当前登录密码' });
     }
 
+    const rate = beginCredentialAttempt(req, res, 'password');
+    if (!rate) return;
+
     await ensureStoreReady();
     const authConfig = await store.getAdminAuthConfig();
     if (!verifyPassword(currentPassword, authConfig.passwordHash)) {
+        failCredentialAttempt(rate);
         return res.status(400).json({ success: false, message: '当前登录密码错误' });
     }
     if (email === authConfig.email) {
         return res.status(400).json({ success: false, message: '新邮箱不能与当前邮箱相同' });
     }
+    passCredentialAttempt(rate);
 
     const updated = await store.updateAdminEmail(email);
     await logAdminSecurityEvent('admin_email_changed', {

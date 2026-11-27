@@ -6,27 +6,31 @@
     <title>后台登录 · YZWAI</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=yzwai">
     <link rel="stylesheet" href="/style.css">
+    <script src="/admin-login.js" defer></script>
 </head>
 <body class="login-page"><div class="login-layout"><aside class="login-brand-panel"><a href="/" class="brand-link"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M5 5l7 8 7-8M12 13v7" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span><span class="brand-name">YZWAI</span><span class="brand-caption">SUBSCRIPTION CONSOLE</span></span></a><div><h2>管理每一笔订阅，<br>掌握每一步进度。</h2><p>卡密、订单、支付卡片与链路日志，在一个工作空间内完成管理。</p></div><span class="login-footnote">YZWAI / ADMINISTRATION</span></aside><main class="login-card">
         <form id="stepLogin" class="step active">
             <h1>后台登录</h1>
             <p>使用管理员邮箱和密码登录。若已启用二次验证，登录后还需验证。</p>
             <label for="email">管理员邮箱</label>
-            <input id="email" type="email" placeholder="请输入管理员邮箱" autocomplete="username">
+            <input id="email" type="email" placeholder="请输入管理员邮箱" autocomplete="username" required>
             <label for="password">登录密码</label>
-            <input id="password" type="password" placeholder="请输入登录密码" autocomplete="current-password">
+            <div class="password-field">
+                <input id="password" type="password" placeholder="请输入登录密码" autocomplete="current-password" required>
+                <button id="togglePassword" type="button" class="password-toggle" aria-label="切换密码显示" aria-pressed="false">显示</button>
+            </div>
             <button id="loginBtn" type="submit">登录管理后台</button>
         </form>
 
         <form id="step2fa" class="step">
             <h1>二次验证</h1>
             <p id="step2faHint">请选择验证方式并输入验证码。</p>
-            <div id="methodTabs" class="method-tabs" style="display:none;"></div>
-            <div id="methodSingle" class="method-single" style="display:none;"></div>
+            <div id="methodTabs" class="method-tabs" hidden></div>
+            <div id="methodSingle" class="method-single" hidden></div>
             <div id="methodHint" class="method-hint"></div>
             <label for="code">验证码</label>
             <input id="code" type="text" inputmode="numeric" maxlength="8" placeholder="6 位验证码" autocomplete="one-time-code">
-            <button id="sendTgBtn" type="button" class="secondary" style="display:none;">发送 Telegram 验证码</button>
+            <button id="sendTgBtn" type="button" class="secondary" hidden>发送 Telegram 验证码</button>
             <button id="verifyBtn" type="submit">验证并登录</button>
             <button id="backBtn" type="button" class="secondary">返回</button>
         </form>
@@ -34,210 +38,5 @@
         <div id="message" class="message" role="status" aria-live="polite"></div>
         <div class="hint">登录失败 5 次将锁定 30 分钟。登录后可在「接单与安全」切换验证方式。</div>
         <a href="/" class="login-back">← 返回用户兑换页</a>
-    </main></div>
-
-    <script>
-        const TOKEN_KEY = 'plus_admin_token';
-        const SECONDARY_TOKEN_KEY = 'plus_admin_secondary_token';
-        const METHOD_LABELS = {
-            totp: 'Google Authenticator',
-            telegram: 'Telegram 验证码'
-        };
-        const METHOD_HINTS = {
-            totp: '请打开 Google Authenticator，输入当前 6 位动态码。',
-            telegram: '点击下方按钮发送验证码到管理员 Telegram，再输入 6 位数字。'
-        };
-        const state = { challengeToken: '', methods: [], selectedMethod: '' };
-        let adminPanelPath = '/admin';
-
-        async function loadAdminPaths() {
-            try {
-                const response = await fetch('/api/public/admin-paths');
-                const data = await response.json();
-                if (data.success) {
-                    adminPanelPath = data.panelUrl || `/${data.panelPath || 'admin'}`;
-                }
-            } catch (_) { }
-        }
-
-        function finishLogin(data) {
-            if (!data.token) throw new Error('登录响应缺少令牌，请重新登录');
-            localStorage.setItem(TOKEN_KEY, data.token);
-            localStorage.removeItem(SECONDARY_TOKEN_KEY);
-            location.href = data.panelUrl || data.panelPath || adminPanelPath;
-        }
-
-        async function submitLogin(buttonId, endpoint, body, onSuccess) {
-            const button = document.getElementById(buttonId);
-            if (button.disabled) return;
-            button.disabled = true;
-            setMessage('');
-            const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 30000);
-            try {
-                const response = await fetch(`/api/admin/login${endpoint}`, {
-                    method: 'POST', signal: controller.signal,
-                    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
-                });
-                const data = await response.json();
-                if (!response.ok || !data.success) throw new Error(data.message || '验证请求失败');
-                onSuccess(data);
-            } catch (error) {
-                setMessage(controller.signal.aborted ? '请求超时，请稍后重试' : error.message);
-            } finally {
-                clearTimeout(timeout);
-                button.disabled = false;
-            }
-        }
-
-        function getBrowserFingerprint() {
-            const parts = [
-                navigator.userAgent,
-                navigator.language,
-                screen.width,
-                screen.height,
-                Intl.DateTimeFormat().resolvedOptions().timeZone || ''
-            ];
-            return btoa(unescape(encodeURIComponent(parts.join('|')))).slice(0, 96);
-        }
-
-        function setMessage(text, isSuccess) {
-            const el = document.getElementById('message');
-            el.textContent = text || '';
-            el.className = 'message' + (isSuccess ? ' success' : '');
-        }
-
-        function showStep(name) {
-            document.querySelectorAll('.step').forEach((el) => el.classList.remove('active'));
-            document.getElementById(name === '2fa' ? 'step2fa' : 'stepLogin').classList.add('active');
-            document.getElementById(name === '2fa' ? 'code' : 'email').focus();
-        }
-
-        function updateMethodUi() {
-            const method = state.selectedMethod;
-            const hintEl = document.getElementById('methodHint');
-            const sendTgBtn = document.getElementById('sendTgBtn');
-            const codeInput = document.getElementById('code');
-
-            hintEl.textContent = METHOD_HINTS[method] || '请输入验证码';
-            sendTgBtn.style.display = method === 'telegram' ? 'block' : 'none';
-            codeInput.placeholder = method === 'totp' ? 'Google Authenticator 6 位码' : 'Telegram 6 位验证码';
-            codeInput.value = '';
-            setMessage('');
-        }
-
-        function selectMethod(method) {
-            if (!state.methods.includes(method)) return;
-            state.selectedMethod = method;
-            document.querySelectorAll('.method-tab').forEach((btn) => {
-                btn.classList.toggle('active', btn.dataset.method === method);
-            });
-            updateMethodUi();
-        }
-
-        function renderMethods(methods, defaultMethod) {
-            const tabs = document.getElementById('methodTabs');
-            const single = document.getElementById('methodSingle');
-            tabs.innerHTML = '';
-            state.methods = methods || [];
-            state.selectedMethod = defaultMethod && methods.includes(defaultMethod)
-                ? defaultMethod
-                : (methods[0] || '');
-
-            if (methods.length <= 1) {
-                tabs.style.display = 'none';
-                single.style.display = methods.length ? 'block' : 'none';
-                single.textContent = methods.length
-                    ? `验证方式：${METHOD_LABELS[methods[0]] || methods[0]}`
-                    : '';
-            } else {
-                tabs.style.display = 'flex';
-                single.style.display = 'none';
-                methods.forEach((method) => {
-                    const btn = document.createElement('button');
-                    btn.type = 'button';
-                    btn.className = 'method-tab' + (method === state.selectedMethod ? ' active' : '');
-                    btn.dataset.method = method;
-                    btn.textContent = METHOD_LABELS[method] || method;
-                    btn.onclick = () => selectMethod(method);
-                    tabs.appendChild(btn);
-                });
-            }
-            updateMethodUi();
-        }
-
-        async function verifyExistingToken() {
-            const token = localStorage.getItem(TOKEN_KEY);
-            if (!token) return;
-            try {
-                const response = await fetch('/api/admin/session', {
-                    headers: { Authorization: `Bearer ${token}` }
-                });
-                if (!response.ok) throw new Error('登录已失效');
-                const data = await response.json();
-                if (data.refreshed && data.token) {
-                    localStorage.setItem(TOKEN_KEY, data.token);
-                }
-                location.href = adminPanelPath;
-            } catch (_) {
-                localStorage.removeItem(TOKEN_KEY);
-                localStorage.removeItem(SECONDARY_TOKEN_KEY);
-            }
-        }
-
-        function login() {
-            const email = document.getElementById('email').value.trim();
-            const password = document.getElementById('password').value;
-            if (!email || !password) {
-                setMessage('请输入邮箱和密码');
-                return;
-            }
-            return submitLogin('loginBtn', '', { email, password, fingerprint: getBrowserFingerprint() }, data => {
-                if (data.requires2fa) {
-                    state.challengeToken = data.challengeToken;
-                    renderMethods(data.methods || [], data.defaultMethod || '');
-                    const modeHint = data.login2faMode === 'either' && (data.methods || []).length > 1
-                        ? '可在下方切换 Google Authenticator / Telegram 验证。'
-                        : '';
-                    document.getElementById('step2faHint').textContent =
-                        `账号 ${data.email || email} 需要二次验证。${modeHint}`;
-                    showStep('2fa');
-                    return;
-                }
-                finishLogin(data);
-            });
-        }
-
-        function sendTelegramCode() {
-            if (state.selectedMethod !== 'telegram') {
-                setMessage('请先切换到 Telegram 验证码');
-                return;
-            }
-            return submitLogin('sendTgBtn', '/send-tg-code', { challengeToken: state.challengeToken },
-                data => setMessage(data.message || '验证码已发送', true));
-        }
-
-        function verify2fa() {
-            const code = document.getElementById('code').value.trim();
-            if (!code) {
-                setMessage('请输入验证码');
-                return;
-            }
-            if (!state.selectedMethod) {
-                setMessage('请选择验证方式');
-                return;
-            }
-            return submitLogin('verifyBtn', '/verify-2fa', {
-                challengeToken: state.challengeToken, method: state.selectedMethod, code, fingerprint: getBrowserFingerprint()
-            }, finishLogin);
-        }
-
-        document.getElementById('stepLogin').addEventListener('submit', event => { event.preventDefault(); login(); });
-        document.getElementById('step2fa').addEventListener('submit', event => { event.preventDefault(); verify2fa(); });
-        document.getElementById('sendTgBtn').addEventListener('click', sendTelegramCode);
-        document.getElementById('backBtn').addEventListener('click', () => showStep('login'));
-
-        loadAdminPaths().then(() => verifyExistingToken());
-    </script>
-</body>
+    </main></div></body>
 </html>

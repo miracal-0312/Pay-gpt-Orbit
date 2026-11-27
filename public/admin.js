@@ -876,8 +876,29 @@ $('refreshIssues').onclick = () => perform(async () => { notice((await request('
 form('applyCardForm', applyCard);
 form('configForm', async () => { const result = await request('/api/admin/config', { max_concurrent_activations: Number($('maxConcurrent').value), maintenance_mode: $('maintenance').checked }); notice(result.message, 'success'); });
 form('twofaModeForm', async () => { const result = await request('/api/admin/security/2fa-mode', { mode: $('twofaMode').value }); notice(result.message, 'success'); await loadSecurity(); });
-$('setupTotp').onclick = () => perform(async () => { const data = await request('/api/admin/2fa/setup', {}); $('totpSecret').hidden = false; $('totpSecret').textContent = `请在 Authenticator 中手工添加密钥：\n${data.secret}\n\n${data.otpauthUrl}`; });
-form('confirmTotp', async () => { const data = await request('/api/admin/2fa/confirm', { code: $('totpCode').value }); $('totpSecret').textContent = ''; $('totpSecret').hidden = true; $('totpCode').value = ''; notice(data.message, 'success'); await loadSecurity(); });
+let pendingTotpSecret = '';
+$('setupTotp').onclick = () => perform(async () => {
+    const data = await request('/api/admin/2fa/setup', {});
+    pendingTotpSecret = data.secret || '';
+    $('totpSecret').hidden = false;
+    $('totpSecret').textContent = `请在 Authenticator 中手工添加密钥：\n${data.secret}\n\n${data.otpauthUrl}`;
+    if ($('copyTotpSecret')) $('copyTotpSecret').hidden = !pendingTotpSecret;
+});
+if ($('copyTotpSecret')) {
+    $('copyTotpSecret').onclick = () => perform(async () => {
+        if (!pendingTotpSecret) return;
+        await navigator.clipboard.writeText(pendingTotpSecret);
+        notice('Authenticator 密钥已复制', 'success');
+    });
+}
+form('confirmTotp', async () => {
+    const data = await request('/api/admin/2fa/confirm', { currentPassword: $('confirmTotpPassword').value, code: $('totpCode').value });
+    pendingTotpSecret = '';
+    $('totpSecret').textContent = ''; $('totpSecret').hidden = true;
+    if ($('copyTotpSecret')) $('copyTotpSecret').hidden = true;
+    $('confirmTotpPassword').value = ''; $('totpCode').value = '';
+    notice(data.message, 'success'); await loadSecurity();
+});
 form('disableTotp', async () => { const data = await request('/api/admin/2fa/disable', { currentPassword: $('disablePassword').value, code: $('disableCode').value }); $('disablePassword').value = ''; $('disableCode').value = ''; notice(data.message, 'success'); await loadSecurity(); });
 form('passwordForm', async () => { await request('/api/admin/change-password', { currentPassword: $('oldPassword').value, newPassword: $('newPassword').value }); logout(); });
 form('emailForm', async () => { await request('/api/admin/change-email', { email: $('newEmail').value, currentPassword: $('emailPassword').value }); logout(); });
@@ -1095,8 +1116,9 @@ document.addEventListener('click', event => {
 });
 perform(async () => {
     if (localStorage.getItem(SECONDARY_KEY)) $('unlockState').textContent = '验证已保存';
-    const paths = await (await fetch('/api/public/admin-paths')).json(); if (paths.success) loginUrl = paths.loginUrl;
-    const session = await request('/api/admin/session'); if (session.token) localStorage.setItem(TOKEN_KEY, session.token);
+    const session = await request('/api/admin/session');
+    if (session.loginUrl) loginUrl = session.loginUrl;
+    if (session.token) localStorage.setItem(TOKEN_KEY, session.token);
     await Promise.all([loadOverview(), loadSecurity()]);
     const initialView = location.hash.slice(1);
     if (initialView && initialView !== 'overview') selectView(initialView);

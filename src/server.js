@@ -72,6 +72,14 @@ const { run: runWorker } = require('./payments/payment-service')({ store, cardSe
     activeJobs, activeChallenges, waitingQueue, audit: entry => runtimeLog.push(entry), broadcast, log, notify });
 
 app.disable('x-powered-by');
+app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'");
+    next();
+});
 // Only named proxy addresses/subnets may supply the client IP; never trust arbitrary forwarded headers.
 if (process.env.TRUST_PROXY?.trim()) app.set('trust proxy', process.env.TRUST_PROXY.split(',').map(value => value.trim()).filter(Boolean));
 app.use(createRequestGuard());

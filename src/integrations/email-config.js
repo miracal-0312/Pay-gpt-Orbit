@@ -22,10 +22,39 @@ function string(value, label, maximum, { trim = true } = {}) {
     return trim ? value.trim() : value;
 }
 
+function isRestrictedIpv4(ip) {
+    const parts = ip.split('.').map(Number);
+    if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) return true;
+    const [a, b] = parts;
+    return a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b <= 127)
+        || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31)
+        || (a === 192 && b === 168) || a >= 224;
+}
+
+function isRestrictedIp(host) {
+    const normalized = host.toLowerCase();
+    const version = net.isIP(normalized);
+    if (version === 4) return isRestrictedIpv4(normalized);
+    if (version === 6) {
+        if (normalized === '::' || normalized === '::1') return true;
+        const mapped = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+        if (mapped) return isRestrictedIpv4(mapped[1]);
+        const head = parseInt(normalized.split(':')[0] || '0', 16);
+        if ((head & 0xfe00) === 0xfc00 || (head & 0xffc0) === 0xfe80 || (head & 0xff00) === 0xff00) return true;
+    }
+    return false;
+}
+
 function hostname(value) {
     const host = string(value, 'SMTP 服务器', 253).toLowerCase();
     if (!host) return '';
-    if (net.isIP(host)) return host;
+    if (net.isIP(host)) {
+        if (isRestrictedIp(host)) throw new EmailConfigError('SMTP 服务器不能使用内网、环回或保留 IP 地址');
+        return host;
+    }
+    if (host === 'localhost' || /\.(?:localhost|local|internal|home\.arpa)$/.test(host)) {
+        throw new EmailConfigError('SMTP 服务器不能使用本机或内网域名');
+    }
     if (!host.split('.').every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) {
         throw new EmailConfigError('SMTP 服务器必须填写主机名或 IP，不能填写 URL、路径或端口');
     }

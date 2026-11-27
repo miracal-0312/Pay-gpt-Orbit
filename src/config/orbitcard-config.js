@@ -1,10 +1,27 @@
 'use strict';
+const net = require('node:net');
 const { PLAN_TYPES, paymentPlan } = require('./plan-registry');
 const money = require('../orbitcard/orbitcard-money');
 
 const DEFAULT_BASE_URL = 'https://orbitcard.cc';
+const DEFAULT_ALLOWED_HOSTS = ['orbitcard.cc'];
 const PROTOCOL_VERSION = 'orbitcard-hmac-v1';
 const RETIRED_CONFIG_KEYS = ['gpt_api_provider', 'gpt_api_plan_key', 'gpt_api_country', 'gpt_api_currency'];
+
+function allowedHosts(env = process.env) {
+    const configured = String(env.ORBITCARD_ALLOWED_HOSTS || '').split(',')
+        .map(item => item.trim().toLowerCase().replace(/^\.+|\.+$/g, '')).filter(Boolean);
+    return [...new Set([...DEFAULT_ALLOWED_HOSTS, ...configured])];
+}
+
+function isAllowedOrbitcardHost(hostname, env = process.env) {
+    const host = String(hostname || '').trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+    if (!host || net.isIP(host) || host === 'localhost' || /\.(?:localhost|local|internal|home\.arpa)$/.test(host)) {
+        return false;
+    }
+    if (env.NODE_ENV !== 'production' && host.endsWith('.test')) return true;
+    return allowedHosts(env).some(allowed => host === allowed || host.endsWith(`.${allowed}`));
+}
 
 function openingChoices(value, kind) {
     if (!Array.isArray(value) || value.length > 200 || value.some(item => typeof item !== 'string'
@@ -49,10 +66,14 @@ function planPrice(cfg, planType) {
     catch (_) { return null; }
 }
 
-function normalizeBaseUrl(raw) {
+function normalizeBaseUrl(raw, env = process.env) {
     const url = new URL(String(raw || DEFAULT_BASE_URL).trim());
     if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || !['', '/'].includes(url.pathname)) {
         throw new Error('Orbitcard Base URL 必须为 HTTPS 根域名，例如 https://orbitcard.cc');
+    }
+    // Never forward server-side Orbitcard API credentials to arbitrary or internal hosts.
+    if (!isAllowedOrbitcardHost(url.hostname, env)) {
+        throw new Error('Orbitcard Base URL 必须位于允许的域名白名单内（默认 orbitcard.cc，自定义域名请在服务端配置 ORBITCARD_ALLOWED_HOSTS）');
     }
     return url.origin;
 }
